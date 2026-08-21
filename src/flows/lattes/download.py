@@ -307,7 +307,8 @@ def generate_config(output_dir: str, list_path: str, cache_dir: str) -> str:
 @task
 def generate_list(researchers: List[Dict]) -> str:
     list_gen = LattesListGenerator()
-    list_path = os.path.abspath("lattes.list")
+    list_path = os.path.abspath(os.path.join("data", "lattes_run", "lattes.list"))
+    os.makedirs(os.path.dirname(list_path), exist_ok=True)
     list_gen.generate_from_db(list_path, researchers)
     return list_path
 
