@@ -15,7 +15,7 @@ from src.notifications.telegram import telegram_flow_state_handlers
 
 LATTES_ID_RE = re.compile(r"(?<!\d)\d{16}(?!\d)")
 DEFAULT_LATTES_PREFETCH_WORKERS = 3
-LATTES_PLAYWRIGHT_NAV_TIMEOUT_MS = 50_000
+LATTES_PLAYWRIGHT_NAV_TIMEOUT_MS = 120_000
 LATTES_PREFETCH_ENABLED_ENV = "HORIZON_LATTES_PREFETCH"
 LATTES_PREFETCH_WORKERS_ENV = "HORIZON_LATTES_DOWNLOAD_WORKERS"
 LattesDownloader = Callable[[str, str], None]
@@ -171,6 +171,7 @@ def patch_script_lattes_runtime(chrome_binary: str | None = None) -> None:
             rob.context.set_default_navigation_timeout(
                 LATTES_PLAYWRIGHT_NAV_TIMEOUT_MS
             )
+            rob.context.set_default_timeout(LATTES_PLAYWRIGHT_NAV_TIMEOUT_MS)
             rob.collect_html_cvs(0, None)
         finally:
             if getattr(rob, "browser", None):
