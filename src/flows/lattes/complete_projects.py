@@ -1,6 +1,7 @@
 from loguru import logger
 from prefect import flow
 
+from src.core.logic.step_timer import StepTimer
 from src.flows.lattes.download import download_lattes_flow
 from src.flows.lattes.projects import ingest_lattes_projects_flow
 from src.notifications.telegram import telegram_flow_state_handlers
@@ -15,13 +16,17 @@ def lattes_complete_flow():
     """
     logger.info(">>> Starting Lattes Complete Pipeline")
 
-    logger.info(">>> Step 1: Downloading Lattes Curricula")
-    download_lattes_flow()
+    timer = StepTimer("Lattes Complete Pipeline (projects)")
+    timer.start()
 
-    logger.info(">>> Step 2: Ingesting Lattes Projects")
-    ingest_lattes_projects_flow()
+    with timer.track("download_lattes"):
+        download_lattes_flow()
+
+    with timer.track("ingest_projects"):
+        ingest_lattes_projects_flow()
 
     logger.info(">>> Lattes Complete Pipeline Finished successfully.")
+    timer.summary()
 
 
 if __name__ == "__main__":
