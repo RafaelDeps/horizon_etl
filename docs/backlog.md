@@ -116,3 +116,11 @@ Mapping Epics -> User Stories -> Tasks status.
   PDF real em 10/08/2026 não têm mais arquivo anexado no portal (PJ 9760, 9742,
   9720, 9702, 9674, 9642, 9628, 9608). Nenhuma correção de código recupera isso —
   é questão de dado, para quem administra o SigPesq. Status: Ready.
+- **TD-007 — `lattes_advisorships` roda perto do teto de tempo**: a fase percorre
+  112 currículos Lattes em laço sequencial, um a um, cada um instanciando
+  controladores e consultando o banco. Durações medidas no Prefect: 1346, 1350,
+  1360, 1398, 1409 e **1741 s** — esta última a 59 segundos do limite de 1800 s
+  então vigente, e já houve estouro em máquina mais lenta. O limite foi elevado
+  para 3600 s em 26/08 como paliativo. A correção real é paralelizar o laço, como
+  o `lattes_download` já faz com `ThreadPoolExecutor`; a margem volta a encolher
+  conforme o instituto cresce. Status: Ready.

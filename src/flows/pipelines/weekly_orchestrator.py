@@ -49,7 +49,12 @@ _PHASES = [
     ("cnpq", ["cnpq_sync"], 5400, False, "app"),
     ("lattes_download", ["lattes_download"], 5400, False, "app"),
     ("lattes_projects", ["ingest_lattes_projects"], 3600, False, "app"),
-    ("lattes_advisorships", ["lattes_advisorships"], 1800, False, "app"),
+    # 3600s, not 1800s: measured runs sit at 1350-1741s against the old 1800s
+    # ceiling -- one of them cleared it by 59 seconds. The phase walks 112 Lattes
+    # CVs sequentially, so the margin shrinks as the institute grows, and a
+    # slower machine already times out. Raising the ceiling buys room; the real
+    # fix is to parallelise the loop (see docs/backlog.md TD-007).
+    ("lattes_advisorships", ["lattes_advisorships"], 3600, False, "app"),
     ("enrich_projects", ["enrich_projects"], 900, False, "app"),
     ("export_canonical", ["export_canonical"], 1800, True, "app"),
     ("knowledge_areas_mart", ["ka_mart"], 900, False, "app"),

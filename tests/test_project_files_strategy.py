@@ -228,3 +228,21 @@ def test_summary_counters_sum_to_examined():
         counters["examined"] += 1
 
     assert counters["examined"] == sum(counters[n] for n in OUTCOMES)
+
+
+def test_stale_library_message_hands_over_the_fix():
+    """A colleague lost time to a bare ModuleNotFoundError from this import.
+
+    The cause -- pip skipping the upgrade because the new branch kept version
+    0.3.2 -- was documented in the feature's research notes, which is exactly
+    where nobody looks while a pipeline is broken. The message must carry the
+    command instead.
+    """
+    from src.adapters.sources.sigpesq.project_files_strategy import (
+        AGENT_SIGPESQ_SHA,
+        STALE_LIBRARY_HELP,
+    )
+
+    assert "--force-reinstall" in STALE_LIBRARY_HELP
+    assert AGENT_SIGPESQ_SHA in STALE_LIBRARY_HELP, "must pin the exact commit"
+    assert "already satisfied" in STALE_LIBRARY_HELP, "must explain the silence"

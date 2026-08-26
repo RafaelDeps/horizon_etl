@@ -97,13 +97,42 @@ _DISCOVER_JS = """(args) => {
 }"""
 
 
+AGENT_SIGPESQ_SHA = "8f41f7a9504e3f281a342d3e449ace03574b5b13"
+
+# The branch that adds the project-file download did NOT bump the package
+# version: it is still 0.3.2, same as the release it supersedes. So on a machine
+# that already had the old version, `pip install -r requirements.txt` reports
+# "already satisfied" and installs nothing -- silently. The phase then dies on an
+# import error that says nothing about the real cause. Hand over the fix instead.
+STALE_LIBRARY_HELP = (
+    "agent_sigpesq is installed but does not contain the project-file download.\n"
+    "Your copy is the old release. Because the new branch kept version 0.3.2, pip\n"
+    "considers the requirement already satisfied and skips the upgrade in silence.\n"
+    "\n"
+    "Reinstall it, forcing the update:\n"
+    "\n"
+    "  .venv/bin/pip install --force-reinstall --no-deps \\\n"
+    '    "agent_sigpesq[extract] @ git+https://github.com/ifesserra-lab/'
+    f'sigpesq_agent.git@{AGENT_SIGPESQ_SHA}"\n'
+    "\n"
+    "Then confirm:\n"
+    "\n"
+    "  .venv/bin/python -c "
+    '"from agent_sigpesq.strategies import ProjectFilesDownloadStrategy"'
+)
+
+
 def _build_strategy_class():
     """Builds the subclass lazily so importing this module never needs the lib."""
-    from agent_sigpesq.strategies.project_files_strategy import (  # noqa: WPS433
-        MODAL_CLOSE,
-        RESUMO_BTN,
-        ProjectFilesDownloadStrategy,
-    )
+    try:
+        from agent_sigpesq.strategies.project_files_strategy import (  # noqa: WPS433
+            MODAL_CLOSE,
+            RESUMO_BTN,
+            ProjectFilesDownloadStrategy,
+        )
+    except ImportError as exc:
+        logger.error(STALE_LIBRARY_HELP)
+        raise ImportError(STALE_LIBRARY_HELP) from exc
 
     class ResilientProjectFilesStrategy(ProjectFilesDownloadStrategy):
         """Same download flow as the library, with attachment discovery replaced."""
