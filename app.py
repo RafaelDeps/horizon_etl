@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from src.core.logic.pii_session_hook import install_lgpd_session_hooks
+from src.core.logic.prefect_runtime import configure_local_prefect_runtime
 from src.flows.all import ingest_all_sources_flow
 from src.flows.cnpq.groups import sync_cnpq_groups_flow
 from src.flows.exports.canonical_data import export_canonical_data_flow
@@ -46,6 +47,7 @@ load_dotenv()
 os.environ.setdefault("PREFECT_API_URL", "http://127.0.0.1:4200/api")
 
 install_lgpd_session_hooks()
+configure_local_prefect_runtime()
 
 
 def main():

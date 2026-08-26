@@ -17,7 +17,7 @@ from src.notifications.telegram import telegram_flow_state_handlers
 
 
 @task(name="Ingest Lattes Advisorships for File", cache_policy=NO_CACHE)
-def ingest_advisorships_file_task(file_path: str):
+def ingest_advisorships_file_task(file_path: str, loader: ProjectLoader):
     try:
         logger = get_run_logger()
     except Exception:
@@ -75,10 +75,8 @@ def ingest_advisorships_file_task(file_path: str):
 
     logger.info(f"Processing {len(advisorships)} advisorships for {json_name}...")
 
-    # 3. Ingest with Strategy & ProjectLoader
-    mapping_strategy = LattesAdvisorshipMappingStrategy(json_name)
-    loader = ProjectLoader(mapping_strategy=mapping_strategy)
-
+    # 3. Ingest with shared loader (avoids re-creating 5 controllers per researcher)
+    loader.mapping_strategy = LattesAdvisorshipMappingStrategy(json_name)
     loader.process_records(advisorships, source_file=file_path)
 
 
@@ -95,8 +93,11 @@ def ingest_lattes_advisorships_flow():
         logger.warning(f"No JSON files found in {base_dir}")
         return
 
+    mapping_strategy = LattesAdvisorshipMappingStrategy("")
+    loader = ProjectLoader(mapping_strategy=mapping_strategy)
+
     for json_file in json_files:
-        ingest_advisorships_file_task(json_file)
+        ingest_advisorships_file_task(json_file, loader)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ gracefully without failing the weekly run.
 
 import subprocess
 import sys
+import time
 from typing import Optional
 
 from loguru import logger
@@ -49,7 +50,7 @@ _PHASES = [
     ("cnpq", ["cnpq_sync"], 5400, False, "app"),
     ("lattes_download", ["lattes_download"], 5400, False, "app"),
     ("lattes_projects", ["ingest_lattes_projects"], 3600, False, "app"),
-    ("lattes_advisorships", ["lattes_advisorships"], 1800, False, "app"),
+    ("lattes_advisorships", ["lattes_advisorships"], 3600, False, "app"),
     ("enrich_projects", ["enrich_projects"], 900, False, "app"),
     ("export_canonical", ["export_canonical"], 1800, True, "app"),
     ("knowledge_areas_mart", ["ka_mart"], 900, False, "app"),
@@ -100,6 +101,16 @@ def _describe_rc(rc: Optional[int]) -> str:
     return f"exit {rc}"
 
 
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(seconds, 60)
+    if m < 60:
+        return f"{int(m)}m {s:.0f}s"
+    h, m = divmod(m, 60)
+    return f"{int(h)}h {int(m)}m {s:.0f}s"
+
+
 def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
     if mode == "module":
         # Read-only report modules — run directly, no app.py LGPD hook needed.
@@ -112,20 +123,23 @@ def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
         elif argv_tail[0] == "export_canonical":
             argv.append(output_dir)
     logger.info("▶ phase '{}': {}", name, " ".join(argv[1:]))
+    t0 = time.time()
     try:
         proc = subprocess.run(argv, timeout=timeout)
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         logger.error("phase '{}' timed out after {}s", name, timeout)
         rc = None
+    elapsed = round(time.time() - t0, 2)
     ok = rc == 0
     log = logger.info if ok else logger.error
-    log("phase '{}' finished: {}", name, _describe_rc(rc))
+    log("phase '{}' finished: {} ({})", name, _describe_rc(rc), _fmt_duration(elapsed))
     return {
         "name": name,
         "ok": ok,
         "rc": rc,
         "critical": bool(argv_tail and _critical(name)),
+        "duration_s": elapsed,
     }
 
 
@@ -143,7 +157,11 @@ def _notify(results, crit_failed):
     lines = [head, ""]
     for r in results:
         mark = "✓" if r["ok"] else "✗"
-        lines.append(f"{mark} {r['name']} — {_describe_rc(r['rc'])}")
+        lines.append(
+            f"{mark} {r['name']} — {_fmt_duration(r['duration_s'])} ({_describe_rc(r['rc'])})"
+        )
+    total = sum(r["duration_s"] for r in results)
+    lines.append(f"\nTotal: {_fmt_duration(total)}")
     if crit_failed:
         lines.append("")
         lines.append(
@@ -165,10 +183,19 @@ def run_weekly(
     crit_failed = [r for r in failed if r["critical"]]
 
     logger.info("=== Weekly pipeline summary ===")
+    width = max(len(r["name"]) for r in results) if results else 0
     for r in results:
+        mark = "✓" if r["ok"] else "✗"
         logger.info(
-            "  {} {} ({})", "✓" if r["ok"] else "✗", r["name"], _describe_rc(r["rc"])
+            "  {} {:{}} {} ({})",
+            mark,
+            r["name"],
+            width,
+            _fmt_duration(r["duration_s"]),
+            _describe_rc(r["rc"]),
         )
+    total = sum(r["duration_s"] for r in results)
+    logger.info("  {:} {:{}} {}", "", "TOTAL", width, _fmt_duration(total))
 
     try:
         _notify(results, crit_failed)
