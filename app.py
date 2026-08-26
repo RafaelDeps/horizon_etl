@@ -270,6 +270,38 @@ def main():
             logger.info("Executing Flow: Enrich SigPesq Projects")
             enrich_projects_flow()
 
+        if flow_to_run == "mark_reviewed":
+            # Operational utility, not ingestion: records that a person checked
+            # an auto-created initiative, which is the ONLY way its review flag
+            # comes off.
+            #
+            #   python app.py mark_reviewed <initiative_id> <reviewer>
+            #
+            # Use a NON-PERSONAL identifier for <reviewer> -- registration
+            # number or initials. It travels into the exported catalogue, and
+            # the project forbids personal data such as e-mail in any output.
+            from src.core.logic.project_enrichment import ProjectEnrichmentLoader
+
+            if len(sys.argv) < 4:
+                logger.error(
+                    "Usage: python app.py mark_reviewed <initiative_id> <reviewer>"
+                )
+                sys.exit(2)
+            loader = ProjectEnrichmentLoader()
+            ok = loader.mark_reviewed(int(sys.argv[2]), sys.argv[3])
+            sys.exit(0 if ok else 1)
+
+        if flow_to_run == "backfill_enrichment_origin":
+            # Repairs a database whose payloads already lost the origin. Not part
+            # of the weekly run: it rebuilds the database each time, so this
+            # would be dead weight there.
+            from src.core.logic.project_enrichment import ProjectEnrichmentLoader
+
+            logger.info("Rebuilding initiative origin from the audit trail")
+            logger.info(
+                f"Done: {ProjectEnrichmentLoader().backfill_origin_from_tracking()}"
+            )
+
         if flow_to_run == "extract_project_files":
             from src.flows.sigpesq.project_files import extract_project_files_flow
 

@@ -21,6 +21,14 @@ FUZZY_THRESHOLD = 90.0
 NEW_FROM_DOCUMENT = "new_from_document"
 STRATEGY_PRIORITY = {"sigpesq_project_code": 0, "title_exact": 1, "title_fuzzy": 2}
 
+# Origin is HISTORY: how this initiative came to exist. It never changes.
+# match_strategy is about the CURRENT run and legitimately changes every time.
+# Deriving one from the other is what made the review flag evaporate: an
+# initiative created from a document matched by exact title on the next run, and
+# "exact title is trustworthy" silently overwrote "nobody has checked this yet".
+ORIGIN_NEW_FROM_DOCUMENT = NEW_FROM_DOCUMENT
+ORIGIN_MATCHED_EXISTING = "matched_existing"
+
 
 # --------------------------------------------------------------------------- #
 # Enrichment payload schema (validated on build; stored as JSON in enrichment_json)
@@ -45,6 +53,13 @@ class EnrichmentPayload(BaseModel):
     source: str
     project_code: Optional[str] = None
     match_strategy: str
+    # Permanent. Defaults to "matched existing" so payloads written before this
+    # field existed stay readable; their real origin is inferred from the
+    # recorded strategy (see origin_from_prior).
+    origin: str = ORIGIN_MATCHED_EXISTING
+    # Set only by a human review. Nothing in the pipeline may fill these in.
+    reviewed_at: Optional[str] = None
+    reviewed_by: Optional[str] = None
     needs_review: bool
     objetivos: Objetivos = Field(default_factory=Objetivos)
     cronograma: List[CronogramaItem] = Field(default_factory=list)
@@ -76,21 +91,74 @@ def compose_description(pj: Dict[str, Any]) -> Optional[str]:
     return geral or None
 
 
+def derive_needs_review(
+    *, origin: str, match_uncertain: bool, reviewed_at: Optional[str]
+) -> bool:
+    """Decides whether an initiative still needs human review.
+
+    Derived, never received: that is the whole point. Precedence is deliberate --
+    a human review settles the question, and until then an initiative invented
+    from an auto-extracted document always needs checking, no matter how
+    confidently this run's document matched it.
+    """
+    if reviewed_at:
+        return False
+    if origin == ORIGIN_NEW_FROM_DOCUMENT:
+        return True
+    return match_uncertain
+
+
+def origin_from_prior(prior: Optional[Dict[str, Any]], strategy: str) -> str:
+    """Works out the permanent origin, preferring what is already recorded.
+
+    Three cases, in order: an explicit origin in the previous payload wins; a
+    legacy payload without the field has its origin inferred from the strategy
+    it recorded; otherwise this run decides.
+    """
+    if prior:
+        recorded = prior.get("origin")
+        if recorded:
+            return recorded
+        if prior.get("match_strategy") == NEW_FROM_DOCUMENT:
+            return ORIGIN_NEW_FROM_DOCUMENT
+    return (
+        ORIGIN_NEW_FROM_DOCUMENT
+        if strategy == NEW_FROM_DOCUMENT
+        else ORIGIN_MATCHED_EXISTING
+    )
+
+
 def build_enrichment(
-    pj: Dict[str, Any], *, code: str, strategy: str, needs_review: bool
+    pj: Dict[str, Any],
+    *,
+    code: str,
+    strategy: str,
+    match_uncertain: bool,
+    prior: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assembles and VALIDATES the ``enrichment_json`` payload from a PJ document.
+
+    ``prior`` is the payload currently stored for this initiative, when there is
+    one. Origin and review state are carried forward from it, so re-running the
+    phase can never quietly downgrade "nobody has checked this" into "trusted".
 
     Returns a plain dict (``EnrichmentPayload.model_dump``); raises
     ``pydantic.ValidationError`` on a malformed document so the row is skipped
     (via the caller's savepoint) instead of persisting garbage.
     """
     meta = pj.get("_meta") or {}
+    origin = origin_from_prior(prior, strategy)
+    reviewed_at = (prior or {}).get("reviewed_at")
     payload = EnrichmentPayload(
         source=ProjectEnrichmentLoader.SOURCE_SYSTEM,
         project_code=code or None,
         match_strategy=strategy,
-        needs_review=needs_review,
+        origin=origin,
+        reviewed_at=reviewed_at,
+        reviewed_by=(prior or {}).get("reviewed_by"),
+        needs_review=derive_needs_review(
+            origin=origin, match_uncertain=match_uncertain, reviewed_at=reviewed_at
+        ),
         objetivos=pj.get("objetivos") or {},
         cronograma=pj.get("cronograma") or [],
         linha_pesquisa=pj.get("linha_pesquisa"),
@@ -320,6 +388,28 @@ class ProjectEnrichmentLoader:
             fuzzy_choices[init_id] = norm
         return by_name, fuzzy_choices
 
+    def _load_current_enrichment(self) -> Dict[int, Dict[str, Any]]:
+        """Payloads already stored, so origin and review state survive rewrites.
+
+        Read once up front, mirroring how descriptions are loaded: the write path
+        must not have to consult the audit trail per row.
+        """
+        rows = self._session.execute(
+            text(
+                "SELECT id, enrichment_json FROM initiatives "
+                "WHERE enrichment_json IS NOT NULL"
+            )
+        ).fetchall()
+        current: Dict[int, Dict[str, Any]] = {}
+        for init_id, raw in rows:
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(parsed, dict):
+                current[init_id] = parsed
+        return current
+
     def _load_current_descriptions(self) -> Dict[int, str]:
         rows = self._session.execute(
             text("SELECT id, description FROM initiatives")
@@ -377,6 +467,7 @@ class ProjectEnrichmentLoader:
         code_index = self._load_code_index()
         name_index, fuzzy_choices = self._load_research_project_names()
         descriptions = self._load_current_descriptions()
+        current_enrichment = self._load_current_enrichment()
         docs = self._read_documents(pj_dir)
         logger.info(
             f"{len(docs)} documents | {len(code_index)} approved-by-code | "
@@ -411,7 +502,7 @@ class ProjectEnrichmentLoader:
         # Keep it this way: reintroducing begin() breaks the phase outright, and
         # so does moving these writes above the index loads.
         try:
-            self._enrich_winners(winners, descriptions, stats)
+            self._enrich_winners(winners, descriptions, current_enrichment, stats)
             if ingest_new:
                 unmatched = [c for c in candidates if c.match is None]
                 stats.update(self._ingest_new(unmatched, name_index))
@@ -432,6 +523,7 @@ class ProjectEnrichmentLoader:
         self,
         winners: List[Candidate],
         descriptions: Dict[int, str],
+        current_enrichment: Dict[int, Dict[str, Any]],
         stats: Dict[str, int],
     ) -> None:
         for cand in winners:
@@ -442,7 +534,8 @@ class ProjectEnrichmentLoader:
                 cand.pj,
                 code=code,
                 strategy=strategy,
-                needs_review=cand.match.needs_review,
+                match_uncertain=cand.match.needs_review,
+                prior=current_enrichment.get(init_id),
             )
             new_desc = compose_description(cand.pj)
             current = descriptions.get(init_id, "").strip()
@@ -452,7 +545,7 @@ class ProjectEnrichmentLoader:
                 logger.info(
                     f"[dry-run][{strategy}] init {init_id} "
                     f"desc={'write' if write_desc else 'keep'} "
-                    f"review={cand.match.needs_review} (code={code or '-'})"
+                    f"review={enrichment['needs_review']} (code={code or '-'})"
                 )
             else:
                 written = self._write_row(
@@ -477,7 +570,7 @@ class ProjectEnrichmentLoader:
             stats[
                 f"by_{'code' if strategy == 'sigpesq_project_code' else strategy}"
             ] += 1
-            if cand.match.needs_review:
+            if enrichment["needs_review"]:
                 stats["needs_review"] += 1
             if write_desc and not current:
                 stats["desc_filled"] += 1
@@ -523,7 +616,7 @@ class ProjectEnrichmentLoader:
         pj = cand.pj
         code = normalize_project_code(pj.get("codigo"))
         enrichment = build_enrichment(
-            pj, code=code, strategy=NEW_FROM_DOCUMENT, needs_review=True
+            pj, code=code, strategy=NEW_FROM_DOCUMENT, match_uncertain=True
         )
         datas = pj.get("datas") or {}
         description = compose_description(pj)
@@ -568,6 +661,87 @@ class ProjectEnrichmentLoader:
         )
         logger.info(f"[new] initiative {new_id_box['id']} created: {name[:60]}")
         return True
+
+    # -------------------------------------------------- review & origin repair
+    def mark_reviewed(self, initiative_id: int, reviewed_by: str) -> bool:
+        """Records that a person checked this initiative, clearing the flag.
+
+        The ONLY way the flag comes off. ``reviewed_by`` should be a
+        non-personal identifier (registration number, initials) -- it travels
+        into the exported catalogue, and the constitution forbids e-mail in any
+        output.
+        """
+        rows = self._session.execute(
+            text("SELECT enrichment_json FROM initiatives WHERE id = :id"),
+            {"id": initiative_id},
+        ).fetchone()
+        if not rows or not rows[0]:
+            logger.warning("Initiative {} has no enrichment to review", initiative_id)
+            return False
+
+        payload = json.loads(rows[0])
+        payload["reviewed_at"] = datetime.now().isoformat()
+        payload["reviewed_by"] = reviewed_by
+        # Origin is history and survives the review; only the flag clears.
+        payload["needs_review"] = False
+
+        self._session.execute(
+            text("UPDATE initiatives SET enrichment_json = :j WHERE id = :id"),
+            {"j": json.dumps(payload, ensure_ascii=False), "id": initiative_id},
+        )
+        self._session.commit()
+        logger.info("Initiative {} marked reviewed by {}", initiative_id, reviewed_by)
+        return True
+
+    def backfill_origin_from_tracking(self) -> Dict[str, int]:
+        """Restores the origin of initiatives whose payload already lost it.
+
+        Deliberately NOT part of the pipeline: the weekly run rebuilds the
+        database from scratch, so this would be dead weight there. It exists for
+        a database that has already been overwritten, where only the audit trail
+        still remembers which initiatives were invented from a document.
+        """
+        rows = self._session.execute(
+            text(
+                """
+                SELECT DISTINCT em.canonical_entity_id
+                FROM entity_matches em
+                JOIN source_records sr ON sr.id = em.source_record_id
+                WHERE sr.source_system = :src
+                  AND em.match_strategy = :strategy
+                """
+            ),
+            {"src": self.SOURCE_SYSTEM, "strategy": NEW_FROM_DOCUMENT},
+        ).fetchall()
+
+        stats = {"candidates": len(rows), "repaired": 0, "already_ok": 0, "missing": 0}
+        for (init_id,) in rows:
+            found = self._session.execute(
+                text("SELECT enrichment_json FROM initiatives WHERE id = :id"),
+                {"id": init_id},
+            ).fetchone()
+            if not found or not found[0]:
+                stats["missing"] += 1
+                continue
+            payload = json.loads(found[0])
+            if payload.get("origin") == ORIGIN_NEW_FROM_DOCUMENT:
+                stats["already_ok"] += 1
+                continue
+            payload["origin"] = ORIGIN_NEW_FROM_DOCUMENT
+            payload["needs_review"] = derive_needs_review(
+                origin=ORIGIN_NEW_FROM_DOCUMENT,
+                match_uncertain=False,
+                reviewed_at=payload.get("reviewed_at"),
+            )
+            self._session.execute(
+                text("UPDATE initiatives SET enrichment_json = :j WHERE id = :id"),
+                {"j": json.dumps(payload, ensure_ascii=False), "id": init_id},
+            )
+            stats["repaired"] += 1
+
+        self._session.commit()
+        logger.info("Origin backfill finished: {}", stats)
+        return stats
 
     # -------------------------------------------------------------- write helpers
     def _write_row(self, fn) -> bool:

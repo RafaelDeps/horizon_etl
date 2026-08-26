@@ -11,14 +11,18 @@ from datetime import datetime
 import pytest
 
 from src.core.logic.project_enrichment import (
+    ORIGIN_MATCHED_EXISTING,
+    ORIGIN_NEW_FROM_DOCUMENT,
     Candidate,
     Match,
     build_enrichment,
     compose_description,
+    derive_needs_review,
     derive_status,
     is_ingestable,
     match_pj,
     normalize_project_code,
+    origin_from_prior,
     parse_sql_datetime,
     resolve_claims,
 )
@@ -70,7 +74,7 @@ def test_build_enrichment_shape():
             "arquivo": "PJ_1.pdf",
         },
     }
-    e = build_enrichment(pj, code="6020", strategy="title_fuzzy", needs_review=True)
+    e = build_enrichment(pj, code="6020", strategy="title_fuzzy", match_uncertain=True)
     assert e["project_code"] == "6020"
     assert e["match_strategy"] == "title_fuzzy"
     assert e["needs_review"] is True
@@ -81,7 +85,9 @@ def test_build_enrichment_shape():
 
 
 def test_build_enrichment_empty_code_becomes_none():
-    e = build_enrichment({}, code="", strategy="new_from_document", needs_review=True)
+    e = build_enrichment(
+        {}, code="", strategy="new_from_document", match_uncertain=True
+    )
     assert e["project_code"] is None
     # objetivos is validated/normalized by the Pydantic model
     assert e["objetivos"] == {"geral": None, "especificos": []}
@@ -98,7 +104,7 @@ def test_build_enrichment_rejects_malformed_payload():
             {"palavras_chave": {"nope": 1}},
             code="1",
             strategy="title_exact",
-            needs_review=False,
+            match_uncertain=False,
         )
 
 
@@ -262,3 +268,97 @@ def test_resolve_claims_tie_broken_by_path():
     winners, collisions = resolve_claims(cands)
     assert collisions == 1
     assert winners[0].path == "PJ_a.json"
+
+
+# --------------------------------------------------------------- derive_needs_review
+def test_document_born_initiative_always_needs_review():
+    """An initiative invented from an auto-extracted document is never trusted
+    on confidence alone -- not even when this run matched it by exact title."""
+    assert (
+        derive_needs_review(
+            origin=ORIGIN_NEW_FROM_DOCUMENT, match_uncertain=False, reviewed_at=None
+        )
+        is True
+    )
+
+
+def test_uncertain_match_needs_review():
+    assert (
+        derive_needs_review(
+            origin=ORIGIN_MATCHED_EXISTING, match_uncertain=True, reviewed_at=None
+        )
+        is True
+    )
+
+
+def test_confident_match_on_existing_initiative_does_not():
+    assert (
+        derive_needs_review(
+            origin=ORIGIN_MATCHED_EXISTING, match_uncertain=False, reviewed_at=None
+        )
+        is False
+    )
+
+
+def test_human_review_settles_it():
+    """A recorded review wins over everything, origin included."""
+    assert (
+        derive_needs_review(
+            origin=ORIGIN_NEW_FROM_DOCUMENT,
+            match_uncertain=True,
+            reviewed_at="2026-08-25T10:00:00",
+        )
+        is False
+    )
+
+
+# --------------------------------------------------------------- origin_from_prior
+def test_recorded_origin_wins():
+    prior = {"origin": ORIGIN_NEW_FROM_DOCUMENT, "match_strategy": "title_exact"}
+    assert origin_from_prior(prior, "title_exact") == ORIGIN_NEW_FROM_DOCUMENT
+
+
+def test_legacy_payload_infers_origin_from_recorded_strategy():
+    """Payloads written before the origin field existed are still readable."""
+    prior = {"match_strategy": "new_from_document"}
+    assert origin_from_prior(prior, "title_exact") == ORIGIN_NEW_FROM_DOCUMENT
+
+
+def test_without_prior_this_run_decides():
+    assert origin_from_prior(None, "new_from_document") == ORIGIN_NEW_FROM_DOCUMENT
+    assert origin_from_prior(None, "title_exact") == ORIGIN_MATCHED_EXISTING
+
+
+def test_build_enrichment_carries_origin_and_review_forward():
+    """The defect this feature fixes, at payload level.
+
+    Second run: same document, now matching an existing initiative by exact
+    title. The flag must NOT flip to False just because the match got confident.
+    """
+    pj = {"titulo": "P", "descricao": "d", "objetivos": {"geral": "g"}}
+    prior = {"origin": ORIGIN_NEW_FROM_DOCUMENT, "match_strategy": "new_from_document"}
+
+    payload = build_enrichment(
+        pj, code="1", strategy="title_exact", match_uncertain=False, prior=prior
+    )
+
+    assert payload["origin"] == ORIGIN_NEW_FROM_DOCUMENT
+    assert payload["needs_review"] is True
+    assert payload["match_strategy"] == "title_exact", "current run is still recorded"
+
+
+def test_build_enrichment_keeps_review_record():
+    pj = {"titulo": "P", "descricao": "d"}
+    prior = {
+        "origin": ORIGIN_NEW_FROM_DOCUMENT,
+        "reviewed_at": "2026-08-25T10:00:00",
+        "reviewed_by": "MAT-123",
+    }
+
+    payload = build_enrichment(
+        pj, code="1", strategy="title_exact", match_uncertain=False, prior=prior
+    )
+
+    assert payload["needs_review"] is False
+    assert payload["reviewed_by"] == "MAT-123"
+    assert payload["origin"] == ORIGIN_NEW_FROM_DOCUMENT, "review must not erase origin"
