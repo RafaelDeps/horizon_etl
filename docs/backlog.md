@@ -79,3 +79,40 @@ Mapping Epics -> User Stories -> Tasks status.
     - T-009 [Ops] Flow: Pending
 ### R4 - Analytics
   - R4 - Analytics: [x] Mart de Analytics (US-016)
+
+## Follow-ups técnicos — origem: `specs/004-fix-enrichment-transaction` (2026-08-24)
+
+- **TD-001 — Atomicidade real das gravações de enriquecimento**: no SQLite atual
+  o driver `pysqlite` confirma cada `SAVEPOINT` liberado quando ele é o primeiro
+  comando da transação, então as gravações de linha são efetivamente confirmadas
+  uma a uma e um `rollback()` posterior não as desfaz. A FR-004 daquela feature
+  fica parcialmente atendida. Mitigação exige configurar o engine
+  (`isolation_level=None` + listener de `BEGIN`), que hoje é criado dentro da
+  dependência externa `eo_lib` e compartilhado por todos os flows. Status: Ready.
+- **TD-002 — Fronteira transacional do `ensure_schema()`**: `run_migrations()` faz
+  `commit()` próprio no meio de `run()`, o que torna confusa a fronteira de
+  transação e foi o pano de fundo do defeito corrigido. Mover a execução de
+  migrações para a subida do aplicativo, junto da eventual adoção de Alembic
+  (o ADR-002 já registra a DDL em runtime como *stopgap*). Status: Ready.
+- **TD-003 — `make ci-check` não é executável hoje**: o alvo roda black, isort e
+  flake8 sobre todo o repositório e falha (58 arquivos seriam reformatados por
+  black, além de apontamentos de isort e flake8), enquanto o CI real verifica
+  apenas arquivos alterados e flake8 restrito a `E9,F63,F7,F82`. A constituição
+  cita `make ci-check` como portão mínimo e também menciona verificação de tipos
+  (mypy), que o alvo não executa. Alinhar constituição, Makefile e CI. Status:
+  Ready.
+- **TD-004 — Ferramentas de desenvolvimento não declaradas**: pytest, pytest-mock,
+  flake8, black e isort não constam do `requirements.txt`; o CI as instala
+  ad hoc. Um venv criado por `make setup` não consegue rodar `make test`.
+  Considerar um `requirements-dev.txt`. Status: Ready.
+- **TD-005 — `agent_sigpesq` não distingue "sem anexo" de "página ilegível"**: a
+  `ProjectFilesDownloadStrategy` emite a mesma mensagem nos dois casos. Investigação
+  em 25/08 confirmou que a leitura dela estava **correta** (os projetos realmente não
+  têm anexo; o `Repeater` vazio simplesmente não renderiza), mas foram necessárias
+  cinco sondagens manuais ao portal para provar isso. O ETL já resolveu do seu lado
+  (ver `specs/005-resilient-pdf-download`); vale sugerir a mesma distinção à
+  biblioteca. Status: Ready.
+- **TD-006 — Anexos ausentes no SigPesq**: oito projetos com documento extraído de
+  PDF real em 10/08/2026 não têm mais arquivo anexado no portal (PJ 9760, 9742,
+  9720, 9702, 9674, 9642, 9628, 9608). Nenhuma correção de código recupera isso —
+  é questão de dado, para quem administra o SigPesq. Status: Ready.

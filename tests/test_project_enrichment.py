@@ -1,4 +1,10 @@
-"""Unit tests for the pure (DB-free) logic of ProjectEnrichmentLoader."""
+"""Unit tests for the pure (DB-free) logic of ProjectEnrichmentLoader.
+
+The write path -- run() against a real Session -- is covered separately in
+tests/test_project_enrichment_db.py. Keep this file DB-free: the split exists
+because a Session lifecycle bug once survived precisely by living outside the
+reach of these tests.
+"""
 
 from datetime import datetime
 

@@ -53,3 +53,27 @@ Technical Story: O relatório Excel do SigPesq só traz um resumo raso dos proje
 ### Persistência C — tabela normalizada
 * Good: querytável, tipado.
 * Bad: mais invasivo (modelo/migração/ORM); adiado como follow-up.
+
+## Nota de correção (2026-08-24)
+
+A fase **nunca chegou a executar** desde a implementação original. O
+`ProjectEnrichmentLoader.run()` abria uma transação explícita depois que os
+carregamentos de índice já haviam aberto uma (autobegin do SQLAlchemy 2.0),
+levantando `InvalidRequestError: A transaction is already begun on this Session`
+antes de ler qualquer documento. Como a fase é não-crítica no orquestrador
+semanal, o pipeline seguia e reportava sucesso, e a falha ficava apenas numa linha
+de erro perdida no log.
+
+Consequência: os ganhos declarados acima ("70,6% → ~68% de descrições nulas
+preenchidas", objetivos/cronograma/linha/keywords passando a existir) **não se
+materializaram** — a auditoria do banco mostrava zero iniciativas com
+`enrichment_json`. Da mesma forma, a consequência "idempotente e reprodutível pelo
+pipeline (sem passo manual)" vale para o *consumo* dos documentos, mas não para a
+*produção* deles: os `PJ_*.json` continuam vindo de um processo externo executado
+manualmente, e não estão versionados neste repositório.
+
+Corrigido em `specs/004-fix-enrichment-transaction`, com teste de regressão em
+`tests/test_project_enrichment_db.py`. Ver `research.md` daquela feature para o
+diagnóstico completo, incluindo o achado de que a atomicidade por execução não é
+garantida no SQLite atual (o driver `pysqlite` confirma cada `SAVEPOINT`
+liberado) — registrado como follow-up.

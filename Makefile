@@ -29,8 +29,8 @@ PREFECT_DB_SERVICE ?= database
 .PHONY: help setup logs-dir \
 	db-clean db-init db-reset \
 	prefect-server prefect-stop prefect-status \
-	pipeline pipeline-log weekly-flows full-refresh \
-	ingest-sigpesq \
+	pipeline pipeline-log weekly-flows weekly-mistral full-refresh \
+	ingest-sigpesq extract-project-files \
 	ingest-lattes-download ingest-lattes-projects ingest-lattes-full \
 	sync-cnpq \
 	export-canonical export-knowledge-areas-mart export-initiatives-analytics-mart export-people-graph export-collaboration-graph export-researchers-collaboration-graph export-outside-ifes-collaboration-graph export-null-researchers-collaboration-graph export-students-collaboration-graph export-rg-membership-manifest \
@@ -119,10 +119,29 @@ full-refresh: db-reset prefect-server ## Reset DB and run full pipeline for all 
 weekly-flows: db-reset prefect-server ## Reset DB and run weekly source flows plus exports
 	@$(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
 
+# TEMPORÁRIO — ensaio, não é para uso em produção.
+# Igual ao weekly-flows, mais a fase de extração dos documentos de projeto
+# (download dos PDFs + Mistral), inserida logo antes do enrich_projects. Serve
+# para ver como o pipeline se comporta SE essa fase for promovida para o weekly
+# de verdade: isolamento de processo, timeout próprio e linha própria no resumo.
+# O weekly-flows continua intocado.
+# Use PROJECT_FILES_LIMIT=5 para um ensaio barato (limita os projetos processados).
+weekly-mistral: db-reset prefect-server ## [temporário] weekly-flows + extração Mistral, para ensaio
+	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" $(FLOW_PYTHON) app.py weekly_mistral "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
+
 # --- Ingestion ---
 
 ingest-sigpesq: prefect-server ## Ingest all SigPesq reports (groups, projects, advisorships)
 	@$(FLOW_PYTHON) app.py sigpesq
+
+# Produz os PJ_*.json que o enrich_projects consome. NÃO faz parte do weekly:
+# baixar centenas de PDFs e passá-los por LLM é lento e custa por documento,
+# enquanto planos de projeto quase não mudam. Rode sob demanda, quando entrar um
+# lote novo de projetos. As duas etapas pulam o que já existe, então uma nova
+# execução só paga pelo que falta. Exige MISTRAL_KEY no .env.
+# Use PROJECT_FILES_LIMIT=5 para um teste barato.
+extract-project-files: prefect-server ## Baixa os PDFs dos projetos e extrai PJ_*.json via Mistral (sob demanda)
+	@$(FLOW_PYTHON) app.py extract_project_files "$(PROJECT_FILES_LIMIT)"
 
 ingest-lattes-download: prefect-server ## Download Lattes curricula via scriptLattes
 	@$(FLOW_PYTHON) -m src.flows.lattes.download

@@ -6,6 +6,12 @@ __pycache__/
 data/*
 !data/exports/
 !data/exports/**
+# Documentos de projeto extraídos por LLM dos PDFs do SigPesq (PJ_*.json).
+# NÃO versionar: são insumo de entrada regenerável pelo agent_sigpesq e contêm
+# dados pessoais em claro (nome de coordenador e de equipe; e-mails só são
+# anonimizados na gravação em source_records, não no arquivo em disco).
+# Commitá-los colocaria esses dados no histórico do git, que é irreversível.
+data/exports/project_sigpesq_files_json/
 # Qualis reference data (public, no PII) — build input for the weekly
 # docentes/OpenAlex report phases; must be versioned so CI can run them.
 !data/reference/

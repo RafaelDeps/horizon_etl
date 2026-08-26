@@ -1,5 +1,5 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/003-workflow-ci-zip-exports/plan.md
+at specs/005-resilient-pdf-download/plan.md
 <!-- SPECKIT END -->

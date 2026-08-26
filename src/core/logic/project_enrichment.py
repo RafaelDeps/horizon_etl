@@ -366,7 +366,11 @@ class ProjectEnrichmentLoader:
     def run(self, pj_dir: str, *, ingest_new: bool = False) -> Dict[str, int]:
         """Reads the documents once, classifies them once, then enriches matched
         initiatives (deduplicated) and, if requested, ingests unmatched rich ones.
-        All writes share one transaction; a failing row is skipped via savepoint.
+
+        All writes join the session's ambient transaction (opened by the index
+        SELECTs) and are committed once at the end; a failing row is skipped via
+        savepoint. On error the session is rolled back and the exception
+        propagates. ``dry_run`` writes nothing and commits nothing.
         """
         self.ensure_schema()
 
@@ -398,17 +402,23 @@ class ProjectEnrichmentLoader:
             "errors": 0,
         }
 
-        transaction = None if self.dry_run else self._session.begin()
+        # NO explicit begin() here. The index loads above already ran SELECTs, and
+        # a SQLAlchemy Session autobegins on ANY execute() -- a SELECT included --
+        # so the session is always mid-transaction by this point and begin() would
+        # raise "A transaction is already begun on this Session". The writes join
+        # that ambient transaction instead: still one unit of work, and the
+        # per-row SAVEPOINTs from _write_row nest inside it as before.
+        # Keep it this way: reintroducing begin() breaks the phase outright, and
+        # so does moving these writes above the index loads.
         try:
             self._enrich_winners(winners, descriptions, stats)
             if ingest_new:
                 unmatched = [c for c in candidates if c.match is None]
                 stats.update(self._ingest_new(unmatched, name_index))
-            if transaction is not None:
-                transaction.commit()
+            if not self.dry_run:
+                self._session.commit()
         except Exception:
-            if transaction is not None:
-                transaction.rollback()
+            self._session.rollback()
             raise
 
         logger.info(

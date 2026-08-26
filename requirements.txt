@@ -12,7 +12,13 @@ thefuzz>=0.22.0
 rapidfuzz>=3.0.0
 python-Levenshtein>=0.25.0
 python-dotenv>=1.0.0
-git+https://github.com/ifesserra-lab/sigpesq_agent.git@v0.3.2
+# agent_sigpesq: fixado no SHA da branch feat/project-pdf-download-and-mistral-extraction,
+# que acrescenta o download dos PDFs por projeto e a extração PDF->JSON via Mistral
+# (produz os data/exports/project_sigpesq_files_json/PJ_*.json que o enrich_projects consome).
+# SHA em vez de nome de branch porque branch não é build reprodutível — o commit muda
+# debaixo do projeto. Trocar por uma tag (ex.: v0.4.0) assim que a branch for liberada.
+# O extra [extract] traz mistralai e pypdf; a extração exige MISTRAL_KEY no .env.
+agent_sigpesq[extract] @ git+https://github.com/ifesserra-lab/sigpesq_agent.git@8f41f7a9504e3f281a342d3e449ace03574b5b13
 git+https://github.com/ifesserra-lab/dgp.cnqp_lib.git@v0.5.0
 scriptLattes @ git+https://github.com/ifesserra-lab/scriptLattes.git@v0.8.0
 selenium>=4.0.0
