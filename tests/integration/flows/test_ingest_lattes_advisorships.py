@@ -50,9 +50,10 @@ def test_ingest_advisorships_file_task(
     mock_lattes_data,
 ):
     mock_res_ctrl = MockResearcherCtrl.return_value
-    mock_res_ctrl.get_all.return_value = [MagicMock(name="candidate")]
     mock_session = MagicMock()
     mock_res_ctrl._service._repository._session = mock_session
+    # O índice chega pronto do flow; a tarefa não lê o cadastro.
+    researcher_index = [MagicMock(name="candidate")]
 
     supervisor = MagicMock()
     supervisor.name = "Test Researcher"
@@ -70,10 +71,11 @@ def test_ingest_advisorships_file_task(
 
     mock_loader = MockProjectLoader.return_value
 
-    ingest_advisorships_file_task.fn(mock_lattes_data)
+    ingest_advisorships_file_task.fn(mock_lattes_data, researcher_index)
 
+    mock_res_ctrl.get_all.assert_not_called()
     mock_resolve_researcher.assert_called_once_with(
-        mock_res_ctrl.get_all.return_value,
+        researcher_index,
         lattes_id="1234567890123456",
         json_name="Test Researcher",
         session=mock_session,

@@ -28,8 +28,11 @@ from src.adapters.sources.lattes_parser import LattesParser
 from src.core.logic.entity_manager import EntityManager
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
+    ResearcherRef,
+    load_researcher_index,
     resolve_or_create_researcher,
     resolve_researcher_from_lattes,
+    sync_researcher_ref,
 )
 from src.core.logic.strategies.lattes_projects import LattesProjectMappingStrategy
 from src.notifications.telegram import telegram_flow_state_handlers
@@ -69,8 +72,29 @@ def _resolve_sqlalchemy_engine(init_ctrl: InitiativeController) -> Engine:
     raise RuntimeError("Could not resolve SQLAlchemy engine for Lattes ingestion")
 
 
+def _hydrate_researcher(researcher_ctrl: ResearcherController, match):
+    """Carrega a entidade completa do vencedor da correspondência.
+
+    O índice devolve um registro leve, suficiente para decidir de quem é o
+    currículo. Daí para a frente a ingestão grava atributos, persiste e vincula
+    — para isso precisa da entidade, e apenas dela: um registro por currículo,
+    não os 1060 do cadastro.
+    """
+    if not isinstance(match, ResearcherRef):
+        return match  # caminho de criação: já veio entidade
+
+    try:
+        return researcher_ctrl.get_by_id(match.id)
+    except Exception as exc:
+        logger.warning(f"Could not load researcher {match.id}: {exc}")
+        return None
+
+
 def _ingest_researcher_file(
-    file_path: str, entity_manager: EntityManager, parser: LattesParser
+    file_path: str,
+    entity_manager: EntityManager,
+    parser: LattesParser,
+    researcher_index: List[ResearcherRef],
 ):
     try:
         filename = os.path.basename(file_path)
@@ -96,32 +120,40 @@ def _ingest_researcher_file(
         json_name = personal_info.get("name") or json_name
 
         researcher_ctrl = ResearcherController()
-        all_researchers = researcher_ctrl.get_all()
+        # O índice chega pronto do flow. Reconstruí-lo aqui custaria 7,8 s por
+        # currículo — 875 s por execução — para devolver sempre a mesma lista.
+        all_researchers = researcher_index
         session = None
         try:
             session = researcher_ctrl._service._repository._session
         except Exception:
             pass
 
-        target_researcher = resolve_researcher_from_lattes(
+        match = resolve_researcher_from_lattes(
             all_researchers,
             lattes_id=lattes_id,
             json_name=json_name,
             session=session,
         )
 
-        if not target_researcher:
+        if not match:
             # identification_id is a CPF-like column (LGPD-hashed on write);
             # a hashed lattes_id there never matches raw lookups. The stable
             # Lattes identity lives in cnpq_url, set right below.
-            target_researcher = resolve_or_create_researcher(
+            match = resolve_or_create_researcher(
                 researcher_ctrl,
                 all_researchers,
                 name=json_name,
             )
-        if not target_researcher:
+        if not match:
             raise RuntimeError(
                 f"Unable to resolve or create researcher for Lattes ID {lattes_id}."
+            )
+
+        target_researcher = _hydrate_researcher(researcher_ctrl, match)
+        if not target_researcher:
+            raise RuntimeError(
+                f"Unable to load researcher entity for Lattes ID {lattes_id}."
             )
 
         # Guarantee the Lattes URL identity so future runs resolve by cnpq_url.
@@ -187,6 +219,10 @@ def _ingest_researcher_file(
                 )
             except Exception as e:
                 logger.warning(f"Failed to update researcher data for {lattes_id}: {e}")
+
+        # O índice é lido uma vez só, então precisa acompanhar o que esta
+        # ingestão acabou de gravar — currículos seguintes pontuam sobre ele.
+        sync_researcher_ref(all_researchers, target_researcher)
 
         logger.info(
             f"Processing data for researcher: {target_researcher.name} (Lattes: {lattes_id})"
@@ -275,22 +311,36 @@ def _ingest_researcher_file(
 
 @task(name="Ingest Lattes Researcher Data", cache_policy=NO_CACHE)
 def ingest_researcher_data(
-    file_path: str, entity_manager: EntityManager, parser: LattesParser
+    file_path: str,
+    entity_manager: EntityManager,
+    parser: LattesParser,
+    researcher_index: List[ResearcherRef],
 ):
-    _ingest_researcher_file(file_path, entity_manager, parser)
+    _ingest_researcher_file(file_path, entity_manager, parser, researcher_index)
 
 
 @task(name="Ingest Lattes Researcher File", cache_policy=NO_CACHE)
 def ingest_file_task(file_path: str, entity_manager: EntityManager):
-    """Compatibility wrapper kept for scripts/tests that still call this symbol."""
+    """Compatibility wrapper kept for scripts/tests that still call this symbol.
+
+    Builds its own index because it is invoked for a single file, outside the
+    flow that would otherwise provide one.
+    """
     parser = LattesParser()
-    _ingest_researcher_file(file_path, entity_manager, parser)
+    session = None
+    try:
+        session = ResearcherController()._service._repository._session
+    except Exception:
+        pass
+    _ingest_researcher_file(
+        file_path, entity_manager, parser, load_researcher_index(session)
+    )
 
 
 def ingest_articles_task(
     articles: List[Dict],
     target_researcher: Researcher,
-    all_researchers: List[Researcher],
+    all_researchers: List[ResearcherRef],
     parser: LattesParser,
     source_file: str,
 ):
@@ -425,7 +475,7 @@ def _attach_article_author(
 def ingest_education_task(
     education_list: List[Dict],
     target_researcher: Researcher,
-    all_researchers: List[Researcher],
+    all_researchers: List[ResearcherRef],
     entity_manager: EntityManager,
     researcher_ctrl: ResearcherController,
     source_file: str,
@@ -819,8 +869,17 @@ def ingest_lattes_projects_flow():
     # destroy data ingested for researchers whose JSONs are absent from disk.
     Base.metadata.create_all(engine)
 
+    # Uma leitura do cadastro por execução da fase, não por currículo.
+    session = None
+    try:
+        session = ResearcherController()._service._repository._session
+    except Exception:
+        logger.warning("Could not reach the DB session; researcher index is empty.")
+    researcher_index = load_researcher_index(session)
+    logger.info(f"Researcher index loaded with {len(researcher_index)} entries")
+
     for json_file in json_files:
-        ingest_researcher_data(json_file, entity_manager, parser)
+        ingest_researcher_data(json_file, entity_manager, parser, researcher_index)
         gc.collect()
 
 

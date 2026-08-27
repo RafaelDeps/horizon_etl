@@ -123,4 +123,42 @@ Mapping Epics -> User Stories -> Tasks status.
   então vigente, e já houve estouro em máquina mais lenta. O limite foi elevado
   para 3600 s em 26/08 como paliativo. A correção real é paralelizar o laço, como
   o `lattes_download` já faz com `ThreadPoolExecutor`; a margem volta a encolher
-  conforme o instituto cresce. Status: Ready.
+  conforme o instituto cresce. Status: **Resolvido em 27/08 — mas não como este
+  item previa.** A medição mostrou que paralelizar não resolveria: o parse de
+  cada currículo custa **0,1 ms** (0,0% da fase) e o restante é escrita em
+  SQLite, serializada por natureza. O tempo estava em `ResearcherController()
+  .get_all()`, chamado **uma vez por currículo**: 7,8 s por chamada, 867,1 s dos
+  1424,6 s da fase (60,9%). A causa é produto cartesiano — a entidade
+  `Researcher` declara quatro coleções `lazy="joined"`, então 1060 pesquisadores
+  viram 828.644 linhas; a consulta em si roda em 0,01 s. A correção substituiu a
+  leitura por um índice de correspondência carregado uma vez por fase
+  (`load_researcher_index`, 9,3 ms), ver `specs/007-researcher-lookup-index/`.
+
+## Follow-ups técnicos — origem: `specs/007-researcher-lookup-index` (2026-08-27)
+
+- **TD-008 — Mesma leitura repetida fora das fases do Lattes**: o padrão
+  corrigido no TD-007 existe em outros dois pontos, não medidos e não corrigidos:
+  `src/core/logic/strategies/sigpesq_excel.py:100` chama `get_all()` dentro de
+  `SigPesqResearcherStrategy.ensure()`, invocada por `research_group_loader.py:105`
+  uma vez por pesquisador de grupo (há cache por nome em `_researcher_cache`, então
+  o custo é por nome distinto); e `src/core/logic/strategies/cnpq_sync.py:250`
+  chama `get_all()` dentro de `sync_members()`, invocada **uma vez por grupo** em
+  `flows/cnpq/groups.py:139` — e o banco tem 347 grupos. O carregador
+  `load_researcher_index` já é compartilhado, então adotá-lo nesses pontos é
+  mudança de poucas linhas. Falta medir as fases `sigpesq` e `cnpq_sync` antes de
+  decidir a prioridade. Status: Ready.
+- **TD-009 — Coleções `lazy="joined"` em `Researcher` (biblioteca)**: a causa raiz
+  do TD-007 está na modelagem do `research_domain`: `knowledge_areas`, `articles`,
+  `productions` e `emails` são carregadas ansiosamente no mesmo SELECT, o que
+  torna qualquer leitura de muitos pesquisadores quadrática. O ETL contornou
+  deixando de pedir o que não usa, mas qualquer consumidor da biblioteca paga o
+  mesmo preço. Vale propor `lazy="selectin"` à biblioteca. Status: Ready.
+- **TD-010 — Correspondência de pesquisador apoia-se em menos critérios do que
+  aparenta**: `_score_candidate` pontuava `brand_id` com 500, o maior peso da
+  função, mas essa coluna não existe em `persons` nem em `researchers`, nem como
+  atributo mapeado — o ramo nunca disparou. Foi removido em 27/08. Como
+  `identification_id` é anonimizado na escrita, um Lattes ID cru também nunca casa
+  com ele. Na prática a correspondência se apoia em `cnpq_url` e no nome. Um teste
+  (`test_ingest_academic_education`) passava justamente por construir um mock com
+  `brand_id`, algo impossível contra o banco real. Avaliar se o critério de
+  correspondência precisa de um identificador estável adicional. Status: Ready.

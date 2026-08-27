@@ -1,6 +1,7 @@
 import glob
 import json
 import os
+from typing import List
 
 from loguru import logger as fallback_logger
 from prefect import flow, get_run_logger, task
@@ -9,7 +10,11 @@ from research_domain.controllers import ResearcherController
 
 from src.adapters.sources.lattes_parser import LattesParser
 from src.core.logic.project_loader import ProjectLoader
-from src.core.logic.researcher_resolution import resolve_researcher_from_lattes
+from src.core.logic.researcher_resolution import (
+    ResearcherRef,
+    load_researcher_index,
+    resolve_researcher_from_lattes,
+)
 from src.core.logic.strategies.lattes_advisorships import (
     LattesAdvisorshipMappingStrategy,
 )
@@ -17,7 +22,9 @@ from src.notifications.telegram import telegram_flow_state_handlers
 
 
 @task(name="Ingest Lattes Advisorships for File", cache_policy=NO_CACHE)
-def ingest_advisorships_file_task(file_path: str):
+def ingest_advisorships_file_task(
+    file_path: str, researcher_index: List[ResearcherRef]
+):
     try:
         logger = get_run_logger()
     except Exception:
@@ -37,8 +44,11 @@ def ingest_advisorships_file_task(file_path: str):
         return
 
     # 1. Identify Supervisor (Owner of CV)
+    # O índice de correspondência chega pronto do flow: montá-lo aqui custaria
+    # 7,8 s por currículo (112 vezes por execução) para reproduzir sempre a
+    # mesma lista. O controller permanece apenas como porta de acesso à sessão,
+    # usada no desempate por dados já vinculados.
     researcher_ctrl = ResearcherController()
-    all_researchers = researcher_ctrl.get_all()
 
     json_name = (
         data.get("nome")
@@ -52,7 +62,7 @@ def ingest_advisorships_file_task(file_path: str):
         pass
 
     supervisor = resolve_researcher_from_lattes(
-        all_researchers,
+        researcher_index,
         lattes_id=lattes_id,
         json_name=json_name,
         session=session,
@@ -95,8 +105,17 @@ def ingest_lattes_advisorships_flow():
         logger.warning(f"No JSON files found in {base_dir}")
         return
 
+    # Uma leitura do cadastro por execução da fase, não por currículo.
+    session = None
+    try:
+        session = ResearcherController()._service._repository._session
+    except Exception:
+        logger.warning("Could not reach the DB session; researcher index is empty.")
+    researcher_index = load_researcher_index(session)
+    logger.info(f"Researcher index loaded with {len(researcher_index)} entries")
+
     for json_file in json_files:
-        ingest_advisorships_file_task(json_file)
+        ingest_advisorships_file_task(json_file, researcher_index)
 
 
 if __name__ == "__main__":
