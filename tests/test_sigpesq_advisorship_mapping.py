@@ -149,7 +149,14 @@ def test_sigpesq_advisorship_mapping_uses_sigpesq_codes_for_pt_pj_and_fellowship
     assert (
         mapped["parent_title"] == "Desenvolvimento de um Modulo de Hidroponia Autonomo"
     )
-    assert mapped["identity_key"] == build_identity_key(["sigpesq_workplan", "17515"])
+    # A identidade inclui o Id da bolsa, e não só o código do plano de trabalho:
+    # um mesmo CodPT pode ter bolsas consecutivas, com bolsistas e períodos
+    # diferentes. Com a chave só do plano, duas bolsas colapsavam na mesma
+    # identidade e a segunda tentava renomear a linha da primeira, batendo na
+    # restrição de unicidade de `initiatives.name` e sendo descartada.
+    assert mapped["identity_key"] == build_identity_key(
+        ["sigpesq_workplan", "17515", "10701"]
+    )
     assert mapped["parent_identity_key"] == build_identity_key(
         ["sigpesq_project", "8748"]
     )

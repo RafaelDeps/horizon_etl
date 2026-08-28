@@ -7,6 +7,7 @@ from src.adapters.sources.sigpesq.adapter import SigPesqAdapter
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.strategies.sigpesq_projects import SigPesqProjectMappingStrategy
 from src.notifications.telegram import telegram_flow_state_handlers
+from src.tracking.recorder import tracking_recorder
 
 load_dotenv()
 
@@ -37,7 +38,15 @@ def persist_projects():
     logger.info(f"Loading Projects from {latest_file}")
 
     loader = ProjectLoader(mapping_strategy=SigPesqProjectMappingStrategy())
-    loader.process_file(latest_file)
+    # `sigpesq_research_projects` não é nome livre: é a chave que
+    # ProjectEnrichmentLoader._load_code_index consulta para saber quais
+    # códigos de projeto foram aprovados pela diretoria. Sem esta run, aquele
+    # índice sai vazio e o filtro de aprovação do enriquecimento não funciona.
+    with tracking_recorder.run_context(
+        source_system="sigpesq_research_projects",
+        flow_name="sigpesq_projects",
+    ):
+        loader.process_file(latest_file)
 
 
 @flow(name="Ingest SigPesq Projects", **telegram_flow_state_handlers())

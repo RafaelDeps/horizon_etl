@@ -19,6 +19,7 @@ from src.core.logic.strategies.lattes_advisorships import (
     LattesAdvisorshipMappingStrategy,
 )
 from src.notifications.telegram import telegram_flow_state_handlers
+from src.tracking.recorder import tracking_recorder
 
 
 @task(name="Ingest Lattes Advisorships for File", cache_policy=NO_CACHE)
@@ -114,8 +115,11 @@ def ingest_lattes_advisorships_flow():
     researcher_index = load_researcher_index(session)
     logger.info(f"Researcher index loaded with {len(researcher_index)} entries")
 
-    for json_file in json_files:
-        ingest_advisorships_file_task(json_file, researcher_index)
+    with tracking_recorder.run_context(
+        source_system="lattes_advisorships", flow_name="lattes_advisorships"
+    ):
+        for json_file in json_files:
+            ingest_advisorships_file_task(json_file, researcher_index)
 
 
 if __name__ == "__main__":

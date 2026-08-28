@@ -10,6 +10,7 @@ from src.core.logic.strategies.sigpesq_advisorships import (
     SigPesqAdvisorshipMappingStrategy,
 )
 from src.notifications.telegram import telegram_flow_state_handlers
+from src.tracking.recorder import tracking_recorder
 
 load_dotenv()
 
@@ -70,12 +71,16 @@ def persist_advisorships():
     else:
         loader.initiative_type = raw_type
 
-    for file_path in files:
-        logger.info(f"Loading Advisorships from {file_path}")
-        loader.process_file(file_path)
+    with tracking_recorder.run_context(
+        source_system="sigpesq_advisorships",
+        flow_name="sigpesq_advisorships",
+    ):
+        for file_path in files:
+            logger.info(f"Loading Advisorships from {file_path}")
+            loader.process_file(file_path)
 
-    # Final pass: Recalculate parent project dates and status from DB
-    loader.recalculate_all_parent_statuses()
+        # Final pass: Recalculate parent project dates and status from DB
+        loader.recalculate_all_parent_statuses()
 
 
 @flow(name="Ingest SigPesq Advisorships", **telegram_flow_state_handlers())

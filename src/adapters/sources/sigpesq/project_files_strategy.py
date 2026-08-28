@@ -104,21 +104,48 @@ AGENT_SIGPESQ_SHA = "8f41f7a9504e3f281a342d3e449ace03574b5b13"
 # that already had the old version, `pip install -r requirements.txt` reports
 # "already satisfied" and installs nothing -- silently. The phase then dies on an
 # import error that says nothing about the real cause. Hand over the fix instead.
+EXTRACTION_DEPS = '"mistralai>=1.9,<2" "pypdf>=4"'
+
+# --no-deps is deliberate -- it avoids churning playwright, prefect and the rest
+# of the tree just to swap one package. But it also skips the [extract] extra, so
+# the extraction dependencies must be installed explicitly right after. Leaving
+# that second line out is exactly how the first version of this message sent
+# someone straight into "No module named 'mistralai'".
+_REINSTALL_STEPS = (
+    "  .venv/bin/pip install --force-reinstall --no-deps \\\n"
+    '    "agent_sigpesq[extract] @ git+https://github.com/ifesserra-lab/'
+    f'sigpesq_agent.git@{AGENT_SIGPESQ_SHA}"\n'
+    "\n"
+    "  # --no-deps skips the extras, so install them too:\n"
+    f"  .venv/bin/pip install {EXTRACTION_DEPS}\n"
+)
+
 STALE_LIBRARY_HELP = (
     "agent_sigpesq is installed but does not contain the project-file download.\n"
     "Your copy is the old release. Because the new branch kept version 0.3.2, pip\n"
     "considers the requirement already satisfied and skips the upgrade in silence.\n"
     "\n"
     "Reinstall it, forcing the update:\n"
+    "\n" + _REINSTALL_STEPS + "\n"
+    "Then confirm:\n"
     "\n"
-    "  .venv/bin/pip install --force-reinstall --no-deps \\\n"
-    '    "agent_sigpesq[extract] @ git+https://github.com/ifesserra-lab/'
-    f'sigpesq_agent.git@{AGENT_SIGPESQ_SHA}"\n'
+    "  .venv/bin/python -c "
+    '"from agent_sigpesq.extraction import ProjectExtractor"'
+)
+
+MISSING_EXTRACTION_DEPS_HELP = (
+    "The Mistral extraction dependencies are missing.\n"
+    "agent_sigpesq itself is fine -- only the [extract] extra was not installed.\n"
+    "This is what happens after reinstalling the library with --no-deps.\n"
+    "\n"
+    "Install them:\n"
+    "\n"
+    f"  .venv/bin/pip install {EXTRACTION_DEPS}\n"
     "\n"
     "Then confirm:\n"
     "\n"
     "  .venv/bin/python -c "
-    '"from agent_sigpesq.strategies import ProjectFilesDownloadStrategy"'
+    '"from agent_sigpesq.extraction import ProjectExtractor"'
 )
 
 

@@ -131,8 +131,6 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
         Skipping is what keeps this affordable: only documents without a JSON
         cost an API call. ``force=True`` re-extracts everything.
         """
-        from agent_sigpesq.extraction import ProjectExtractor
-
         pdfs = sorted(glob.glob(os.path.join(self.pdf_dir, "*.pdf")))
         if limit is not None:
             pdfs = pdfs[:limit]
@@ -162,8 +160,19 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
         if not pending:
             return stats
 
-        # Instantiated only when there is work: it raises without MISTRAL_KEY,
-        # so a no-op run stays usable on a machine with no API key configured.
+        # Imported only when there is work to do, for two reasons: it pulls the
+        # optional [extract] dependencies, and it raises without MISTRAL_KEY. A
+        # machine with neither can still run this phase as a no-op.
+        try:
+            from agent_sigpesq.extraction import ProjectExtractor
+        except ImportError as exc:
+            from src.adapters.sources.sigpesq.project_files_strategy import (
+                MISSING_EXTRACTION_DEPS_HELP,
+            )
+
+            logger.error(MISSING_EXTRACTION_DEPS_HELP)
+            raise ImportError(MISSING_EXTRACTION_DEPS_HELP) from exc
+
         extractor = ProjectExtractor()
 
         for index, pdf in enumerate(pending, 1):

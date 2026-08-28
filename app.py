@@ -48,6 +48,47 @@ os.environ.setdefault("PREFECT_API_URL", "http://127.0.0.1:4200/api")
 install_lgpd_session_hooks()
 
 
+def _report_cnpq_summary(summary) -> None:
+    """Torna visível o resultado da sincronização do CNPq.
+
+    Emite os avisos estruturados no nível certo — URL inválida é ERROR, porque
+    é defeito permanente de dado que se repete toda semana; falha de coleta é
+    WARNING, porque o portal pode estar fora — e grava um relatório em
+    ``data/reports/``, no mesmo padrão do backfill de LGPD, para que a cobertura
+    da fase seja auditável depois sem depender de grep no log.
+    """
+    if not isinstance(summary, dict):
+        return
+
+    for aviso in summary.get("warnings", []):
+        registrar = logger.error if aviso.get("severity") == "error" else logger.warning
+        registrar(f"[{aviso.get('code')}] {aviso.get('message')}")
+
+    logger.info(
+        "CNPq sync: {}/{} grupos sincronizados | {} falha(s) de coleta | "
+        "{} URL(s) inválida(s)",
+        summary.get("success_count", 0),
+        summary.get("total_groups", 0),
+        summary.get("failed_count", 0),
+        summary.get("invalid_url_count", 0),
+    )
+
+    try:
+        import json as _json
+        from datetime import datetime as _dt
+
+        destino = os.path.join("data", "reports")
+        os.makedirs(destino, exist_ok=True)
+        caminho = os.path.join(
+            destino, f"cnpq_sync_{_dt.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        with open(caminho, "w", encoding="utf-8") as arquivo:
+            _json.dump(summary, arquivo, ensure_ascii=False, indent=2)
+        logger.info(f"CNPq sync report: {caminho}")
+    except Exception as exc:  # relatório nunca pode derrubar a fase
+        logger.warning(f"Could not write CNPq sync report: {exc}")
+
+
 def main():
     """
     Main entry point for Horizon ETL.
@@ -126,7 +167,12 @@ def main():
             logger.info(
                 f"Executing Flow: Sync CNPq Groups (Campus Filter: {campus_filter})"
             )
-            sync_cnpq_groups_flow(campus_name=campus_filter)
+            cnpq_summary = sync_cnpq_groups_flow(campus_name=campus_filter)
+            # O resumo era descartado aqui: `build_cnpq_sync_summary` produzia a
+            # contagem de falhas e a lista de grupos, e nada consumia. Uma fase
+            # podia deixar de coletar centenas de grupos e ainda sair com
+            # código 0, porque o único sinal de sucesso é o exit code.
+            _report_cnpq_summary(cnpq_summary)
 
         if flow_to_run in ["export_canonical", "all"]:
             # Optional output dir as 2nd arg if running specific flow

@@ -878,9 +878,12 @@ def ingest_lattes_projects_flow():
     researcher_index = load_researcher_index(session)
     logger.info(f"Researcher index loaded with {len(researcher_index)} entries")
 
-    for json_file in json_files:
-        ingest_researcher_data(json_file, entity_manager, parser, researcher_index)
-        gc.collect()
+    with tracking_recorder.run_context(
+        source_system="lattes_projects", flow_name="lattes_projects"
+    ):
+        for json_file in json_files:
+            ingest_researcher_data(json_file, entity_manager, parser, researcher_index)
+            gc.collect()
 
 
 if __name__ == "__main__":

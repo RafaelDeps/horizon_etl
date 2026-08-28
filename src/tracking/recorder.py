@@ -92,6 +92,23 @@ class TrackingRecorder:
     def run_context(
         self, *, source_system: str, flow_name: str, notes: Optional[str] = None
     ):
+        """Abre uma ingestion run e ativa o contexto de rastreabilidade.
+
+        **Reentrante de propósito.** Quando já existe uma run ativa — o caso do
+        ``make pipeline``, em que ``ETLFlowReporter.run_step`` envolve cada
+        passo — o bloco interno cede a run corrente em vez de criar uma
+        segunda. Sem isso, mover o envelope para dentro dos flows produziria
+        duas runs por fase, e a externa ficaria com zero registros e status
+        ``success`` — pior que não auditar, porque mentiria.
+        """
+        if self.has_active_run():
+            yield SimpleNamespace(
+                id=current_ingestion_run_id.get(),
+                source_system=current_source_system.get(),
+                flow_name=flow_name,
+            )
+            return
+
         with self._controller(
             getattr(self, "_ingestion_run_controller_cls", IngestionRunController),
             legacy_attr="ingestion_run_ctrl",

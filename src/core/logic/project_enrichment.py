@@ -328,6 +328,51 @@ class ProjectEnrichmentLoader:
         run_migrations(self._session)
 
     # -------------------------------------------------------------- indexes
+    def _load_rejected_codes(self) -> set:
+        """Códigos de projeto que a diretoria NÃO aprovou.
+
+        Existe para fechar uma porta dos fundos. Um projeto reprovado é barrado
+        na ingestão da planilha, então nunca vira iniciativa — e, por não existir
+        iniciativa, o documento dele também não casa por código nem por título.
+        Caía então em ``_ingest_new`` e era **criado assim mesmo**. Foi assim que
+        o projeto 7884, recusado pela diretoria, entrou no catálogo.
+
+        O índice lê os ``source_records`` da planilha de projetos, que agora são
+        gravados também para as linhas recusadas justamente para isto.
+        """
+        try:
+            rows = self._session.execute(
+                text(
+                    """
+                    SELECT sr.raw_payload_json AS payload
+                    FROM source_records sr
+                    WHERE sr.source_system = 'sigpesq_research_projects'
+                      AND sr.source_entity_type = 'initiative'
+                    """
+                )
+            ).fetchall()
+        except Exception as exc:
+            logger.warning(f"Could not load rejected project codes: {exc}")
+            return set()
+
+        rejected = set()
+        for (payload,) in rows:
+            try:
+                data = json.loads(payload) if isinstance(payload, str) else payload
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            parecer = str(data.get("ParecerDiretoria") or "").strip()
+            if not parecer:
+                continue
+            if normalize_text(parecer).startswith("aprovado"):
+                continue
+            code = normalize_project_code(data.get("Id"))
+            if code:
+                rejected.add(code)
+        return rejected
+
     def _load_code_index(self) -> Dict[str, int]:
         """``project_code -> initiative_id`` for APPROVED SigPesq projects, using
         the tracking tables as the authoritative code<->initiative link."""
@@ -465,12 +510,14 @@ class ProjectEnrichmentLoader:
         self.ensure_schema()
 
         code_index = self._load_code_index()
+        rejected_codes = self._load_rejected_codes()
         name_index, fuzzy_choices = self._load_research_project_names()
         descriptions = self._load_current_descriptions()
         current_enrichment = self._load_current_enrichment()
         docs = self._read_documents(pj_dir)
         logger.info(
             f"{len(docs)} documents | {len(code_index)} approved-by-code | "
+            f"{len(rejected_codes)} rejected-by-code | "
             f"{len(fuzzy_choices)} research-project names"
         )
 
@@ -505,7 +552,7 @@ class ProjectEnrichmentLoader:
             self._enrich_winners(winners, descriptions, current_enrichment, stats)
             if ingest_new:
                 unmatched = [c for c in candidates if c.match is None]
-                stats.update(self._ingest_new(unmatched, name_index))
+                stats.update(self._ingest_new(unmatched, name_index, rejected_codes))
             if not self.dry_run:
                 self._session.commit()
         except Exception:
@@ -579,15 +626,35 @@ class ProjectEnrichmentLoader:
 
     # -------------------------------------------------------------- ingest
     def _ingest_new(
-        self, unmatched: List[Candidate], name_index: Dict[str, List[int]]
+        self,
+        unmatched: List[Candidate],
+        name_index: Dict[str, List[int]],
+        rejected_codes: Optional[set] = None,
     ) -> Dict[str, int]:
         org_id, type_id = self._lookup_org_and_type()
         existing_names = set(name_index.keys())
         seen_titles: set[str] = set()
-        stats = {"created": 0, "skipped_poor": 0, "skipped_duplicate": 0}
+        rejected_codes = rejected_codes or set()
+        stats = {
+            "created": 0,
+            "skipped_poor": 0,
+            "skipped_duplicate": 0,
+            "skipped_not_approved": 0,
+        }
 
         for cand in unmatched:
             pj = cand.pj
+            code = normalize_project_code(pj.get("codigo"))
+            if code and code in rejected_codes:
+                # A diretoria recusou este projeto. Ele não tem iniciativa
+                # justamente por isso, e criar uma a partir do documento
+                # contornaria a decisão.
+                logger.info(
+                    f"[skip] projeto {code} não aprovado pela diretoria: "
+                    f"{(pj.get('titulo') or '')[:60]}"
+                )
+                stats["skipped_not_approved"] += 1
+                continue
             if not is_ingestable(pj):
                 stats["skipped_poor"] += 1
                 continue

@@ -14,6 +14,7 @@ from src.core.logic.strategies.sigpesq_excel import (
     SigPesqRoleStrategy,
 )
 from src.notifications.telegram import telegram_flow_state_handlers
+from src.tracking.recorder import tracking_recorder
 
 load_dotenv()
 
@@ -45,7 +46,15 @@ def persist_research_groups():
         researcher_strategy=SigPesqResearcherStrategy(),
         role_strategy=SigPesqRoleStrategy(),
     )
-    loader.process_file(latest_file)
+    # A trilha de auditoria mora aqui, e não no orquestrador: assim ela vale
+    # igual no `make weekly-flows` (subprocessos), no `make pipeline` e numa
+    # execução isolada da fase. O envelope é reentrante, então conviver com o
+    # ETLFlowReporter do pipeline unificado não cria run duplicada.
+    with tracking_recorder.run_context(
+        source_system="sigpesq_research_group",
+        flow_name="sigpesq_research_groups",
+    ):
+        loader.process_file(latest_file)
 
 
 @flow(name="Ingest SigPesq Research Groups", **telegram_flow_state_handlers())

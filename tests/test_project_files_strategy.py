@@ -246,3 +246,23 @@ def test_stale_library_message_hands_over_the_fix():
     assert "--force-reinstall" in STALE_LIBRARY_HELP
     assert AGENT_SIGPESQ_SHA in STALE_LIBRARY_HELP, "must pin the exact commit"
     assert "already satisfied" in STALE_LIBRARY_HELP, "must explain the silence"
+
+
+def test_reinstall_guidance_also_installs_the_extras():
+    """The first version of this message shipped a half-fix.
+
+    It told people to reinstall with --no-deps and stopped there. --no-deps also
+    skips the [extract] extra, so following the instructions to the letter left
+    mistralai uninstalled and moved the failure one step later, into the
+    extraction task. Guidance that only gets you halfway is worse than none: it
+    looks authoritative.
+    """
+    from src.adapters.sources.sigpesq.project_files_strategy import (
+        MISSING_EXTRACTION_DEPS_HELP,
+        STALE_LIBRARY_HELP,
+    )
+
+    assert "mistralai" in STALE_LIBRARY_HELP, "--no-deps skips the extras"
+    assert "pypdf" in STALE_LIBRARY_HELP
+    assert "mistralai" in MISSING_EXTRACTION_DEPS_HELP
+    assert "--no-deps" in MISSING_EXTRACTION_DEPS_HELP, "must name the cause"
