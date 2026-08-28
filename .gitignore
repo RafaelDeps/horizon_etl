@@ -5,7 +5,14 @@ __pycache__/
 .venv/
 data/*
 !data/exports/
-!data/exports/**
+# Artefatos gerados pelos pipelines (JSON/Parquet canônicos, marts, grafos e
+# demais produtos de saída) NÃO são versionados. Só os relatórios consumíveis
+# (.html/.pdf) e os pacotes (.zip) vão para o git; ver !data/exports/**/*.html.
+data/exports/**
+!data/exports/**/
+!data/exports/**/*.html
+!data/exports/**/*.pdf
+!data/exports/**/*.zip
 # Documentos de projeto extraídos por LLM dos PDFs do SigPesq (PJ_*.json).
 # NÃO versionar: são insumo de entrada regenerável pelo agent_sigpesq e contêm
 # dados pessoais em claro (nome de coordenador e de equipe; e-mails só são
