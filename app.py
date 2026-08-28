@@ -80,26 +80,6 @@ def main():
 
             sys.exit(run_weekly(campus_name=campus_filter, output_dir=output_dir))
 
-        elif flow_to_run == "weekly_mistral":
-            # TEMPORARY rehearsal target: the weekly plus the SigPesq document
-            # extraction phase, to see how the pipeline behaves if that phase is
-            # ever promoted into the regular weekly. Not for production use.
-            campus_filter = sys.argv[2] if len(sys.argv) > 2 else None
-            output_dir = sys.argv[3] if len(sys.argv) > 3 else "data/exports"
-            logger.info(
-                f"Executing WEEKLY Pipelines + Mistral extraction "
-                f"(Campus: {campus_filter or 'all'}, Output: {output_dir})"
-            )
-            from src.flows.pipelines.weekly_orchestrator import run_weekly
-
-            sys.exit(
-                run_weekly(
-                    campus_name=campus_filter,
-                    output_dir=output_dir,
-                    include_project_files=True,
-                )
-            )
-
         elif flow_to_run == "weekly_inprocess":
             campus_filter = sys.argv[2] if len(sys.argv) > 2 else None
             output_dir = sys.argv[3] if len(sys.argv) > 3 else "data/exports"
@@ -307,7 +287,7 @@ def main():
 
             # Optional limit, to keep smoke tests cheap. Accepted as a positional
             # (make extract-project-files) or via env var, which is how the
-            # weekly-mistral rehearsal passes it down to the phase subprocess.
+            # weekly phase subprocess passes it down.
             raw_limit = (
                 sys.argv[2]
                 if len(sys.argv) > 2 and sys.argv[2]

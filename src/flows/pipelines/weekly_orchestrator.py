@@ -38,7 +38,12 @@ from loguru import logger
 # (name, argv tail, timeout seconds, critical, mode)
 #   mode "app"    -> `python app.py <argv...>`      (DB-writing phases; LGPD hook active)
 #   mode "module" -> `python -m <module>`           (read-only docentes/OpenAlex reports)
-# Order is load-bearing: SigPesq -> CNPq -> Lattes -> enrich_projects -> exports -> docentes -> LGPD.
+# Order is load-bearing: SigPesq -> CNPq -> Lattes -> extract_project_files ->
+# enrich_projects -> exports -> docentes -> LGPD.
+# extract_project_files (PDF download + Mistral) runs immediately before
+# enrich_projects so freshly extracted PJ document files feed it. It's slow and
+# costs per document, but is non-critical for the same reason enrich_projects is —
+# a portal or API problem must not sink the whole run.
 # enrich_projects runs after both project sources so PJ document files can match
 # initiatives by SigPesq code or Lattes title; it must precede export_canonical.
 # The docentes block runs after export_canonical (needs researchers_canonical.json /
@@ -55,6 +60,13 @@ _PHASES = [
     # slower machine already times out. Raising the ceiling buys room; the real
     # fix is to parallelise the loop (see docs/backlog.md TD-007).
     ("lattes_advisorships", ["lattes_advisorships"], 3600, False, "app"),
+    (
+        "extract_project_files",
+        ["extract_project_files"],
+        7200,
+        False,
+        "app",
+    ),
     ("enrich_projects", ["enrich_projects"], 900, False, "app"),
     ("export_canonical", ["export_canonical"], 1800, True, "app"),
     ("knowledge_areas_mart", ["ka_mart"], 900, False, "app"),
@@ -93,40 +105,6 @@ _PHASES = [
     ),
     ("anonymize_backfill", ["anonymize_backfill"], 1800, True, "app"),
 ]
-
-
-# Optional phase, NOT part of the normal weekly run.
-#
-# It produces the PJ_*.json corpus that `enrich_projects` consumes, by downloading
-# every project PDF and pushing it through an LLM. That is slow and costs money per
-# document, while project plans barely change — so the weekly stays a pure consumer
-# and this normally runs on demand (`make extract-project-files`).
-#
-# `make weekly-mistral` turns it on to REHEARSE how the weekly will look if the
-# extraction is ever promoted into it: same process isolation, same position
-# (immediately before enrich_projects, so fresh documents feed it), its own
-# timeout, and its own line in the summary. Generous timeout because hundreds of
-# PDFs plus OCR are involved; non-critical for the same reason enrich_projects is —
-# a portal or API problem must not sink the whole run.
-_PROJECT_FILES_PHASE = (
-    "extract_project_files",
-    ["extract_project_files"],
-    7200,
-    False,
-    "app",
-)
-
-
-def _phases(include_project_files: bool = False):
-    """The weekly phase list, optionally with the document extraction phase."""
-    if not include_project_files:
-        return list(_PHASES)
-    ordered = []
-    for phase in _PHASES:
-        if phase[0] == "enrich_projects":
-            ordered.append(_PROJECT_FILES_PHASE)
-        ordered.append(phase)
-    return ordered
 
 
 def _describe_rc(rc: Optional[int]) -> str:
@@ -169,7 +147,7 @@ def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
 
 
 def _critical(name):
-    for n, _a, _t, crit, _m in (*_PHASES, _PROJECT_FILES_PHASE):
+    for n, _a, _t, crit, _m in _PHASES:
         if n == name:
             return crit
     return False
@@ -194,16 +172,11 @@ def _notify(results, crit_failed):
 def run_weekly(
     campus_name: Optional[str] = None,
     output_dir: str = "data/exports",
-    include_project_files: bool = False,
 ) -> int:
-    """Run every weekly phase in its own subprocess. Returns a process exit code.
-
-    ``include_project_files`` adds the SigPesq document extraction phase before
-    ``enrich_projects`` — the rehearsal mode behind ``make weekly-mistral``.
-    """
+    """Run every weekly phase in its own subprocess. Returns a process exit code."""
     campus = (campus_name or "").strip()
     results = []
-    for name, argv_tail, timeout, _crit, mode in _phases(include_project_files):
+    for name, argv_tail, timeout, _crit, mode in _PHASES:
         results.append(_run_phase(name, argv_tail, timeout, campus, output_dir, mode))
 
     failed = [r for r in results if not r["ok"]]

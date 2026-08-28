@@ -34,5 +34,7 @@ db/*.db-*
 cache/
 lattes.config
 lattes_effective.list
+# Loose scratch/test mapping spreadsheets (e.g. test_mapping.xlsx) at repo root.
+/test_mapping*.xlsx
 site/
 chromedriver
