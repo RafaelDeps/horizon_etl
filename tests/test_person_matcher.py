@@ -36,6 +36,19 @@ def test_canonicalize_name_normalizes_particles(matcher):
     )
 
 
+def test_normalization_delegates_to_shared_participant_key(matcher):
+    from src.core.logic.person_identity import normalize_participant_name
+
+    assert matcher.normalize_name("Israel Magalhães do Carmo") == (
+        normalize_participant_name(
+            "ISRAEL MAGALHÃES DO CARMO", canonical_particles=False
+        )
+    )
+    assert matcher.canonicalize_name("Israel Magalhães do Carmo") == (
+        normalize_participant_name("ISRAEL MAGALHÃES DO CARMO")
+    )
+
+
 def test_match_or_create_exact(matcher):
     person = MockPerson(1, "Paulo Sergio")
     matcher.person_controller.get_all.return_value = [person]
@@ -101,6 +114,8 @@ def test_match_or_create_prefers_richer_duplicate_for_same_canonical_name(matche
     matcher.person_controller.get_all.return_value = [duplicate_plain, duplicate_rich]
     matcher.preload_cache()
 
-    result = matcher.match_or_create("Paulo Sérgio dos Santos Júnior", strict_match=True)
+    result = matcher.match_or_create(
+        "Paulo Sérgio dos Santos Júnior", strict_match=True
+    )
     assert result.id == 2
     matcher.person_controller.create_person.assert_not_called()

@@ -2,7 +2,6 @@ import json
 import os
 from unittest.mock import MagicMock
 
-import pytest
 from pydantic import BaseModel
 
 from src.adapters.sinks.json_sink import JsonSink
@@ -90,3 +89,33 @@ def test_json_sink_export_dicts(tmp_path):
         content = json.load(f)
         assert len(content) == 2
         assert content[0]["name"] == "Dict 1"
+
+
+def test_json_sink_never_emits_non_finite_floats(tmp_path):
+    """NaN/Infinity are not representable in strict JSON; they must come out
+    as null, or a strict consumer (Vite/JS imports of the canonical exports)
+    fails to parse the file."""
+    import math
+
+    sink = JsonSink()
+    data = [
+        {
+            "id": 1,
+            "Site": float("nan"),
+            "Sigla": float("inf"),
+            "payload": {"Lideres": float("nan"), "ok": 1, "items": [float("nan")]},
+        }
+    ]
+    output_file = tmp_path / "strict.json"
+
+    sink.export(data, str(output_file))
+
+    text = output_file.read_text(encoding="utf-8")
+    assert "NaN" not in text and "Infinity" not in text
+    parsed = json.loads(text)
+    assert parsed[0]["Site"] is None
+    assert parsed[0]["Sigla"] is None
+    assert parsed[0]["payload"]["Lideres"] is None
+    assert parsed[0]["payload"]["ok"] == 1
+    assert parsed[0]["payload"]["items"] == [None]
+    assert not math.isnan(parsed[0]["payload"]["ok"])

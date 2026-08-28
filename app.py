@@ -290,6 +290,19 @@ def main():
             logger.info("Executing Flow: Ingest Lattes Advisorships")
             ingest_lattes_advisorships_flow()
 
+        if flow_to_run == "consolidate_duplicates":
+            from src.scripts.consolidate_duplicates import run_person_dedup
+
+            logger.info("Executing Flow: Consolidate Duplicate Persons")
+            report = run_person_dedup()
+            logger.info(
+                "Person dedup finished: {} records merged, {} groups refused "
+                "(report: {}).",
+                report["records_merged"],
+                report["refused_groups"],
+                report["report_path"],
+            )
+
         if flow_to_run == "enrich_projects":
             from src.flows.sigpesq.enrich_projects import enrich_projects_flow
 

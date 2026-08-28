@@ -5,6 +5,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from src.adapters.sources.lattes_parser import LattesParser
+from src.core.logic.person_identity import normalize_participant_name
 from src.core.logic.researcher_creation import create_researcher_with_resume_fallback
 from src.research_domain_compat import AdvisorshipRole
 
@@ -182,8 +183,7 @@ def resolve_researcher_by_name(
     if not name:
         return None
 
-    parser = LattesParser()
-    target_norm = parser.normalize_title(name)
+    target_norm = normalize_participant_name(name)
 
     best = None
     best_score = float("-inf")
@@ -200,7 +200,7 @@ def resolve_researcher_by_name(
             score += 200
         if res_name and res_name.casefold() == name.casefold():
             score += 150
-        elif parser.normalize_title(res_name) == target_norm:
+        elif normalize_participant_name(res_name) == target_norm:
             score += 100
 
         if score > best_score:

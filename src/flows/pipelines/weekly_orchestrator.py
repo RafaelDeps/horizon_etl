@@ -68,6 +68,10 @@ _PHASES = [
         "app",
     ),
     ("enrich_projects", ["enrich_projects"], 900, False, "app"),
+    # consolidate_duplicates merges the observed same-person pairs after all
+    # source phases loaded and before export_canonical, so the canonical export
+    # and downstream marts see exactly one record per person (contract R6-R14).
+    ("consolidate_duplicates", ["consolidate_duplicates"], 900, False, "app"),
     ("export_canonical", ["export_canonical"], 1800, True, "app"),
     ("knowledge_areas_mart", ["ka_mart"], 900, False, "app"),
     ("initiatives_analytics_mart", ["analytics_mart"], 900, False, "app"),

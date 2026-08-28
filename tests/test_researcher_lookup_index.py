@@ -16,6 +16,7 @@ from src.core.logic.researcher_resolution import (
     ResearcherRef,
     load_researcher_index,
     resolve_or_create_researcher,
+    resolve_researcher_by_name,
     resolve_researcher_from_lattes,
     sync_researcher_ref,
 )
@@ -363,3 +364,22 @@ def test_ninguem_casa_devolve_none():
         )
         is None
     )
+
+
+def test_resolve_by_name_delegates_to_shared_participant_key(monkeypatch):
+    from src.core.logic import researcher_resolution
+
+    original = researcher_resolution.normalize_participant_name
+    calls = []
+
+    def spy(name, canonical_particles=True):
+        calls.append(name)
+        return original(name, canonical_particles=canonical_particles)
+
+    monkeypatch.setattr(researcher_resolution, "normalize_participant_name", spy)
+
+    index = [ResearcherRef(id=7, name="Israel Magalhães do Carmo")]
+    escolha = resolve_researcher_by_name(index, name="ISRAEL MAGALHÃES DO CARMO")
+
+    assert escolha is not None and escolha.id == 7
+    assert calls, "resolve_researcher_by_name must compare names through the shared key"

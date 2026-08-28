@@ -1,4 +1,4 @@
-# Specification Quality Checklist: Proteger participantes contra fusão por nome
+# Specification Quality Checklist: Reliable Participant Deduplication
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-08-28
@@ -31,13 +31,18 @@
 
 ## Notes
 
-- A primeira redação citava nomes de função e de arquivo nos requisitos, o que a
-  prendia à implementação atual; foi reescrita em termos de comportamento —
-  "orientações não casam por nome aproximado" em vez do nome do método.
-- **SC-001 é o critério que dá sentido à feature**: ele exige que a proteção seja
-  verificada por experimento — desfazer a restrição e confirmar que a suíte
-  reprova. Um teste de regressão que nunca foi visto reprovando não prova nada,
-  e foi exatamente essa a falha dos 283 testes existentes.
-- FR-007 é incomum num documento de requisitos, mas é deliberado: o escopo é
-  proteger comportamento, não alterá-lo. Se um teste reprovar contra o código
-  atual, o resultado é um relatório, não um patch.
+- The rewrite was a full redesign, not a translation: the previous text pinned
+  the *initiative* guard (advisorships never match by normalized title). This
+  revision keeps that guard (FR-012, contract R1–R5) and adds participant-level
+  deduplication — normalized full name as the primary identity criterion,
+  strong-identifier vetoes against homonyms, and union merging of complementary
+  initiative data — which is what the dashboard actually needed.
+- **SC-005 is the criterion that gives the feature its meaning**: it demands the
+  guards be verified by experiment — break a guard and confirm the suite fails.
+  A regression test that has never been seen failing proves nothing, and that
+  was exactly the failure of the 283 existing tests that let duplicated
+  participants reach the dashboard.
+- **FR-004 is deliberate**: exact-key name equality is the merge rule; fuzzy
+  name similarity must never merge. Requiring identifiers to merge was rejected
+  because the observed duplicates carry none (measured on the 2026-08-28 export:
+  176 duplicate groups, exemplar "Israel Magalhães do Carmo").

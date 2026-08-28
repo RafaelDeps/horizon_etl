@@ -18,6 +18,17 @@ def test_extract_project_files_is_a_fixed_phase_before_enrich_projects():
     assert names.index("extract_project_files") < names.index("enrich_projects")
 
 
+def test_consolidate_duplicates_phase_runs_before_canonical_export():
+    names = [p[0] for p in wo._PHASES]
+    assert "consolidate_duplicates" in names
+    assert "export_canonical" in names
+    assert names.index("consolidate_duplicates") < names.index("export_canonical")
+    entry = next(phase for phase in wo._PHASES if phase[0] == "consolidate_duplicates")
+    assert (
+        entry[4] == "app"
+    ), "the dedup phase writes to the DB; it must run under app.py"
+
+
 def _fake_run_factory(fail_cmd=None, rc=1, timeout_cmd=None, seen=None):
     def fake_run(argv, timeout=None):
         cmd = argv[2]

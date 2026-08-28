@@ -1,3 +1,4 @@
+import math
 import os
 from typing import Any, List
 
@@ -33,6 +34,11 @@ class JsonSink(IExportSink):
 
                 if isinstance(obj, (date, datetime)):
                     return obj.isoformat()
+
+                # NaN/Infinity are not strict JSON; emit null instead so every
+                # canonical export stays parseable by strict consumers.
+                if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+                    return None
 
                 if obj is None or isinstance(obj, (bool, int, float, str)):
                     return obj

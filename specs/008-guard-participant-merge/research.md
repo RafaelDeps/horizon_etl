@@ -1,93 +1,193 @@
-# Research: proteger participantes contra fusão por nome
+# Research: reliable participant deduplication
 
-**Feature**: 008-guard-participant-merge | **Data**: 2026-08-28
+**Feature**: 008-guard-participant-merge | **Date**: 2026-08-28
 
-## R1 — Que nível de teste teria pego o defeito
+## R1 — Evidence of the defect: duplicated participants in the exported data
 
-**Decisão**: duas camadas — resolvedor (unidade) e consequência (`_process_row`
-com colaboradores mockados). Nenhum teste com banco.
+**Observation**: the dashboard source data produced by the 2026-08-28 weekly run
+(`researchers_canonical.json`, 9,738 records) contains 176 name groups with two
+or more participant records. In every detected pair one record carries the
+initiative data and the other holds none. The exemplar is the student **Israel
+Magalhães do Carmo**, present as two `Person` records:
 
-**Racional**: o defeito era **determinístico e sem dependência de estado**: dado
-um índice normalizado contendo uma orientação, `_resolve_existing_initiative`
-devolvia essa orientação para outra orientação de mesmo título. Reproduzir isso
-não exige banco, arquivo nem rede — exige apenas montar o índice e chamar a
-função. O fato de o defeito ter sido descoberto por uma execução de 75 minutos é
-acidente histórico, não necessidade técnica.
+| id | initiatives | research groups |
+|---|---|---|
+| 579 | 5 (advisorships + research projects, role Student) | — |
+| 5767 | 0 | "Núcleo de Estudos em Robótica e Automação" |
 
-**Por que a camada de consequência é obrigatória**: os 283 testes existentes
-falharam justamente por só cobrirem a primeira camada. Um teste que verifica "a
-função devolveu `None`" prova que o mecanismo mudou; ele **não** prova que
-nenhuma orientação foi absorvida por outra. A segunda camada afirma o que
-importa: a segunda orientação de mesmo título chega ao handler com
-`existing_initiative=None`, ou seja, **vira linha nova**.
+The two records share the identical normalized name and neither carries a strong
+identifier; they are one person distributed over two rows.
 
-**Alternativas descartadas**:
+**Why the dashboard shows it**: the weekly pipeline rebuilds the catalog from
+many sources but never runs the participant deduplication step. An exporter then
+joins every `Person` against its links, so a person split across two rows is
+shown twice — and because the canonical exporter deliberately filters
+research-group teams out of a researcher's `initiatives` list, the "second"
+record looks like an initiative-less ghost. The user perceives it as
+"duplicated, and the initiative data is incomplete".
 
-- *Teste de integração com SQLite em memória.* Reproduziria o cenário completo,
-  incluindo os vínculos de participante — mas `ProjectLoader.__init__` instancia
-  sete controllers presos a uma sessão global do `eo_lib`, e o schema vem de
-  bibliotecas externas. O custo de montar isso é alto e o resultado seria frágil
-  a mudanças de biblioteca, sem cobrir nada que as duas camadas não cubram.
-- *Verificar contagem de `advisorship_members` após execução do pipeline.* É como
-  o defeito foi achado, e é justamente o que não serve como rede de proteção:
-  leva mais de uma hora e ninguém roda antes de um commit.
+**Alternative discarded**: treating the exporter's research-group filter as the
+bug. The filter is correct — group membership is exported under
+`research_groups`, not `initiatives`. The defect is upstream: two records for
+one person.
 
-## R2 — Como instanciar o `ProjectLoader` sem o banco
+## R2 — Where duplicates are born: several identity paths
 
-**Decisão**: `ProjectLoader.__new__(ProjectLoader)` e atribuição direta dos
-colaboradores necessários, seguindo o padrão que `tests/test_project_loader_matching.py`
-já usa nos dois testes existentes.
+Participant creation and matching are spread over at least these paths, each
+with its own identity logic:
 
-**Racional**: `__init__` cria `InitiativeController`, `PersonController`,
-`TeamController`, `ResearchGroupController`, `AdvisorshipController`,
-`FellowshipController` e mais — todos ligados à sessão global. `__new__` pula
-isso; o teste fornece só o que o caminho exercitado toca.
+- `PersonMatcher.match_or_create` (`src/core/logic/person_matcher.py`) — used by
+  `ProjectLoader` for teams, advisorships and projects. Exact name, canonical
+  name and (non-strict) fuzzy matching, with an in-memory cache rebuilt per run
+  via `preload_cache`.
+- `resolve_or_create_researcher` / `resolve_researcher_by_name`
+  (`src/core/logic/researcher_resolution.py`) — used by the SigPesq/research
+  group path. Casefold equality and a normalized-title equality gate, no strong
+  identifier on the person side.
+- `resolve_researcher_from_lattes` (`researcher_resolution.py`) — used by the
+  Lattes curriculum path. Scores candidates by Lattes ID, cnpq URL, normalized
+  name and linked-data richness.
+- `PersonConsolidator` (`src/core/logic/person_consolidator.py`) — a script-only
+  post-processing step (`src/scripts/consolidate_duplicates.py`, `make
+  consolidate-duplicates`), **not part of the weekly pipeline**. It groups by
+  `PersonMatcher.canonicalize_name`, vetoes groups with conflicting strong
+  identifiers, picks a winner by quality score and merges links.
 
-**Colaboradores que `_resolve_existing_initiative` exige**: `adv_controller` e
-`controller` (usados por `_candidate_matches_model` e
-`_lookup_existing_by_exact_name`).
+The duplication survives because (a) the paths disagree on what identity is, so
+the same person can be created by two different paths in the same run, and
+(b) the one holistic pass runs by hand, not by default.
 
-**Colaboradores que `_process_row` exige**, levantados por leitura do método:
-`mapping_strategy`, `handlers`, `entity_manager`, `initiative_type`, `org_id`,
-`linker`, e o `controller` para a busca exata. O `tracking_recorder` é módulo
-global e retorna cedo sem contexto de ingestão ativo — não precisa de mock, mas o
-teste não deve depender disso silenciosamente (ver R4).
+## R3 — The safety analysis: name as signal, strong identifiers as veto
 
-## R3 — Como distinguir projeto de orientação nos mocks
+The guiding question is *when two records are safe to merge*. The evidence says:
 
-**Decisão**: `MagicMock(spec=Advisorship)` para orientações; `MagicMock()` simples
-para projetos.
+- **The normalized full name is the only signal present in every source.** The
+  observed duplicates have no Lattes URL and no identification ID. Requiring an
+  identifier to merge would merge almost nothing and leave the dashboard
+  duplicated. So the name must be the primary criterion — this is what the user
+  asked to redesign *yes, use it*.
+- **Name alone is not sufficient.** Homonyms exist; junk records such as "Dr"
+  and "PROF" exist (currently four Person records in the catalog). A merge in
+  either direction is irreversible damage to two careers. So the name is
+  necessary, never sufficient: a **blocking** condition is added — if the two
+  records disagree on a strong identifier (a different Lattes ID, a different
+  identification ID), they are homonyms, and the merge is refused and flagged.
+- **Absence of identifiers must not block.** All of the observed pairs carry no
+  identifiers. Vetoing "identity unknown" would make the guard vacuous. The only
+  veto is *conflicting* identity evidence.
 
-**Racional**: `_candidate_matches_model` decide por `isinstance(candidate, Advisorship)`
-e, em caso negativo, consulta `adv_controller.get_by_id`. Com `spec=Advisorship`,
-o `isinstance` responde verdadeiro sem tocar no controller — é o mecanismo que os
-testes existentes já usam (`MagicMock(spec=Advisorship)` na linha 18 do arquivo).
-Para projetos, `adv_controller.get_by_id` deve devolver `None`.
+Decision: **two records are the same person iff their normalized names are
+equal AND they do not carry conflicting strong identifiers.** Yes, the
+normalized participant name is the primary identity criterion, exactly because
+in this data it is the signal that both unifies the observed duplicates and
+discriminates the documented homonyms.
 
-## R4 — O risco de um teste que passa pelo motivo errado
+**Fuzzy matching is excluded from merging.** The `PersonMatcher` path uses
+`thefuzz` token-sort >= 90 for non-strict cases ("Jose Silva" vs "Jose da
+Silva"). At the deduplication level that rounds distinct names into one identity
+and would recreate the exact class of false merge the initiative guard exists
+to prevent. Fuzzy matching may only *suggest* review candidates; it never
+merges (FR-004).
 
-**Decisão**: incluir o experimento da SC-001 como tarefa explícita — desfazer a
-restrição no código de produção, confirmar que a suíte reprova, e **restaurar**.
+**The initiative-level guard stays.** The prior bug was applying name-similarity
+to *individual initiatives* — advisorships whose stored name is the thesis
+title, shared across advisor/coadvisor curricula with different participants.
+That guard (FR-012) is regression-tested, not loosened.
 
-**Racional**: este é o ponto central da feature. Um teste de regressão que nunca
-foi visto reprovando pode estar passando por acidente — mock mal montado, caminho
-não exercitado, asserção que sempre vale. Foi exatamente o que aconteceu com os
-283 testes existentes: passavam, e não protegiam nada.
+## R4 — Name normalization design
 
-O experimento é barato — uma linha comentada, `pytest`, descomentar — e é a única
-evidência de que a rede funciona. Sem ele, a feature entrega a **sensação** de
-proteção.
+One shared key function serves every comparison path. Requirements derived from
+real data:
 
-## R5 — Escopo: o que estes testes deliberadamente NÃO cobrem
+1. **Accents/diacritics**: NFD decomposition, drop combining marks —
+   `Magalhães` → `MAGALHAES`.
+2. **Casing**: single case (uppercase) — `do Carmo` and `DO CARMO` equal.
+3. **Whitespace**: collapse runs and trim — `"  Maria   Aparecida "` →
+   `MARIA APARECIDA`.
+4. **Punctuation**: every non-alphanumeric, non-space character becomes a
+   separator — `Santos-Junior` → `SANTOS JUNIOR`, `M.Sc.` → `M SC` (see R4.7).
+5. **Particles/connectors**: `DE`, `DA`, `DO`, `DOS`, `DAS`, `DI`, `DU`, `DEL`,
+   `DELA`, `E`, `Y` canonicalize to a single lower-case form so capitalization
+   differences never split one person. This matches the observed particle
+   distribution (`de`/`dos`/`da`/`do`/`das`/`e`/`del`/`dela` are all present in
+   the catalog).
+6. **Multiple spaces from strips**: re-join on single spaces.
+7. **Honorifics/degrees**: tokens that are honorifics or degree abbreviations
+   (`DR`, `PROF`, `MSC`) are kept only if the surrounding comparison paths
+   agree; the requirement is *deterministic and shared*, not that they are
+   dropped. The four junk names in the catalog are a symptom of names stripped
+   to an honorific, and the dedup pass flags names below a plausibility floor
+   (e.g. fewer than two alpha tokens or single token) instead of merging them.
 
-Registrado para que a ausência não seja lida como esquecimento:
+The existing `normalize_text` (`src/core/logic/initiative_identity.py`) and
+`PersonMatcher.normalize_name`/`canonicalize_name` already implement most of
+1–6 but differ subtly (punct set, particle set, case). The feature consolidates
+them behind one key function so every path agrees; the tests pin the key
+function as the contract.
 
-- **A perda de vínculos em si.** Os testes afirmam que duas entidades permanecem
-  duas; não contam `advisorship_members`. A perda de vínculo é *consequência* da
-  fusão, e barrar a fusão basta.
-- **As 101 orientações com título repetido** que hoje existem no catálogo. São
-  legítimas sob a regra atual e continuam existindo; a feature protege a regra,
-  não muda o dado.
-- **As outras dimensões de duplicata** encontradas na mesma investigação —
-  pessoas duplicadas, orientações com tipo trocado, grupos compartilhando
-  endereço de origem. Cada uma tem causa própria e escopo próprio.
+## R5 — Merge semantics: union, preserve, resolve
+
+**Complementary data is unioned, never discarded** (FR-005). Every link the
+loser owns that the winner does not already own is transferred: advisorship
+memberships, team memberships, initiative–person links, article authorships,
+academic education, research-group/team memberships, emails, knowledge areas,
+and the researcher-side record. A link that already exists with the same
+(initiative/entity, role) on the winner is skipped as an exact duplicate —
+"exactly once", not "always twice". This is the rule that fixes the observed
+"incomplete" initiative data: the winner keeps its five initiatives and gains
+the loser's research-group membership.
+
+**Simultaneous initiatives survive** (FR-006) because identity is *participant*
+identity: a person concurrently on advisorship A and project B is one person
+with two links, and the link transfer is per (initiative, role). Nothing in the
+merge collapses links by time.
+
+**Same-researcher initiatives survive** (FR-007): a researcher shared across two
+records is corroboration of the person (it narrows who "the same name" can be),
+and all of that researcher's initiatives are transferred along with the links.
+The identity of the person never depends on "which researcher" or "which
+initiative".
+
+**Winner selection** (FR-009) reuses the existing quality heuristic but makes it
+deterministic and documented: strong identifier present, then email count,
+advisorship count, team-membership count, article count, education count, and a
+fixed tiebreak (lower id, i.e. older record). The winner's scalar fields (name
+spelling, birthday) are preferred; a missing field on the winner is filled from
+the loser (FR-010). Conflicting scalar values that are both present are resolved
+by "winner wins" and logged.
+
+**Homonyms are refused, not merged** (FR-008): any two members of one normalized
+name group whose Lattes ID or identification ID disagree make the group a
+refusal. Refused groups go to the deduplication report with the reason, and the
+report is part of the pipeline output.
+
+## R6 — Where the dedup runs and how it is tested
+
+**Placement** (US5): a consolidation phase between the source-ingestion phases
+and `export_canonical` in the weekly pipeline (the orchestrator's load-bearing
+order). Being idempotent (FR-013), it is safe to run every week. The exports —
+including `researchers_canonical.json` — then read an already-deduplicated
+catalog, and the dashboard stops showing the ghost pairs.
+
+**Testing approach** mirrors the discipline established by the *previous*
+version of this feature: unit-level, no database, no network, seconds. The
+consolidator and the key function are pure against an in-memory schema
+(`tests/test_person_consolidator.py` already builds one via `sqlite3`), so the
+scenarios are deterministic. The **mandatory experiment** (SC-005, same
+principle as before) weakens a guard — e.g. removes the strong-identifier veto,
+or the particle normalization — and the suite must fail; restoring the guard
+makes it pass again. A regression test that has never been seen failing proves
+nothing, and the original feature's 283 passing-yet-blind tests are the reason
+this experiment exists at all.
+
+**Alternatives discarded**:
+
+- *Fuzzy-name merging.* Rounds distinct names into one identity; reintroduces
+  the class of false merge the guard forbids.
+- *Requiring a strong identifier to merge.* Merges nothing in practice; the
+  observed duplicates have none.
+- *Deduplicating only at display/export time, without touching the catalog.* A
+  cosmetic fix; the catalog and every downstream consumer (reports, graphs,
+  tracking) stay corrupted, and the union semantics have nowhere to live.
+- *A one-off script + manual run.* Already exists and the defect persists every
+  week; the fix must be in the pipeline path the user actually runs.

@@ -1,4 +1,4 @@
-# Feature Specification: Proteger participantes contra fusão por nome
+# Feature Specification: Reliable Participant Deduplication
 
 **Feature Branch**: `008-guard-participant-merge`
 
@@ -6,175 +6,349 @@
 
 **Status**: Draft
 
-**Input**: User description: "Proteger, com testes de regressão, a regra de que casar iniciativas por nome normalizado não pode fundir entidades com participantes distintos."
+**Input**: User description: "The dashboard built from the latest weekly pipeline
+run shows duplicated participants (e.g. the student 'Israel Magalhães do Carmo'
+appears twice). Only one of the duplicate records carries initiative data, and
+that data looks incomplete. Redesign participant deduplication to use a
+reliable identity criterion in which the participant's name is an important
+matching signal, merging complementary initiative data across duplicates
+instead of arbitrarily keeping one record."
 
-## Contexto
+## Context
 
-A ingestão reconhece que dois registros descrevem a mesma coisa comparando nomes.
-Uma melhoria recente ensinou essa comparação a ignorar diferenças de caixa e
-acento — "PROJETO X" e "Projeto X" passaram a ser reconhecidos como o mesmo
-projeto. O efeito foi o pretendido: **57 projetos duplicados no catálogo caíram
-para zero**.
+The weekly pipeline ingests participants into a single catalog from many
+independent sources: SigPesq project and advisorship spreadsheets, Lattes
+curricula, research-group spreadsheets, and CNPq groups. Each source rebuilds
+identity on its own, through its own matching path, so the same physical person
+can become more than one participant record.
 
-Aplicada sem distinção, porém, a mesma regra causou dano. Em orientações
-acadêmicas o nome não identifica a orientação: é o **título do trabalho**, e o
-mesmo trabalho aparece legitimamente em mais de um currículo — o do orientador e
-o do coorientador —, cada registro trazendo participantes diferentes. Ao tratar
-esses registros como duplicata, a ingestão manteve uma linha só, com os
-participantes de quem foi gravado por último.
+That is not hypothetical. In the 2026-08-28 weekly export consumed by the
+dashboard, the student **Israel Magalhães do Carmo** appears twice. One record
+carries five initiatives — advisorships and research projects where the person
+acts as Student — while the other carries **no initiative at all**, holding only
+a membership in the research group "Núcleo de Estudos em Robótica e Automação".
+A full scan of `researchers_canonical.json` (9,738 records) found **176 name
+groups holding two or more participant records**, and in every detected pair one
+member is data-rich while the other holds none.
 
-Medido numa execução completa: **100 orientações fundidas e 200 vínculos de
-participante destruídos**, um orientador perdido por fusão.
+### Why the current deduplication is inadequate
 
-### Como o defeito escapou
+Two failure modes combine:
 
-**Nenhum dos 283 testes existentes reprovou.** Todos verificavam o *mecanismo* de
-correspondência — se a função devolve o candidato certo — e nenhum verificava a
-*consequência*: se os participantes sobreviveram. O defeito só apareceu ao
-comparar contagens de vínculos antes e depois de uma execução real do pipeline,
-que leva mais de uma hora.
+1. **The identity criterion is not reliable.** Participant identity is
+   reconstructed source-by-source with a variety of heuristics (exact-name and
+   canonical-name matching, fuzzy matching, Lattes-scoring), and the only
+   holistic deduplication pass detects duplicates by normalized full name but
+   never aggregates the initiative data from the losing record into the winner.
+   Nothing guarantees that all records of one person are recognized as one
+   person, or that merging preserves both records' data.
 
-A correção já foi aplicada — a comparação por nome normalizado passou a valer
-somente para projetos. O que falta é a rede que impeça alguém de desfazê-la sem
-perceber, daqui a seis meses, ao mexer na correspondência por outro motivo.
+2. **Deduplication is a manual, post-hoc step.** It is not part of the weekly
+   pipeline, so the exported data the dashboard reads is never deduplicated.
+   The duplicated person is simply exported as-is.
+
+### What stays from the previous version of this feature
+
+This feature was originally specified to protect participants from a different
+kind of damage: name-based similarity applied to **initiatives** (advisorships),
+whose name is the *title of a thesis* that legitimately repeats across the
+curricula of advisor and co-advisor with different participants. Matching those
+records by normalized title merged 100 advisorships and destroyed 200
+participant links. The guard that advisorships never match by normalized title
+**remains in force** and is exercised by regression tests — the same rule that
+reduced 57 duplicate projects to zero keeps applying to projects only.
+
+This feature deliberately takes name-based identity to the **participant** level
+where it belongs: a participant *is* identified by name, unlike an advisorship.
+But it must be done safely. The name is an **important signal, never a
+sufficient one**: identical normalized names are the starting point of identity,
+and the merge only happens when no evidence says the two records are actually
+distinct homonyms. When records do belong to one person, their complementary
+initiative data is merged, never thrown away.
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 - Reintroduzir a fusão passa a reprovar de imediato (Priority: P1)
+### User Story 1 - One participant, many spellings, one record (Priority: P1)
 
-Como quem mantém a ingestão, quero que uma alteração que volte a fundir
-orientações pelo título reprove na suíte de testes em segundos, para que o dano
-não precise ser descoberto por uma execução completa do pipeline nem, pior, por
-alguém notando participantes ausentes no painel semanas depois.
+As the data quality owner, I want a participant found in two sources to be
+recognized as the same person even when the name is written differently — a
+different case, accent, whitespace or particle (`do`/`De`/`DOS`) — so that a
+second source does not create a brand-new participant record.
 
-**Why this priority**: É a feature inteira. Sem isso, a única defesa contra a
-regressão é a memória de quem a viveu.
+**Why this priority**: This is the identity core of the feature. Without it,
+every unreliable comparison path keeps minting duplicates for the same person.
 
-**Independent Test**: Desfazer a restrição no código de produção e confirmar que
-a suíte reprova; refazer a restrição e confirmar que passa.
+**Independent Test**: Feed two source rows that name the same participant in
+different spellings ("Israel Magalhães do Carmo" and "ISRAEL MAGALHAES DE
+CARMO") and assert that exactly one participant record exists afterwards.
 
 **Acceptance Scenarios**:
 
-1. **Given** dois registros de orientação com o mesmo título e participantes
-   diferentes, **When** ambos são ingeridos, **Then** o resultado tem **duas**
-   orientações, e não uma.
-2. **Given** o mesmo cenário, **When** a restrição é removida do código de
-   produção, **Then** ao menos um teste reprova.
-3. **Given** um registro de orientação cujo título coincide com o de outra
-   orientação já existente, **When** a correspondência é resolvida, **Then** ela
-   não devolve a orientação existente por semelhança de nome.
+1. **Given** a participant already stored as "Israel Magalhães do Carmo",
+   **When** a source row arrives as "ISRAEL MAGALHÃES DO CARMO", **Then** the
+   row resolves to the stored participant and no new record is created.
+2. **Given** the same participant stored under particle variants ("Gustavo Maia
+   De Almeida" vs "Gustavo Maia de Almeida"), **When** the normalized identity
+   keys are compared, **Then** they are equal.
+3. **Given** a name with punctuation ("Maria-Aparecida Santos!" vs "Maria
+   Aparecida Santos"), **When** the normalized identity keys are compared,
+   **Then** they are equal.
 
 ---
 
-### User Story 2 - A deduplicação de projetos continua funcionando (Priority: P1)
+### User Story 2 - Complementary data of a duplicate is merged, never discarded (Priority: P1)
 
-Como responsável pela qualidade do catálogo, quero que a proteção acima não
-reabra o problema que a melhoria resolveu, para que projetos escritos em grafias
-diferentes continuem virando uma linha só.
+As a dashboard consumer, I want the initiative data spread across two duplicate
+records of the same participant to end up in a single record, so that the UI
+shows the full history instead of the snapshot that happened to be saved last.
 
-**Why this priority**: Uma proteção que só saiba dizer "não funda nada"
-devolveria os 57 projetos duplicados. As duas regras precisam coexistir, e o
-teste precisa fixar **as duas**.
+**Why this priority**: This is the observed user-visible defect. The Israel
+Magalhães do Carmo pair is exactly this case: one record owns five initiatives,
+the other owns none but holds a research-group membership. Keeping only one
+record discards the other's data.
 
-**Independent Test**: Verificar que um projeto com o mesmo nome em caixa
-diferente é reconhecido como existente, na mesma suíte que garante que
-orientações não são.
+**Independent Test**: Consolidate a fixture where record A holds advisorship X
+and record B holds project Y plus a research-group membership, then assert the
+surviving participant holds X, Y and the research-group membership.
 
 **Acceptance Scenarios**:
 
-1. **Given** um projeto já registrado como "Projeto X", **When** chega "PROJETO
-   X", **Then** a correspondência reconhece o projeto existente.
-2. **Given** um projeto cujo nome coincide exatamente com um já registrado,
-   **When** a correspondência é resolvida, **Then** a coincidência exata tem
-   precedência sobre a aproximada.
+1. **Given** two records of the same participant where record A links to
+   initiative X and record B links to initiative Y, **When** the group is
+   consolidated, **Then** the surviving record links to both X and Y.
+2. **Given** the Israel Magalhães do Carmo pair (record with advisorship and
+   research-project teams; record with only a research-group membership),
+   **When** the export is produced after deduplication, **Then** the dashboard
+   shows exactly one participant whose initiative list is the union of both
+   records.
+3. **Given** two duplicate records that share one identical link (same
+   initiative, same role), **When** consolidated, **Then** the shared link
+   appears exactly once.
 
 ---
 
-### User Story 3 - O nome já registrado prevalece (Priority: P2)
+### User Story 3 - Simultaneous and same-researcher initiatives are preserved (Priority: P1)
 
-Como responsável pelo catálogo, quero que reconhecer um projeto por grafia
-diferente não renomeie o registro existente, para que a ingestão não tente dar a
-um registro um nome que outro já ocupa — situação que, quando ocorreu, fez o
-registro ser descartado.
+As a data quality owner, I want the deduplication to preserve every initiative a
+person is part of, including initiatives that overlap in time and initiatives
+that share the same researcher, so that the merge never narrows a person's
+history down to a single initiative by mistake.
 
-**Why this priority**: É a segunda metade da mesma correção. Renomear ao casar
-foi o que produziu perda de registro por violação de unicidade.
+**Why this priority**: A person legitimately holds several initiatives at once
+and across sources. Distinct initiative sets are **not** evidence that two name
+records are different people, and identical researchers are **not** evidence
+that records are duplicates of each other — either interpretation destroys data.
 
-**Independent Test**: Reconhecer um projeto por grafia diferente e verificar que
-o nome persistido não mudou.
+**Independent Test**: Consolidate a fixture where one person is simultaneously
+Student on two advisorships and Researcher on one project, all sharing the same
+advisor, and assert that all three initiatives survive the merge.
 
 **Acceptance Scenarios**:
 
-1. **Given** "Projeto X" registrado e "PROJETO X" chegando, **When** os dois são
-   reconhecidos como o mesmo, **Then** o nome registrado permanece "Projeto X".
+1. **Given** a participant with two simultaneous advisorships under the same
+   advisor, **When** two duplicate records that each mention one of the
+   advisorships are consolidated, **Then** both advisorships survive.
+2. **Given** two records of the same participant that each reference the same
+   researcher on different initiatives, **When** consolidated, **Then** all
+   initiatives of that researcher's shared work survive.
+3. **Given** a participant appearing in a research group and in an advisorship
+   at the same time, **When** the records are merged, **Then** both the group
+   membership and the advisorship are present in the result.
+
+---
+
+### User Story 4 - Homonyms and conflicting identifiers are never merged (Priority: P1)
+
+As the data quality owner, I want two distinct people who share a normalized
+name to remain separate records, explicitly flagged for review, so that a merge
+never fuses two separate careers into one.
+
+**Why this priority**: The name is an important signal but not enough. The whole
+value of the feature depends on the guard: without it, deduplication is the same
+damage the initiative-level guard was created to prevent, just moved to people.
+
+**Independent Test**: Seed two "José da Silva" records with distinct Lattes URLs
+and assert that the consolidator keeps both and reports the group as a homonym
+candidate that it refused to merge.
+
+**Acceptance Scenarios**:
+
+1. **Given** two records with the same normalized name but distinct Lattes/CNPq
+   URLs, **When** deduplication scans them, **Then** they are **not** merged and
+   the group is flagged for manual review.
+2. **Given** two records with the same normalized name but distinct
+   identification IDs, **When** deduplication scans them, **Then** they are
+   **not** merged and the group is flagged for manual review.
+3. **Given** a participant whose name is only an honorific or junk ("Dr",
+   "PROF"), **When** deduplication scans it, **Then** it is flagged and never
+   merged with anything.
+
+---
+
+### User Story 5 - The deduplicated catalog is what the dashboard reads (Priority: P2)
+
+As the pipeline operator, I want deduplication to run as part of the weekly
+pipeline, before the exports the dashboard consumes, so that a duplicate only
+ever shows up in one weekly window, not every week.
+
+**Why this priority**: Fixing the criterion alone leaves the pipeline exporting
+pre-consolidation data. The observed defect reappears every run until dedup is
+in the pipeline path that produces the dashboard source data.
+
+**Independent Test**: Run the weekly pipeline end-to-end on a fixture with one
+known duplicate pair and assert that the exported `researchers_canonical.json`
+contains one record for the pair.
+
+**Acceptance Scenarios**:
+
+1. **Given** a database containing the Israel Magalhães do Carmo pair,
+   **When** the weekly pipeline runs, **Then** the exported researcher data
+   contains exactly one Israel Magalhães do Carmo record with the union of both
+   records' links.
+2. **Given** the pipeline run above, **When** the exclusion report is read,
+   **Then** it lists every refused homonym group with its reason.
 
 ### Edge Cases
 
-- **Sem índice de nomes disponível**: a correspondência não pode falhar; deve
-  apenas não encontrar por semelhança.
-- **Coincidência entre tipos**: um projeto e uma orientação com o mesmo título
-  não podem ser confundidos entre si.
-- **Título ausente ou vazio**: não deve casar com nada nem levantar erro.
-- **Mesmo trabalho, mesmo participante**: dois registros idênticos em título
-  **e** participantes continuam sendo duas orientações distintas — a proteção
-  não tenta decidir quando fundir seria correto, apenas nunca funde.
+- **Name present in no index**: a participant name found in no other record is
+  unmatched — it stays a separate record. Missing or empty names produce no key,
+  no match and no error.
+- **No identifiers on either record**: identical normalized name with no Lattes
+  URL, no identification ID and no email on either side still means "same
+  person" — this is the exact state of the observed pairs. Absence of evidence
+  to the contrary is enough; it is blocking identifiers that separate people.
+- **Missing/invalid name**: empty, single-token or honorific-only names must not
+  match anything and must be flagged instead of merged.
+- **Particles and connectors**: particles such as `de`, `da`, `do`, `dos`,
+  `das`, `di`, `du`, `del`, `dela`, `e` and `y` must normalize to a single form
+  so `De`, `de`, `DO`, `do` compare equal.
+- **Punctuation and hyphens**: hyphens, alphanumeric punctuation and stray
+  marks become spaces, so `Santos-Junior` and `Santos Júnior` collapse to the
+  same key.
+- **Honorifics and degree suffixes**: tokens such as `Dr`, `Prof`, `M.Sc.` are
+  not part of the person's name. Where the data carries them, their treatment
+  must be deterministic and identical across every comparison path.
+- **Name changed between records (spouse/adoption/insertions)**: a record that
+  legitimately uses a different surname does **not** share a normalized name and
+  is therefore not merged automatically; it is only reported as a *candidate*,
+  never merged. Keeping the criterion exact-normalized-name avoids inventing
+  identity that the data does not support.
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
-- **FR-001**: A suíte MUST reprovar se a correspondência por nome aproximado
-  voltar a se aplicar a orientações.
-- **FR-002**: A suíte MUST confirmar que a correspondência por nome aproximado
-  continua se aplicando a projetos.
-- **FR-003**: A suíte MUST verificar a **consequência** — que dois registros de
-  orientação com o mesmo título e participantes distintos resultam em duas
-  entidades — e não apenas o valor devolvido pela função de correspondência.
-- **FR-004**: A suíte MUST confirmar que a coincidência exata de nome tem
-  precedência sobre a aproximada.
-- **FR-005**: A suíte MUST confirmar que reconhecer por grafia diferente preserva
-  o nome já registrado.
-- **FR-006**: Os testes MUST rodar sem banco de dados, serviço externo ou
-  execução do pipeline, e concluir em segundos.
-- **FR-007**: Nenhuma alteração em código de produção faz parte desta feature. Se
-  algum teste reprovar contra o código atual, isso é achado a reportar, não
-  autorização para alterar o comportamento.
+- **FR-001**: The system MUST recognize two participant records as the same
+  person when their **normalized names are equal** and no strong identifier
+  conflicts (distinct Lattes/CNPq URL or distinct identification ID) exist
+  between them.
+- **FR-002**: The normalized full name MUST be the **primary participant
+  identity criterion**; initiative titles, research-group names and fuzzy name
+  similarity MUST NOT be used as participant identity evidence.
+- **FR-003**: Name normalization MUST be a single, shared function used by every
+  participant comparison path, and MUST produce equal keys regardless of letter
+  case, accents (diacritics), whitespace, punctuation, hyphens and surname
+  particle capitalization.
+- **FR-004**: Normalized name equality MUST be exact-key equality, not a fuzzy
+  similarity threshold. Fuzzy matching MUST NOT merge participants; it may at
+  most suggest candidate groups for review.
+- **FR-005**: When two records represent the same person, the system MUST merge
+  their initiative data as a **union** — every initiative, advisorship member,
+  team membership, research-group membership and researcher-side association
+  from the losing record is transferred to the winner unless an identical
+  (entity, role) link already exists there. Arbitrary discarding of one
+  record's data is forbidden.
+- **FR-006**: The system MUST preserve **simultaneous initiatives**: initiatives
+  that overlap in time for the same participant remain distinct initiatives
+  before and after the merge.
+- **FR-007**: The system MUST preserve **initiatives associated with the same
+  researcher**: two records that share a researcher carry corroborating
+  evidence, and all of that researcher's shared initiatives survive the merge.
+- **FR-008**: The system MUST NOT merge a group whose members carry **conflicting
+  strong identifiers** (two different Lattes/CNPq URLs or two different
+  identification IDs); such groups MUST be flagged for manual review instead.
+- **FR-009**: Winner selection MUST prefer the record with strong identifiers
+  and more linked data, and MUST be deterministic. Given a tie, the resolution
+  MUST pick the record that preserves the most data (or an explicit documented
+  tiebreak).
+- **FR-010**: Field-level conflicts between duplicates MUST be resolved
+  deterministically — the winner's value is preserved, the loser's value is kept
+  only when the winner has none — and every conflict MUST be logged or reported.
+- **FR-011**: The deduplication step MUST run before the canonical exports are
+  produced in the weekly pipeline, and MUST emit an actionable report of what
+  was merged and what was refused.
+- **FR-012**: The prior initiative guard MUST remain in force and MUST be
+  covered by regression tests: advisorships NEVER match another advisorship by
+  normalized title, while projects still do.
+- **FR-013**: Deduplication MUST be idempotent — running it twice over the same
+  catalog changes nothing on the second run.
+- **FR-014**: The regression tests MUST run without a database, external service
+  or pipeline execution, and conclude in seconds.
+- **FR-015**: All exported artifacts continue to comply with the LGPD rollout:
+  no real personal data beyond the minimum necessary, and anonymized emails in
+  every comparison key and report.
 
 ### Key Entities
 
-- **Registro de origem**: uma linha vinda de planilha ou currículo, com título e
-  participantes. Dois registros com o mesmo título podem descrever o mesmo
-  trabalho visto de ângulos diferentes.
-- **Iniciativa**: o que o catálogo guarda. Projetos e orientações são espécies
-  distintas, e a diferença entre elas é justamente o que a proteção precisa
-  respeitar.
-- **Participante**: pessoa vinculada a uma iniciativa, com papel. É o que se
-  perde quando duas entidades são fundidas indevidamente, e o que os testes
-  existem para proteger.
+- **Participant record**: a person linked to initiatives and groups. Two
+  participant records may represent the same physical person, which is the
+  condition this feature must detect. Persisted as a `Person` (with an optional
+  `Researcher` side).
+- **Normalized name key**: the product of the shared normalization function on a
+  participant's full name — the primary identity key. Case, accents, whitespace,
+  punctuation and particles are stripped or canonicalized so that spelling
+  variations yield the same key.
+- **Strong identifier**: a value that uniquely identifies a person across
+  sources and therefore vetoes a merge when it conflicts — Lattes/CNPq URL and
+  identification ID (email hashes are treated as corroborating only, because
+  they are anonymized at write time).
+- **Initiative link**: an association between a participant and an initiative
+  (advisorship membership, team membership, project participation) or a research
+  group membership. Links are the data that must be unioned, never discarded,
+  when records are merged.
+- **Deduplication report**: the scan result the pipeline must emit — merged
+  groups, refused homonym groups and the reason for each refusal.
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
-- **SC-001**: Removendo a restrição do código de produção, **pelo menos um teste
-  reprova** — verificado experimentalmente, não presumido.
-- **SC-002**: Com o código atual, **100% dos novos testes passam**.
-- **SC-003**: Os novos testes concluem em **menos de 5 segundos**, sem banco nem
-  rede, de modo que rodem em toda execução da suíte.
-- **SC-004**: A suíte cobre as **duas** regras — orientações nunca casam por nome
-  aproximado, projetos sempre casam —, de forma que nenhuma das duas possa ser
-  quebrada sem reprovação.
-- **SC-005**: Nenhum teste existente muda de resultado.
+- **SC-001**: After deduplication and export, the dashboard source data contains
+  **zero** duplicate participant groups where one record holds initiative data
+  and the other holds none. Baseline measured at 176 such groups on
+  2026-08-28; the "Israel Magalhães do Carmo" pair is the named exemplar.
+- **SC-002**: The initiative counts of every merged participant equal the union
+  of the pre-merge records — **no participant loses an initiative or group
+  membership during deduplication** (verifiable on the whole export by comparing
+  aggregate link counts before and after; for `initiative_persons`,
+  `advisorship_members`, `team_members` and research-group memberships).
+- **SC-003**: No homonym group is merged: distinct Lattes URLs or identification
+  IDs on records sharing a normalized name remain separate and appear in the
+  refusal report.
+- **SC-004**: Deduplication is reproducible — the same catalog in any order of
+  input yields the same winner selection and the same merged result.
+- **SC-005**: The new regression tests run in **less than 5 seconds**, with no
+  database and no network, and removing or weakening any guard in production
+  makes **at least one test fail** (the experiment of the previous version of
+  this feature remains mandatory).
+- **SC-006**: The prior initiative guard is still enforced: with the code as-is,
+  **100% of the new tests pass** and **no existing test changes its result**.
 
 ## Assumptions
 
-- A correção que motivou esta proteção já está aplicada; a feature protege o
-  comportamento atual, não o altera.
-- Fixar o comportamento em nível de unidade é suficiente e preferível: o defeito
-  original era determinístico e reproduzível sem banco, e a alternativa — depender
-  de execução completa do pipeline — foi justamente o que permitiu o dano passar.
-- A distinção entre projeto e orientação continuará expressa por tipo de entidade.
-  Se um dia deixar de ser, estes testes reprovam, o que é o comportamento desejado.
-- Os demais defeitos observados na mesma investigação — pessoas duplicadas,
-  orientações com tipo trocado, grupos compartilhando endereço de origem — estão
-  fora do escopo.
+- The observed duplicate pairs are created during ingestion by independent
+  matching paths and re-appear in every weekly run; deduplication must therefore
+  run inside the weekly pipeline rather than once by hand.
+- The normalized full name, compared by strict equality, is the strongest signal
+  common to every source: strong identifiers are either absent or anonymized in
+  the majority of records, and the observed duplicates carry none of them.
+- Name equality without conflicting identifiers is sufficient to merge: the
+  evidence collected (176 pairs, each with a data-rich and a data-empty record)
+  shows the false-positive risk of an unguarded merge is lower than the
+  continuing damage of duplicated participants.
+- The initiative-level guard (advisorships never match by normalized title) is
+  prior art that stays; this feature changes participant-level matching only and
+  must not weaken that guard.
+- A participant with a genuinely different name (e.g. surname change) is out of
+  scope for automatic merging — the exact-normalized-name criterion intentionally
+  leaves those records separate, matching what the data can actually support.
