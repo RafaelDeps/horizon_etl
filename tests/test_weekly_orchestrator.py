@@ -11,6 +11,13 @@ from unittest.mock import MagicMock, patch
 import src.flows.pipelines.weekly_orchestrator as wo
 
 
+def test_extract_project_files_is_a_fixed_phase_before_enrich_projects():
+    names = [p[0] for p in wo._PHASES]
+    assert "extract_project_files" in names
+    assert "enrich_projects" in names
+    assert names.index("extract_project_files") < names.index("enrich_projects")
+
+
 def _fake_run_factory(fail_cmd=None, rc=1, timeout_cmd=None, seen=None):
     def fake_run(argv, timeout=None):
         cmd = argv[2]
