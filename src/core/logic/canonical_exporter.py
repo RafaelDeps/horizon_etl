@@ -1573,6 +1573,11 @@ class CanonicalDataExporter:
             len(export_data),
         )
         logger.info(f"Exporting {len(export_data)} Researchers...")
+        # This bespoke export path bypasses _enrich_export_rows, so scrub the
+        # assembled rows here — resumes and free-text fields can carry e-mails
+        # and phone numbers (LGPD). The classification views exported below
+        # reuse this same (already scrubbed) list.
+        export_data = scrub_pii_deep(export_data)
         self.sink.export(export_data, output_path)
         logger.info(f"Successfully exported enriched Researchers to {output_path}")
         self._export_researcher_classification_views(export_data, output_path)

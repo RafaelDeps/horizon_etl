@@ -26,6 +26,7 @@ from sqlalchemy.engine import Engine
 
 from src.adapters.sources.lattes_parser import LattesParser
 from src.core.logic.entity_manager import EntityManager
+from src.core.logic.pii_anonymizer import scrub_pii_deep
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
     ResearcherRef,
@@ -169,6 +170,10 @@ def _ingest_researcher_file(
             target_researcher.cnpq_url = personal_info["cnpq_url"]
             needs_update = True
         if personal_info.get("resume"):
+            # LGPD: the resume is free text that can embed personal e-mails
+            # and phone numbers. Scrub it before persisting, so the column,
+            # the tracking payloads and the change log never carry raw PII.
+            personal_info["resume"] = scrub_pii_deep(personal_info["resume"])
             target_researcher.resume = personal_info["resume"]
             needs_update = True
 

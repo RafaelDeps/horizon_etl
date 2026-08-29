@@ -8,15 +8,21 @@ from src.core.logic.pii_anonymizer import (
     anonymize_email,
     anonymize_field,
     anonymize_person_data,
+    anonymize_phone,
     is_anonymized_cpf,
     is_anonymized_email,
+    is_anonymized_phone,
+    is_anonymized_text,
     scrub_emails_from_text,
+    scrub_phones_from_text,
     scrub_pii_deep,
+    scrub_pii_text,
     scrub_source_record_payload,
     scrub_source_record_phones,
 )
 
 SALT = b":horizon-lgpd-v1"
+PHONE_SALT = b":horizon-lgpd-phone-v1"
 
 
 def _sha(value: str) -> str:
@@ -103,7 +109,18 @@ def test_anonymize_field_email():
 
 
 def test_anonymize_field_unknown_type_passthrough():
-    assert anonymize_field("anything", "phone") == "anything"
+    assert anonymize_field("anything", "whatever") == "anything"
+
+
+def test_anonymize_field_phone_masks_value():
+    result = anonymize_field("(27) 99959-5708", "phone")
+    assert result.startswith("LGPD-PHONE-")
+
+
+def test_anonymize_field_free_text_scrubs_emails_and_phones():
+    result = anonymize_field("C x@y.com (27) 99999-0000", "free_text")
+    assert "@anon.lgpd" in result
+    assert "LGPD-PHONE-" in result
 
 
 # --- anonymize_person_data ---
@@ -182,6 +199,130 @@ def test_is_anonymized_email_false_for_raw():
 
 def test_is_anonymized_email_false_for_none():
     assert not is_anonymized_email(None)
+
+
+# --- anonymize_phone ---
+
+
+def test_anonymize_phone_returns_lgpd_phone_prefix():
+    result = anonymize_phone("(27) 99959-5708")
+    assert result.startswith("LGPD-PHONE-")
+
+
+def test_anonymize_phone_deterministic():
+    assert anonymize_phone("27999595708") == anonymize_phone("27999595708")
+
+
+def test_anonymize_phone_uses_distinct_salt_from_cpf():
+    value = "27999595708"
+    assert anonymize_phone(value) != anonymize_cpf(value)
+
+
+def test_anonymize_phone_double_is_idempotent():
+    first = anonymize_phone("(27) 99959-5708")
+    assert anonymize_phone(first) == first
+    assert is_anonymized_phone(first)
+
+
+def test_anonymize_phone_none_returns_none():
+    assert anonymize_phone(None) is None
+
+
+# --- is_anonymized_phone ---
+
+
+def test_is_anonymized_phone_true_for_lgpd_phone_prefix():
+    assert is_anonymized_phone("LGPD-PHONE-abc")
+
+
+def test_is_anonymized_phone_false_for_raw():
+    assert not is_anonymized_phone("(27) 99959-5708")
+
+
+def test_is_anonymized_phone_false_for_cpf_token():
+    assert not is_anonymized_phone("LGPD-abc")
+
+
+# --- scrub_phones_from_text ---
+
+
+def test_scrub_phones_from_text_masks_area_code_number():
+    text = "Contato: (27) 99959-5708 ou (27)3182-9200"
+    result = scrub_phones_from_text(text)
+    assert "(27) 99959-5708" not in result
+    assert "(27)3182-9200" not in result
+    assert result.count("LGPD-PHONE-") == 2
+
+
+def test_scrub_phones_from_text_masks_plus55_number():
+    result = scrub_phones_from_text("WhatsApp +55 27 99959 5708")
+    assert "99959 5708" not in result
+    assert "LGPD-PHONE-" in result
+
+
+def test_scrub_phones_from_text_ignores_page_ranges_and_years():
+    text = "pages 1601-1625 e ano 2020-2024"
+    assert scrub_phones_from_text(text) == text
+
+
+def test_scrub_phones_from_text_ignores_patent_number():
+    text = "depósito de patente: INPI BR 10 20170091872"
+    assert scrub_phones_from_text(text) == text
+
+
+def test_scrub_phones_from_text_preserves_already_anonymized():
+    text = "fone LGPD-PHONE-abc123 anon"
+    assert scrub_phones_from_text(text) == text
+
+
+def test_scrub_phones_from_text_none_returns_none():
+    assert scrub_phones_from_text(None) is None
+
+
+# --- scrub_pii_text ---
+
+
+def test_scrub_pii_text_masks_email_and_phone():
+    text = "E-mail: thebas@ifes.edu.br (27) 99959-5708 (Texto informado pelo autor)"
+    result = scrub_pii_text(text)
+    assert "thebas@ifes.edu.br" not in result
+    assert "(27) 99959-5708" not in result
+    assert "@anon.lgpd" in result
+    assert "LGPD-PHONE-" in result
+
+
+def test_scrub_pii_text_is_idempotent():
+    text = "thebas@ifes.edu.br (27) 99959-5708"
+    once = scrub_pii_text(text)
+    assert scrub_pii_text(once) == once
+
+
+# --- is_anonymized_text ---
+
+
+def test_is_anonymized_text_false_with_raw_email():
+    assert not is_anonymized_text("contact thebas@ifes.edu.br now")
+
+
+def test_is_anonymized_text_false_with_raw_phone():
+    assert not is_anonymized_text("phone (27) 99959-5708")
+
+
+def test_is_anonymized_text_true_when_clean():
+    assert is_anonymized_text("bio texto sem pii")
+
+
+def test_is_anonymized_text_true_when_already_anonymized():
+    text = "e9a7de842471@anon.lgpd LGPD-PHONE-abc123"
+    assert is_anonymized_text(text)
+
+
+def test_is_anonymized_text_none_or_empty_is_true():
+    assert is_anonymized_text(None)
+    assert is_anonymized_text("")
+
+
+# --- is_anonymized_email ---
 
 
 # --- idempotency ---
@@ -315,6 +456,36 @@ def test_scrub_source_record_phones_returns_new_dict():
     assert result is not payload
 
 
+def test_scrub_source_record_phones_nulls_nested_endereco_contato():
+    payload = {
+        "endereco_contato": {
+            "logradouro": "Avenida Sabiás",
+            "numero": "330",
+            "cep": "29166630",
+            "telefone": "(27) 3182-9200",
+            "fax": "(27) 3182-9201",
+        }
+    }
+    result = scrub_source_record_phones(payload)
+    endereco = result["endereco_contato"]
+    assert endereco["telefone"] is None
+    assert endereco["fax"] is None
+    assert endereco["logradouro"] == "Avenida Sabiás"
+    assert endereco["numero"] == "330"
+    assert endereco["cep"] == "29166630"
+
+
+def test_scrub_source_record_phones_recurses_into_lists():
+    payload = {
+        "contatos": [{"telefone": "(27) 99959-5708"}, {"nome": "A"}],
+        "fax": "123",
+    }
+    result = scrub_source_record_phones(payload)
+    assert result["contatos"][0]["telefone"] is None
+    assert result["contatos"][1]["nome"] == "A"
+    assert result["fax"] is None
+
+
 # --- scrub_source_record_payload ---
 
 
@@ -340,6 +511,31 @@ def test_scrub_source_record_payload_is_idempotent():
     once = scrub_source_record_payload(payload)
     twice = scrub_source_record_payload(once)
     assert once == twice
+
+
+def test_scrub_source_record_payload_sanitizes_cnpq_endereco_contato():
+    payload = {
+        "endereco_contato": {
+            "bairro": "Morada de Laranjeiras",
+            "cep": "29166630",
+            "logradouro": "Avenida Sabiás",
+            "telefone": "(27) 99959-5708",
+            "fax": "(27) 3182-9201",
+        },
+        "email": "grupo@ifes.edu.br",
+    }
+    result = scrub_source_record_payload(payload)
+    endereco = result["endereco_contato"]
+    assert endereco["telefone"] is None
+    assert endereco["fax"] is None
+    assert endereco["logradouro"] == "Avenida Sabiás"
+    assert result["email"].endswith("@anon.lgpd")
+
+
+def test_scrub_pii_deep_masks_phone_in_text():
+    result = scrub_pii_deep("tel (27) 99959-5708 e page 1601-1625")
+    assert "(27) 99959-5708" not in result
+    assert "1601-1625" in result
 
 
 def test_scrub_source_record_payload_non_dict_passthrough():

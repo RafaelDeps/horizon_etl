@@ -13,6 +13,10 @@ data/exports/**
 !data/exports/**/*.html
 !data/exports/**/*.pdf
 !data/exports/**/*.zip
+# Docentes/OpenAlex dashboard reports regenerate on every weekly run; exclude
+# them so the pipeline churn stays out of git (reports are still consumable
+# from the working tree / released zip).
+data/exports/docentes/*.html
 # Documentos de projeto extraídos por LLM dos PDFs do SigPesq (PJ_*.json).
 # NÃO versionar: são insumo de entrada regenerável pelo agent_sigpesq e contêm
 # dados pessoais em claro (nome de coordenador e de equipe; e-mails só são

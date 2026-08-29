@@ -11,12 +11,14 @@ from src.core.logic.pii_anonymizer import (
     anonymize_person_data,
     is_anonymized_cpf,
     is_anonymized_email,
+    is_anonymized_text,
 )
 from src.notifications.telegram import telegram_flow_state_handlers
 
 _ALREADY_ANONYMIZED_CHECKS = {
     "cpf": is_anonymized_cpf,
     "email": is_anonymized_email,
+    "free_text": is_anonymized_text,
 }
 
 
