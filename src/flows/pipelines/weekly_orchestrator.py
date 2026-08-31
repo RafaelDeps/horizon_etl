@@ -127,11 +127,16 @@ def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
         argv = [sys.executable, "-m", *argv_tail]
     else:
         argv = [sys.executable, "app.py", *argv_tail]
-        # Pass positional args only where app.py expects them.
+        # Pass positional args only where app.py expects them. app.py
+        # `export_canonical` and `ka_mart` read campus as sys.argv[3]; forward it
+        # so a WEEKLY_CAMPUS-scoped run filters those exports (e.g. campuses ->
+        # only that campus) instead of exporting the full dataset.
         if argv_tail[0] == "cnpq_sync" and campus:
             argv.append(campus)
         elif argv_tail[0] == "export_canonical":
             argv.append(output_dir)
+            if campus:
+                argv.append(campus)
     logger.info("▶ phase '{}': {}", name, " ".join(argv[1:]))
     try:
         proc = subprocess.run(argv, timeout=timeout)

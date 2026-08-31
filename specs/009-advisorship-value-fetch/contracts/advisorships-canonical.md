@@ -43,6 +43,30 @@ When several SigPesq source records resolve to one advisorship, the winning reco
 the one whose directory year equals its payload `Ano`, else the latest directory year;
 ties broken by lowest `source_record.id`.
 
+## Provenance (SC-004 / FR-004)
+
+Every non-null `program`/`provider` value is backed by exactly one SigPesq source
+record; `year` is attributed to that record's report directory.
+
+- **Authority:** the per-row, per-year copy of the SigPesq report row stored in
+  `source_records.raw_payload_json`, linked to the advisorship entity through
+  `entity_matches` (`canonical_entity_type='advisorship'`,
+  `source_entity_type='advisorship'`).
+- **Trace path:** `advisorship.id` → `entity_matches` → `source_records` → the row's
+  `Programa` (`program`), `AgFinanciadora` (`provider`) and report-directory year
+  `source_path` → `.../advisorships/YYYY/...` (`year`, payload `Ano` as tie-break).
+  Lattes-sourced records carry no program/provider (→ `null`); their `year` comes from
+  the CV's own year field.
+- **How to verify:** for each advisorship in the artifact with non-null `program` or
+  `provider`, the backing `source_records` row must exist, belong to the
+  `sigpesq_advisorships` system, have `source_entity_type='advisorship'`, a report
+  directory matching `advisorships/(\d{4})/`, and a payload `Ano`. No non-null category
+  may exist without such a record. `src/scripts/audit_advisorship_category_provenance.py`
+  automates this check (non-zero exit on findings).
+- **Determinism note:** the winning source record is fixed (see Determinism above); the
+  resolver also exposes `source_record_id` programmatically for auditing, though the
+  artifact itself only carries the resolved `year`/`program`/`provider`.
+
 ## Minimal example
 
 ```json

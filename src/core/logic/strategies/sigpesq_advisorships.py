@@ -104,6 +104,7 @@ class SigPesqAdvisorshipMappingStrategy(ProjectMappingStrategy):
             "end_date": end_date,
             "cancelled": cancelled,
             "cancellation_date": cancellation_date,
+            "program": self._clean_optional(programa),
             "description": f"Programa: {programa or 'N/A'}",
             "coordinator_name": orientador,
             "coordinator_email": orientador_email,

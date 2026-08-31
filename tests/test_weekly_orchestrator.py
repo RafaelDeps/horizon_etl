@@ -109,3 +109,29 @@ def test_telegram_failure_never_changes_outcome():
         patch.object(wo.subprocess, "run", side_effect=_fake_run_factory()),
     ):
         assert wo.run_weekly() == 0
+
+
+def test_campus_is_forwarded_to_cnpq_sync_and_export_canonical():
+    captured = []
+
+    def fake_run(argv, timeout=None):
+        captured.append(argv)
+        m = MagicMock()
+        m.returncode = 0
+        return m
+
+    with (
+        patch("src.notifications.telegram.send_telegram_message", return_value=True),
+        patch.object(wo.subprocess, "run", side_effect=fake_run),
+    ):
+        assert wo.run_weekly(campus_name="Serra", output_dir="data/exports") == 0
+
+    cnpq = next(a for a in captured if "cnpq_sync" in a)
+    export = next(
+        a for a in captured if a[-1] == "export_canonical" or "export_canonical" in a
+    )
+    # cnpq_sync receives campus as trailing arg
+    assert cnpq[-1] == "Serra"
+    # export_canonical receives output_dir then campus
+    assert export[-1] == "Serra"
+    assert export[-2] == "data/exports"

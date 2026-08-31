@@ -4,7 +4,7 @@
 
 **Created**: 2026-08-29
 
-**Status**: Draft
+**Status**: Ready
 
 **Input**: User description: "Refactor advisorship canonical data values fetch, because i suspect that it is placing static values instead fetch the value for the category of a people in the spefic year containing he, like viewed in data/raw/sigpesq/advisorship/YYYY/Relatorio_DD_MM_YYYY.xlsx."
 

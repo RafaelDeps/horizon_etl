@@ -30,7 +30,7 @@ Key files: `src/core/logic/canonical_exporter.py`, `src/core/logic/initiative_ha
 
 **Purpose**: Sanity baseline before any implementation. The repo already has full structure; setup is verification only.
 
-- [ ] T001 Verify plan artifacts exist under `specs/009-advisorship-value-fetch/` (plan.md, spec.md, research.md, data-model.md, contracts/, quickstart.md) and run `make ci-check` to record the baseline (known pre-existing failures: test_download_lattes_flow.py x3, test_export_canonical_data_flow.py tracking test, test_loader_mapping.py, test_sigpesq_adapter.py 429 — these are NOT to be "fixed" here)
+- [x] T001 Verify plan artifacts exist under `specs/009-advisorship-value-fetch/` (plan.md, spec.md, research.md, data-model.md, contracts/, quickstart.md) and run `make ci-check` to record the baseline (known pre-existing failures: test_download_lattes_flow.py x3, test_export_canonical_data_flow.py tracking test, test_loader_mapping.py, test_sigpesq_adapter.py 429 — these are NOT to be "fixed" here)
 
 ---
 
@@ -40,8 +40,8 @@ Key files: `src/core/logic/canonical_exporter.py`, `src/core/logic/initiative_ha
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T002 Create `src/core/logic/advisorship_canonical_values.py` with data classes (`AdvisorshipSourceInfo`) and the SQL loader `load_advisorship_source_values(session) -> Dict[int, list[AdvisorshipSourceInfo]]`, joining `entity_matches (canonical_entity_type='advisorship')` → `source_records` (source_entity_type='advisorship') and extracting per record: source_system, source_path, and payload keys `Programa`, `AgFinanciadora`, `Ano`, `Id` (sigpesq) and `year`/`end_year`/`start_year` (lattes). Write-first failing unit test `tests/test_advisorship_canonical_values.py` asserting the loader returns the known stored payloads for sample advisorship ids. NOTE: must remain a single grouped SQL query (no per-row queries) to honor the plan performance goal
-- [ ] T003 Implement the pure resolver `resolve_advisorship_canonical_values(records) -> AdvisorshipCanonicalValues` in `src/core/logic/advisorship_canonical_values.py`: `program`/`provider` from payload report-spelled trimmed; explicit `null` when absent; `year` = sigpesq report/directory year (`source_path` regex `advisorships/(\d{4})/`) with tie-break to payload `Ano`, else most recent dir-year, ties by lowest `source_record.id`; lattes rows use payload year; null when unresolvable. Extend `tests/test_advisorship_canonical_values.py` (previously-failing assertions now pass)
+- [x] T002 Create `src/core/logic/advisorship_canonical_values.py` with data classes (`AdvisorshipSourceInfo`) and the SQL loader `load_advisorship_source_values(session) -> Dict[int, list[AdvisorshipSourceInfo]]`, joining `entity_matches (canonical_entity_type='advisorship')` → `source_records` (source_entity_type='advisorship') and extracting per record: source_system, source_path, and payload keys `Programa`, `AgFinanciadora`, `Ano`, `Id` (sigpesq) and `year`/`end_year`/`start_year` (lattes). Write-first failing unit test `tests/test_advisorship_canonical_values.py` asserting the loader returns the known stored payloads for sample advisorship ids. NOTE: must remain a single grouped SQL query (no per-row queries) to honor the plan performance goal
+- [x] T003 Implement the pure resolver `resolve_advisorship_canonical_values(records) -> AdvisorshipCanonicalValues` in `src/core/logic/advisorship_canonical_values.py`: `program`/`provider` from payload report-spelled trimmed; explicit `null` when absent; `year` = sigpesq report/directory year (`source_path` regex `advisorships/(\d{4})/`) with tie-break to payload `Ano`, else most recent dir-year, ties by lowest `source_record.id`; lattes rows use payload year; null when unresolvable. Extend `tests/test_advisorship_canonical_values.py` (previously-failing assertions now pass)
 
 **Checkpoint**: Engine module exists with passing unit tests; stories can start in parallel.
 
@@ -55,17 +55,17 @@ Key files: `src/core/logic/canonical_exporter.py`, `src/core/logic/initiative_ha
 
 ### Tests for User Story 1 (write FIRST, ensure they FAIL before implementation) ⚠️
 
-- [ ] T004 [US1] Strategy test: `SigPesqAdvisorshipMappingStrategy.map_row` return contains `"program"` equal to the trimmed report `Programa` for a Pivic/Voluntário row in `tests/test_mappers.py`
-- [ ] T005 [P] [US1] Handler test: `AdvisorshipHandler._handle_advisorship_details` persists `initiative.program` on both create and update paths in `tests/test_initiative_handlers.py`
-- [ ] T006 [P] [US1] Export test: `export_advisorship` dicts carry additive `year`, `program`, `provider`; a SigPesq-sourced advisorship exposes non-null report-spelled `Pivic`/`Voluntário` in `tests/test_canonical_exporter.py`
-- [ ] T007 [P] [US1] Parity test: every `advisorships.id` appears exactly once across `advisorships_canonical.json` groups (orphans included), and no existing key changed (FR-004/FR-005) in `tests/test_canonical_exporter.py`
+- [x] T004 [US1] Strategy test: `SigPesqAdvisorshipMappingStrategy.map_row` return contains `"program"` equal to the trimmed report `Programa` for a Pivic/Voluntário row in `tests/test_sigpesq_advisorship_mapping.py` (the file covering the strategy; `tests/test_mappers.py` covers the general mapper)
+- [x] T005 [P] [US1] Handler test: `AdvisorshipHandler._handle_advisorship_details` persists `initiative.program` on both create and update paths in `tests/test_initiative_handlers.py`
+- [x] T006 [P] [US1] Export test: `export_advisorship` dicts carry additive `year`, `program`, `provider`; a SigPesq-sourced advisorship exposes non-null report-spelled `Pivic`/`Voluntário` in `tests/test_canonical_exporter.py`
+- [x] T007 [P] [US1] Parity test: every `advisorships.id` appears exactly once across `advisorships_canonical.json` groups (orphans included), and no existing key changed (FR-004/FR-005) in `tests/test_canonical_exporter.py`
 
 ### Implementation for User Story 1
 
-- [ ] T008 [US1] Add `"program": str(programa).strip()` to the return dict of `SigPesqAdvisorshipMappingStrategy.map_row` in `src/core/logic/strategies/sigpesq_advisorships.py` (makes T004 pass)
-- [ ] T009 [US1] Persist `initiative.program = project_data.get("program")` in `AdvisorshipHandler._handle_advisorship_details` in `src/core/logic/initiative_handlers.py` (create + update paths; makes T005 pass)
-- [ ] T010 [US1] Wire the engine into `CanonicalDataExporter.export_advisorships` in `src/core/logic/canonical_exporter.py`: call `load_advisorship_source_values` + `resolve_advisorship_canonical_values`, then add `year`/`program`/`provider` to each advisorship dict (additive, only `advisorships_canonical.json`; make T006/T007 pass)
-- [ ] T011 [US1] Handle empty/absent `Programa`/`AgFinanciadora`: resolver already returns explicit `null` (FR-009); add an export-level assertion in `tests/test_canonical_exporter.py` that absent category stays `null` and the file remains valid JSON (acceptance scenario US1.3)
+- [x] T008 [US1] Add `"program": str(programa).strip()` to the return dict of `SigPesqAdvisorshipMappingStrategy.map_row` in `src/core/logic/strategies/sigpesq_advisorships.py` (makes T004 pass)
+- [x] T009 [US1] Persist `initiative.program = project_data.get("program")` in `AdvisorshipHandler._handle_advisorship_details` in `src/core/logic/initiative_handlers.py` (create + update paths; makes T005 pass)
+- [x] T010 [US1] Wire the engine into `CanonicalDataExporter.export_advisorships` in `src/core/logic/canonical_exporter.py`: call `load_advisorship_source_values` + `resolve_advisorship_canonical_values`, then add `year`/`program`/`provider` to each advisorship dict (additive, only `advisorships_canonical.json`; make T006/T007 pass)
+- [x] T011 [US1] Handle empty/absent `Programa`/`AgFinanciadora`: resolver already returns explicit `null` (FR-009); add an export-level assertion in `tests/test_canonical_exporter.py` that absent category stays `null` and the file remains valid JSON (acceptance scenario US1.3)
 
 **Checkpoint**: US1 functional — export carries per-year category end-to-end; new ingestions populate `advisorships.program`.
 
@@ -79,13 +79,13 @@ Key files: `src/core/logic/canonical_exporter.py`, `src/core/logic/initiative_ha
 
 ### Tests for User Story 2 (write FIRST, ensure they FAIL before implementation) ⚠️
 
-- [ ] T012 [US2] Year-resolution tests in `tests/test_advisorship_canonical_values.py`: (a) same work plan under `advisorships/2016/` and `advisorships/2025/` resolves `2016`/`2025`; (b) the observed duplicate case `Id 4882` present under `2021/` and `2022/` with payload `Ano=2021` resolves to `2021`; (c) `Inicio` 2016-09-26 / `Fim` 2017-07-31 under `advisorships/2016/` resolves `2016`; (d) determinism — ties broken by lowest `source_record.id`; (e) cancelled (`Cancelado=1`) and volunteer (`AgFinanciadora=Voluntário`) advisorship rows still resolve a category; (f) the same person with two differently-categorized advisorship rows yields distinct values
-- [ ] T013 [US2] Per-year parity test in `tests/test_canonical_exporter.py`: advisorship export count per year equals the number of distinct sigpesq advisorship source records for that `source_path` year (SC-003)
+- [x] T012 [US2] Year-resolution tests in `tests/test_advisorship_canonical_values.py`: (a) same work plan under `advisorships/2016/` and `advisorships/2025/` resolves `2016`/`2025`; (b) the observed duplicate case `Id 4882` present under `2021/` and `2022/` with payload `Ano=2021` resolves to `2021`; (c) `Inicio` 2016-09-26 / `Fim` 2017-07-31 under `advisorships/2016/` resolves `2016`; (d) determinism — ties broken by lowest `source_record.id`; (e) cancelled (`Cancelado=1`) and volunteer (`AgFinanciadora=Voluntário`) advisorship rows still resolve a category; (f) the same person with two differently-categorized advisorship rows yields distinct values
+- [x] T013 [US2] Per-year parity test in `tests/test_canonical_exporter.py`: advisorship export count per year equals the number of distinct sigpesq advisorship source records for that `source_path` year (SC-003)
 
 ### Implementation for User Story 2
 
-- [ ] T014 [US2] Refine/confirm the year rule in `resolve_advisorship_canonical_values` in `src/core/logic/advisorship_canonical_values.py` (`source_path` dir-year primary, `Ano` tie-break, most-recent fallback, lattes payload year) until T012 passes; add a small exported helper `report_year_from_path(source_path) -> int | None` with unit tests in `tests/test_advisorship_canonical_values.py`
-- [ ] T015 [US2] Export-level integration test in `tests/test_canonical_exporter.py` asserting the cross-year sample (2016 Pivic advisorship) shows `year: 2016`/`program: Pivic`, and the 2025 sample keeps its own values — makes T013 pass (fix any export-side wiring bugs this surfaces in `src/core/logic/canonical_exporter.py`)
+- [x] T014 [US2] Refine/confirm the year rule in `resolve_advisorship_canonical_values` in `src/core/logic/advisorship_canonical_values.py` (`source_path` dir-year primary, `Ano` tie-break, most-recent fallback, lattes payload year) until T012 passes; add a small exported helper `report_year_from_path(source_path) -> int | None` with unit tests in `tests/test_advisorship_canonical_values.py`
+- [x] T015 [US2] Export-level integration test in `tests/test_canonical_exporter.py` asserting the cross-year sample (2016 Pivic advisorship) shows `year: 2016`/`program: Pivic`, and the 2025 sample keeps its own values — makes T013 pass (fix any export-side wiring bugs this surfaces in `src/core/logic/canonical_exporter.py`)
 
 **Checkpoint**: US2 functional — years are per-report/directory, cross-year values never contaminated, per-year parity verified.
 
@@ -99,13 +99,13 @@ Key files: `src/core/logic/canonical_exporter.py`, `src/core/logic/initiative_ha
 
 ### Tests for User Story 3 (write FIRST, ensure they FAIL before implementation) ⚠️
 
-- [ ] T016 [US3] Provenance test in `tests/test_advisorship_canonical_values.py`: for every advisorship source record with a resolvable `Programa`/`AgFinanciadora`, the record's `source_path` matches `data/raw/sigpesq/advisorships/(\d{4})/` and `Ano` is present; any advisorship whose category resolved non-null is traceable to such a record
+- [x] T016 [US3] Provenance test in `tests/test_advisorship_canonical_values.py`: for every advisorship source record with a resolvable `Programa`/`AgFinanciadora`, the record's `source_path` matches `data/raw/sigpesq/advisorships/(\d{4})/` and `Ano` is present; any advisorship whose category resolved non-null is traceable to such a record
 
 ### Implementation for User Story 3
 
-- [ ] T017 [US3] Expose provenance fields needed for the audit: ensure `AdvisorshipSourceInfo` carries `source_record_id`, `source_path` and payload `Ano` (extend `src/core/logic/advisorship_canonical_values.py` if absent) so T016 passes
-- [ ] T018 [P] [US3] Document the provenance trace path and report-year attribution in `contracts/advisorships-canonical.md` (which source record backs `program`/`provider`/`year`, how to verify, determinism note)
-- [ ] T019 [US3] Add audit script `src/scripts/audit_advisorship_category_provenance.py`: reads `advisorships_canonical.json` + DB (`source_records`/`entity_matches`), flags any non-null category without a matching `advisorships/YYYY/` sigpesq source record, exits non-zero on findings; wire it into `quickstart.md` §3 as the SC-004/FR-004 gate
+- [x] T017 [US3] Expose provenance fields needed for the audit: ensure `AdvisorshipSourceInfo` carries `source_record_id`, `source_path` and payload `Ano` (extend `src/core/logic/advisorship_canonical_values.py` if absent) so T016 passes
+- [x] T018 [P] [US3] Document the provenance trace path and report-year attribution in `contracts/advisorships-canonical.md` (which source record backs `program`/`provider`/`year`, how to verify, determinism note)
+- [x] T019 [US3] Add audit script `src/scripts/audit_advisorship_category_provenance.py`: reads `advisorships_canonical.json` + DB (`source_records`/`entity_matches`), flags any non-null category without a matching `advisorships/YYYY/` sigpesq source record, exits non-zero on findings; wire it into `quickstart.md` §3 as the SC-004/FR-004 gate
 
 **Checkpoint**: US3 functional — provenance auditable, contract documents the trace, audit script green on current data.
 
@@ -115,10 +115,10 @@ Key files: `src/core/logic/canonical_exporter.py`, `src/core/logic/initiative_ha
 
 **Purpose**: Full quality gate, LGPD gate, docs consistency, end-to-end validation.
 
-- [ ] T020 [P] Run `make ci-check` (black, isort, flake8, mypy, pytest) and fix any NEW regressions from this feature (the 6 pre-existing failures from T001 baseline must remain the only ones) — SC-006
-- [ ] T021 [P] Run the LGPD scan from `quickstart.md` §6 against a regenerated `advisorships_canonical.json`: assert no raw email/phone/CPF patterns in the artifact — SC-005 / FR-006
-- [ ] T022 [P] Update `specs/009-advisorship-value-fetch/spec.md` Status `Draft` → `Ready` and synchronize any cross-references in `plan.md`/`data-model.md`/`contracts/` left stale by implementation
-- [ ] T023 Run `quickstart.md` scenarios §1–§4 and §6 end-to-end on the regenerated export and confirm SC-001..SC-004 sample checks; §5 (re-ingestion) is deploy-env-only (Prefect) and treated as SKIPPED in dev envs
+- [x] T020 [P] Run `make ci-check` (black, isort, flake8, mypy, pytest) and fix any NEW regressions from this feature (the 6 pre-existing failures from T001 baseline must remain the only ones) — SC-006
+- [x] T021 [P] Run the LGPD scan from `quickstart.md` §6 against a regenerated `advisorships_canonical.json`: assert no raw email/phone/CPF patterns in the artifact — SC-005 / FR-006
+- [x] T022 [P] Update `specs/009-advisorship-value-fetch/spec.md` Status `Draft` → `Ready` and synchronize any cross-references in `plan.md`/`data-model.md`/`contracts/` left stale by implementation
+- [x] T023 Run `quickstart.md` scenarios §1–§4 and §6 end-to-end on the regenerated export and confirm SC-001..SC-004 sample checks; §5 (re-ingestion) is deploy-env-only (Prefect) and treated as SKIPPED in dev envs
 
 ---
 

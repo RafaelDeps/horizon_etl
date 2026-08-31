@@ -71,28 +71,54 @@ PY
 
 Expected: `missing from export:` empty; keys shown include `Programa`, `AgFinanciadora`, `Ano` (no PII keys surfaced).
 
+**SC-004 / FR-004 gate:** every non-null category must be traceable to a SigPesq report
+record. Run the audit script (exits non-zero on findings):
+
+```bash
+PYTHONPATH=. .venv/bin/python src/scripts/audit_advisorship_category_provenance.py \
+  --json-path data/exports/advisorships_canonical.json --db-path db/horizon.db
+```
+
+Expected: `"state": "PASS"` and `"findings": []`.
+
 ## 4. Year disambiguation (Q2=A)
 
-Verify the observed duplicate case: advisorship from `Id 4882` present under both
-`advisorships/2021/` and `advisorships/2022/` with payload `Ano=2021` exports
-`year: 2021`.
+Verify the observed duplicate case: the advisorship whose SigPesq row has `Id 4882` is
+matched under both `advisorships/2021/` and `advisorships/2022/` (payload `Ano=2021`);
+it must export `year: 2021`. Export `id` is the canonical advisorship entity id, not
+the SigPesq row id — locate it through the tracking tables:
 
 ```bash
 PYTHONPATH=. .venv/bin/python - <<'PY'
-import json
+import json, sqlite3
+db = sqlite3.connect("db/horizon.db")
+# canonical advisorship id(s) backing the SigPesq row Id 4882
+aids = [r[0] for r in db.execute("""
+  select em.canonical_entity_id
+  from source_records sr
+  join entity_matches em on em.source_record_id = sr.id
+  where sr.source_system='sigpesq_advisorships'
+    and sr.source_entity_type='advisorship'
+    and em.canonical_entity_type='advisorship'
+    and sr.raw_payload_json like '%4882%'
+""")]
 d = json.load(open("data/exports/advisorships_canonical.json"))
-cands = [a for p in d for a in p["advisorships"] if a["id"] == 4882]
+cands = [a for p in d for a in p["advisorships"] if a["id"] in aids]
 print(cands)
 PY
 ```
 
-Expected: `year` equals 2021 (payload `Ano`), the directory-year tie-break rule.
+Expected: the sample advisorship (in this DB: entity `391`) shows `year` equal to 2021
+(payload `Ano`), the directory-year tie-break rule.
 
 ## 5. Ingestion persistence (FR-007)
 
-> **NOTE**: Requires a working Prefect server (`make prefect-server`). In dev envs where
-> Prefect is unavailable, mark this scenario SKIPPED and run it after a deploy-env
-> re-ingestion; export-side correctness is already covered by §2/§3.
+> **NOTE**: Requires a working Prefect server (`make prefect-server`). Prefect 3.6.23
+> needs `fastapi==0.115.12` (requirements.txt) — a newer FastAPI breaks the temporary
+> Prefect API server with `'PrefectRouter' object has no attribute 'routes'`. If you hit
+> that error, reinstall with the pinned FastAPI: `pip install -r requirements.txt`.
+> In dev envs without live SigPesq/CNPq portal access, mark persistence SKIPPED after
+> confirming the flow starts; export-side correctness is already covered by §2/§3.
 
 After a SigPesq advisorship re-ingestion (e.g. `make ingest-sigpesq` for a fresh
 report year):

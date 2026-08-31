@@ -99,7 +99,7 @@ src/scripts/
 tests/
 ├── test_canonical_exporter.py                  # extend: export emits new fields, parity sample
 ├── test_initiative_handlers.py                 # extend: program persisted on create/update
-├── test_mappers.py                             # extend: strategy return carries "program"
+├── test_sigpesq_advisorship_mapping.py          # extend: strategy return carries "program"
 └── test_advisorship_canonical_values.py        # NEW: resolution rules (dir year vs Ano, ties, lattes null)
 ```
 

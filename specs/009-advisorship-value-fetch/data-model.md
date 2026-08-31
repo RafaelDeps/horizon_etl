@@ -54,8 +54,8 @@ SigPesq report row (Programa, AgFinanciadora, Ano)
    ▼
 advisorships_canonical.json  ←  CanonicalDataExporter.export_advisorships
        NEW: per advisorship → year | program | provider
-   resolve: advisorship.program → fellowship.name          → payload "Programa"      → null
-            fellowship sponsor  → payload "AgFinanciadora" → null
+   resolve: payload "Programa" → advisorship.program → fellowship.name  → null
+            payload "AgFinanciadora" → fellowship sponsor → null
             dir-year (tie-break Ano; Lattes: year field)   → null
 ```
 

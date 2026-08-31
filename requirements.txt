@@ -1,4 +1,10 @@
 prefect==3.6.23
+# prefect 3.6.23 subclasses fastapi's APIRouter in a way that is broken by the
+# router redesign in fastapi>=0.136. fastapi 0.141.x/starlette 1.x crash the
+# temporary Prefect API server with
+# "AttributeError: 'PrefectRouter' object has no attribute 'routes'".
+# Pin fastapi to the generation that shipped alongside prefect 3.6.23.
+fastapi==0.115.12
 loguru>=0.7.0
 pydantic>=2.0.0
 supabase>=2.0.0

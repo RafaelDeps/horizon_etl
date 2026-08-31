@@ -14,6 +14,10 @@ from research_domain import (
 )
 from sqlalchemy import text
 
+from src.core.logic.advisorship_canonical_values import (
+    load_advisorship_source_values,
+    resolve_advisorship_canonical_values,
+)
 from src.core.logic.export_campus_resolver import ExportCampusResolver
 from src.core.logic.pii_anonymizer import scrub_pii_deep, scrub_source_record_payload
 from src.core.ports.export_sink import IExportSink
@@ -234,6 +238,7 @@ class CanonicalDataExporter:
             SELECT
                 a.id, i.name, i.status, i.description, i.start_date, i.end_date,
                 a.type as advisorship_type,
+                a.program as advisorship_program,
                 it.name as initiative_type_name,
                 am_std.student_id AS person_id, p_std.name as person_name,
                 am_sup.supervisor_id, p_sup.name as supervisor_name,
@@ -288,6 +293,7 @@ class CanonicalDataExporter:
             SELECT
                 a.id, i.name, i.status, i.description, i.start_date, i.end_date,
                 a.type as advisorship_type,
+                a.program as advisorship_program,
                 it.name as initiative_type_name,
                 a.student_id AS person_id, p_std.name as person_name,
                 a.supervisor_id, p_sup.name as supervisor_name,
@@ -2067,12 +2073,16 @@ class CanonicalDataExporter:
         resolver = self._get_campus_resolver()
         session = self.initiative_ctrl._service._repository._session
         result = self._fetch_advisorship_export_rows(session)
+        source_values = load_advisorship_source_values(session)
 
         projects_map = {}
         orphans = []
 
         for row in result:
             row_data = self._row_to_dict(row)
+            values = resolve_advisorship_canonical_values(
+                source_values.get(row_data["id"], [])
+            )
             adv_data = {
                 "id": row_data["id"],
                 "name": row_data["name"],
@@ -2095,6 +2105,13 @@ class CanonicalDataExporter:
                 "supervisor_id": row_data["supervisor_id"],
                 "supervisor_name": row_data["supervisor_name"],
                 "campus": resolver.get_campus("advisorship", row_data["id"]),
+                "year": values.year,
+                "program": (
+                    values.program
+                    or row_data.get("advisorship_program")
+                    or row_data.get("fellowship_name")
+                ),
+                "provider": values.provider or row_data.get("sponsor_name"),
                 "fellowship": (
                     {
                         "id": row_data["fellowship_id"],
