@@ -82,7 +82,10 @@ class SigPesqAdapter(ISource):
         """
         Calls the external lib to download files.
         Retries up to _SIGPESQ_MAX_RETRIES times with exponential backoff when
-        HTTP 429 rate-limiting is detected on login.
+        the download does not succeed. A failed login (HTTP 429 rate-limit OR a
+        Page.goto timeout — RNP portal is intermittently slow from GitHub-hosted
+        runners) previously aborted after a single attempt; the same transient
+        slowness is often cleared by a later retry.
         """
         logger.info(f"Triggering sigpesq_agent in {self.download_dir}...")
 
@@ -113,14 +116,19 @@ class SigPesqAdapter(ISource):
             if success:
                 return
 
-            if rate_limited["seen"] and attempt < _SIGPESQ_MAX_RETRIES:
-                wait = _SIGPESQ_429_WAIT_SECONDS * (2 ** (attempt - 1))
-                logger.warning(
-                    "HTTP 429 on attempt {}/{}. Waiting {}s before retry...",
-                    attempt,
-                    _SIGPESQ_MAX_RETRIES,
-                    wait,
-                )
+            if attempt < _SIGPESQ_MAX_RETRIES:
+                if rate_limited["seen"]:
+                    wait = _SIGPESQ_429_WAIT_SECONDS * (2 ** (attempt - 1))
+                    reason = f"HTTP 429 rate-limiting on attempt {attempt}/{_SIGPESQ_MAX_RETRIES}"
+                else:
+                    # Non-429 failure (e.g. Page.goto TimeoutError on login).
+                    # RNP portal is intermittently slow from hosted runners; use
+                    # a shorter wait and still allow the download to retry.
+                    wait = min(5 * (2 ** (attempt - 1)), 60)
+                    reason = (
+                        f"Non-429 failure on attempt {attempt}/{_SIGPESQ_MAX_RETRIES}"
+                    )
+                logger.warning("{}. Waiting {}s before retry...", reason, wait)
                 time.sleep(wait)
                 self._clean_download_dir()
                 continue
@@ -142,13 +150,16 @@ class SigPesqAdapter(ISource):
         Only apply the simplified launch on macOS.
         """
         import sys
+
         if sys.platform != "darwin":
             return
         try:
             from agent_sigpesq.core import browser_factory as _bf_mod
             from playwright.async_api import Playwright
 
-            async def _safe_create_browser_context(playwright: Playwright, headless: bool = True):
+            async def _safe_create_browser_context(
+                playwright: Playwright, headless: bool = True
+            ):
                 browser = await playwright.chromium.launch(headless=headless)
                 context = await browser.new_context(
                     viewport={"width": 1920, "height": 1080},
@@ -160,7 +171,9 @@ class SigPesqAdapter(ISource):
                 )
                 return context
 
-            _bf_mod.BrowserFactory.create_browser_context = staticmethod(_safe_create_browser_context)
+            _bf_mod.BrowserFactory.create_browser_context = staticmethod(
+                _safe_create_browser_context
+            )
         except Exception as exc:
             logger.warning(f"Could not patch BrowserFactory: {exc}")
 
