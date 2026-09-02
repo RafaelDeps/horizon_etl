@@ -47,7 +47,7 @@ def get_groups_to_sync(
             logger.warning(
                 f"No campus found matching '{campus_name}'. Proceeding with no results."
             )
-            return []
+            return {"valid": [], "invalid": []}
 
         if len(matching_campuses) > 1:
             logger.warning(
