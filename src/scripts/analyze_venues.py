@@ -1111,6 +1111,7 @@ def render_html(
 
     r = payload["resumo"]
     qdist = payload["distribuicao_sjr_quartil"]
+    subval = None
     # normaliza chave '-' para '—'
     qd = defaultdict(int)
     for k, v in qdist.items():
