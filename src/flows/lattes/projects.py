@@ -111,6 +111,7 @@ def _ingest_researcher_file(
     entity_manager: EntityManager,
     parser: LattesParser,
     researcher_index: List[ResearcherRef],
+    project_loader: "ProjectLoader",
 ):
     try:
         filename = os.path.basename(file_path)
@@ -274,9 +275,9 @@ def _ingest_researcher_file(
             mapping_strategy = LattesProjectMappingStrategy(
                 target_researcher.name, researcher_roles
             )
-            loader = ProjectLoader(mapping_strategy=mapping_strategy)
+            project_loader.mapping_strategy = mapping_strategy
 
-            loader.process_records(unique_projects, source_file=file_path)
+            project_loader.process_records(unique_projects, source_file=file_path)
 
         # 3. Handle Articles
         articles = []
@@ -335,8 +336,11 @@ def ingest_researcher_data(
     entity_manager: EntityManager,
     parser: LattesParser,
     researcher_index: List[ResearcherRef],
+    project_loader: "ProjectLoader",
 ):
-    _ingest_researcher_file(file_path, entity_manager, parser, researcher_index)
+    _ingest_researcher_file(
+        file_path, entity_manager, parser, researcher_index, project_loader
+    )
 
 
 @task(name="Ingest Lattes Researcher File", cache_policy=NO_CACHE)
@@ -352,8 +356,15 @@ def ingest_file_task(file_path: str, entity_manager: EntityManager):
         session = ResearcherController()._service._repository._session
     except Exception:
         pass
+    from src.core.logic.project_loader import ProjectLoader
+
+    project_loader = ProjectLoader(mapping_strategy=None)
     _ingest_researcher_file(
-        file_path, entity_manager, parser, load_researcher_index(session)
+        file_path,
+        entity_manager,
+        parser,
+        load_researcher_index(session),
+        project_loader,
     )
 
 
@@ -898,11 +909,21 @@ def ingest_lattes_projects_flow():
     researcher_index = load_researcher_index(session)
     logger.info(f"Researcher index loaded with {len(researcher_index)} entries")
 
+    # Build each record's own mapping strategy per file, but reuse ONE
+    # ProjectLoader across all files: building it per CV reloads the full
+    # initiative + person tables each time (4449 initiatives / 4660 persons),
+    # spiking a single heavy file's peak well past runner limits.
+    from src.core.logic.project_loader import ProjectLoader
+
+    project_loader = ProjectLoader(mapping_strategy=None)
+
     with tracking_recorder.run_context(
         source_system="lattes_projects", flow_name="lattes_projects"
     ):
         for json_file in json_files:
-            ingest_researcher_data(json_file, entity_manager, parser, researcher_index)
+            ingest_researcher_data(
+                json_file, entity_manager, parser, researcher_index, project_loader
+            )
             # The ORM sessions accumulate every entity created for all 125 CV
             # files in their identity maps; merely committing (done inside the
             # ingest helpers) does not release those references. Expire them

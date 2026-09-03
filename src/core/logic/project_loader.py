@@ -80,28 +80,20 @@ class ProjectLoader:
         )
         self.org_id = self.entity_manager.ensure_organization()
 
-    def process_file(self, file_path: str) -> None:
-        """
-        Reads an Excel file and orchestrates the UPSERT logic across handlers and linkers.
-        """
-        logger.info(f"Processing Projects from: {file_path}")
+        # Lazy-load caches. A single ProjectLoader instance reused across many
+        # input files (e.g. the 125 Lattes CVs) must load the full initiative
+        # and person tables only once, not once per file — otherwise the shared
+        # ORM session keeps thousands of entities alive and private-runners OOM
+        # (signal 11). The maps are mutated in place as new rows are created, so
+        # they stay in sync with the DB across process_records() calls.
+        self._existing_initiatives = None
+        self._existing_by_name = None
+        self._existing_by_norm_name = None
+        self._existing_by_identity = None
 
-        try:
-            df = pd.read_excel(file_path)
-            df = df.fillna("")
-        except Exception as e:
-            logger.error(f"Failed to read Excel file {file_path}: {e}")
+    def _ensure_existing_initiatives(self) -> None:
+        if self._existing_by_name is not None:
             return
-
-        records = df.to_dict("records")
-        self.process_records(records, source_file=file_path)
-
-    def process_records(
-        self, records: list[Dict[str, Any]], source_file: Optional[str] = None
-    ) -> None:
-        """
-        Maps a list of raw dictionary records and orchestrates the UPSERT logic across handlers and linkers.
-        """
         logger.info("Fetching existing initiatives for UPSERT...")
         existing_initiatives = self.controller.get_all()
         existing_by_name = {
@@ -124,8 +116,44 @@ class ProjectLoader:
             identity = get_existing_initiative_identity(init)
             if identity:
                 existing_by_identity[identity] = init
+        self._existing_initiatives = existing_initiatives
+        self._existing_by_name = existing_by_name
+        self._existing_by_norm_name = existing_by_norm_name
+        self._existing_by_identity = existing_by_identity
 
+    def _ensure_person_cache(self) -> None:
+        if self.person_matcher._persons_cache:
+            return
         self.person_matcher.preload_cache()
+
+    def process_file(self, file_path: str) -> None:
+        """
+        Reads an Excel file and orchestrates the UPSERT logic across handlers and linkers.
+        """
+        logger.info(f"Processing Projects from: {file_path}")
+
+        try:
+            df = pd.read_excel(file_path)
+            df = df.fillna("")
+        except Exception as e:
+            logger.error(f"Failed to read Excel file {file_path}: {e}")
+            return
+
+        records = df.to_dict("records")
+        self.process_records(records, source_file=file_path)
+
+    def process_records(
+        self, records: list[Dict[str, Any]], source_file: Optional[str] = None
+    ) -> None:
+        """
+        Maps a list of raw dictionary records and orchestrates the UPSERT logic across handlers and linkers.
+        """
+        self._ensure_existing_initiatives()
+        existing_by_name = self._existing_by_name
+        existing_by_norm_name = self._existing_by_norm_name
+        existing_by_identity = self._existing_by_identity
+
+        self._ensure_person_cache()
         initial_persons_count = len(self.person_matcher._persons_cache)
 
         # `skipped` era um contador só, somando descarte por regra de negócio e
