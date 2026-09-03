@@ -138,21 +138,44 @@ def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
             if campus:
                 argv.append(campus)
     logger.info("▶ phase '{}': {}", name, " ".join(argv[1:]))
-    try:
-        proc = subprocess.run(argv, timeout=timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        logger.error("phase '{}' timed out after {}s", name, timeout)
-        rc = None
-    ok = rc == 0
-    log = logger.info if ok else logger.error
+    rc = _run_phase_subprocess(argv, timeout, name)
+    log = logger.info if rc == 0 else logger.error
     log("phase '{}' finished: {}", name, _describe_rc(rc))
     return {
         "name": name,
-        "ok": ok,
+        "ok": rc == 0,
         "rc": rc,
         "critical": bool(argv_tail and _critical(name)),
     }
+
+
+def _run_phase_subprocess(argv, timeout, name):
+    """Runs a phase subprocess, retrying once when it dies by signal.
+
+    A signal death (rc < 0) on non-critical phases is usually a transient native
+    crash (e.g. a SIGSEGV in a C extension) rather than a deterministic logic
+    error. Retrying once lets the run self-heal so a flaky native crash does not
+    leave a red phase when the next attempt would succeed. Regular exit codes
+    (rc >= 0) and timeouts are never retried, so real failures are not masked.
+    """
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            proc = subprocess.run(argv, timeout=timeout)
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            logger.error("phase '{}' timed out after {}s", name, timeout)
+            return None
+        is_signal_death = rc is not None and rc < 0
+        if is_signal_death and attempt < max_attempts:
+            logger.warning(
+                "phase '{}' {} — retrying once",
+                name,
+                _describe_rc(rc),
+            )
+            continue
+        return rc
+    return rc
 
 
 def _critical(name):

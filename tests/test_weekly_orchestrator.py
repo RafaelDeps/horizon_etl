@@ -50,6 +50,60 @@ def test_describe_rc_signal_and_exit():
     assert wo._describe_rc(None) == "timeout"
 
 
+def test_signal_death_retries_once_and_self_heals():
+    codes = iter([-11, 0])  # SIGSEGV on first attempt, success on retry
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(1)
+        return MagicMock(returncode=next(codes))
+
+    with patch.object(wo.subprocess, "run", side_effect=fake_run):
+        rc = wo._run_phase_subprocess(["python", "-m", "x"], 60, "t")
+    assert rc == 0
+    assert len(calls) == 2
+
+
+def test_signal_death_retries_once_then_keeps_signal():
+    codes = iter([-11, -11])
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(1)
+        return MagicMock(returncode=next(codes))
+
+    with patch.object(wo.subprocess, "run", side_effect=fake_run):
+        rc = wo._run_phase_subprocess(["python", "-m", "x"], 60, "t")
+    assert rc == -11
+    assert len(calls) == 2
+
+
+def test_ordinary_nonzero_exit_is_not_retried():
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(1)
+        return MagicMock(returncode=1)
+
+    with patch.object(wo.subprocess, "run", side_effect=fake_run):
+        rc = wo._run_phase_subprocess(["python", "-m", "x"], 60, "t")
+    assert rc == 1
+    assert len(calls) == 1  # deterministic errors must not be masked by a retry
+
+
+def test_timeout_is_not_retried():
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(1)
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    with patch.object(wo.subprocess, "run", side_effect=fake_run):
+        rc = wo._run_phase_subprocess(["python", "-m", "x"], 60, "t")
+    assert rc is None
+    assert len(calls) == 1
+
+
 def test_noncritical_segfault_does_not_stop_later_phases():
     seen = []
     fake = _fake_run_factory(fail_cmd="ingest_lattes_projects", rc=139, seen=seen)
