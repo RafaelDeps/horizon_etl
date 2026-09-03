@@ -32,6 +32,7 @@ from src.tracking.entities import (
 
 try:
     from research_domain.controllers import ArticleController
+    from research_domain.domain.entities.article import ArticleType
 except ImportError:
 
     class ArticleController:  # type: ignore[override]
@@ -1874,10 +1875,42 @@ class CanonicalDataExporter:
         """
         Exports all articles to a JSON file.
 
+        Uses a column-only query instead of ``ArticleController.get_all()``:
+        the controller's ``authors`` relationship is ``lazy="joined"`` and
+        eagerly materializes the full researcher graph for every article,
+        spiking resident memory (~2.6GB for a few thousand rows) and
+        segfaulting with SIGSEGV on memory-constrained CI runners.
+
         Args:
             output_path (str): The destination file path.
         """
-        data = self.article_ctrl.get_all()
+        session = self._get_session()
+        if session is None:
+            logger.info("No session available. Skipping Articles export.")
+            return
+        columns = (
+            "id",
+            "title",
+            "doi",
+            "year",
+            "type",
+            "journal_conference",
+            "volume",
+            "pages",
+        )
+        rows = session.execute(
+            text(f"SELECT {', '.join(columns)} FROM articles ORDER BY id")
+        ).fetchall()
+        data = []
+        for row in rows:
+            item = {column: getattr(row, column) for column in columns}
+            raw_type = item.get("type")
+            if raw_type is not None:
+                try:
+                    item["type"] = ArticleType[raw_type].value
+                except KeyError:
+                    pass
+            data.append(item)
         self._export_entities(data, output_path, "Articles", entity_type="article")
 
     def _export_via_orm(self, model, output_path, label, entity_type=None):
