@@ -1960,9 +1960,36 @@ class CanonicalDataExporter:
         )
 
     def export_research_productions(self, output_path: str):
-        from research_domain.controllers import ResearchProductionController
+        """
+        Exports all research productions via a column-only query.
 
-        data = ResearchProductionController().get_all()
+        ``ResearchProductionController().get_all()`` eagerly materializes the
+        ``authors`` relationship (``lazy="joined"``, many-to-many), spiking
+        resident memory and segfaulting on memory-constrained CI runners. Query
+        the production columns directly instead.
+        """
+        session = self._get_session()
+        if session is None:
+            logger.info("No session available. Skipping Research Productions export.")
+            return
+        columns = (
+            "id",
+            "title",
+            "year",
+            "production_type_id",
+            "publisher",
+            "isbn",
+            "edition",
+            "book_title",
+            "pages",
+            "version",
+            "platform",
+            "link",
+        )
+        rows = session.execute(
+            text(f"SELECT {', '.join(columns)} FROM research_productions ORDER BY id")
+        ).fetchall()
+        data = [{column: getattr(row, column) for column in columns} for row in rows]
         self._export_entities(
             data,
             output_path,
