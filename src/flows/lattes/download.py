@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from platform import system
 from typing import Callable, Dict, List
@@ -18,6 +19,14 @@ DEFAULT_LATTES_PREFETCH_WORKERS = 3
 LATTES_PLAYWRIGHT_NAV_TIMEOUT_MS = 50_000
 LATTES_PREFETCH_ENABLED_ENV = "HORIZON_LATTES_PREFETCH"
 LATTES_PREFETCH_WORKERS_ENV = "HORIZON_LATTES_DOWNLOAD_WORKERS"
+# scriptLattes.baixaCVLattes retries timeouts/connection-resets *forever*
+# (a `continue` that never increments its attempt counter), so a flaky
+# lattes.cnpq.br hangs the whole phase. Bound the retries per CV so a stuck
+# curriculum fails fast and is skipped by prefetch_lattes_cache.
+LATTES_DOWNLOAD_MAX_ATTEMPTS_ENV = "HORIZON_LATTES_DOWNLOAD_MAX_ATTEMPTS"
+LATTES_DOWNLOAD_RETRY_SLEEP_S_ENV = "HORIZON_LATTES_DOWNLOAD_RETRY_SLEEP_S"
+DEFAULT_LATTES_DOWNLOAD_MAX_ATTEMPTS = 2
+DEFAULT_LATTES_DOWNLOAD_RETRY_SLEEP_S = 30
 LattesDownloader = Callable[[str, str], None]
 
 
@@ -68,6 +77,36 @@ def get_lattes_prefetch_workers() -> int:
         raise ValueError(f"{LATTES_PREFETCH_WORKERS_ENV} must be >= 1")
 
     return workers
+
+
+def get_lattes_download_max_attempts() -> int:
+    value = os.environ.get(LATTES_DOWNLOAD_MAX_ATTEMPTS_ENV)
+    if not value:
+        return DEFAULT_LATTES_DOWNLOAD_MAX_ATTEMPTS
+    try:
+        attempts = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{LATTES_DOWNLOAD_MAX_ATTEMPTS_ENV} must be an integer"
+        ) from exc
+    if attempts < 1:
+        raise ValueError(f"{LATTES_DOWNLOAD_MAX_ATTEMPTS_ENV} must be >= 1")
+    return attempts
+
+
+def get_lattes_download_retry_sleep_s() -> int:
+    value = os.environ.get(LATTES_DOWNLOAD_RETRY_SLEEP_S_ENV)
+    if not value:
+        return DEFAULT_LATTES_DOWNLOAD_RETRY_SLEEP_S
+    try:
+        sleep_s = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{LATTES_DOWNLOAD_RETRY_SLEEP_S_ENV} must be an integer"
+        ) from exc
+    if sleep_s < 0:
+        raise ValueError(f"{LATTES_DOWNLOAD_RETRY_SLEEP_S_ENV} must be >= 0")
+    return sleep_s
 
 
 def collect_lattes_ids_from_list(list_path: str) -> List[str]:
@@ -179,6 +218,54 @@ def patch_script_lattes_runtime(chrome_binary: str | None = None) -> None:
                 rob.playwright.stop()
 
     baixa_lattes.__get_data = get_data
+
+    def bounded_baixa_cv_lattes(id_lattes: str, diretorio: str) -> None:
+        """Bounded replacement for ``baixaCVLattes``.
+
+        The stock implementation wants forever on timeouts/connection-resets
+        (its ``continue`` never counts up), which stalls the phase against a
+        flaky ``lattes.cnpq.br``. Cap attempts so a stuck CV raises and is
+        skipped by ``prefetch_lattes_cache``.
+        """
+        max_attempts = get_lattes_download_max_attempts()
+        retry_sleep_s = get_lattes_download_retry_sleep_s()
+        timeout_type = baixa_lattes.PlaywrightTimeoutError or Exception
+        for attempt in range(1, max_attempts + 1):
+            destino = os.path.join(diretorio, id_lattes)
+            if os.path.exists(destino):
+                return
+            try:
+                baixa_lattes.__get_data(id_lattes, diretorio)
+            except timeout_type:
+                if attempt >= max_attempts:
+                    raise
+                logger.warning(
+                    f"Lattes {id_lattes} navigation timeout (attempt "
+                    f"{attempt}/{max_attempts}), retrying in {retry_sleep_s}s."
+                )
+                time.sleep(retry_sleep_s)
+                continue
+            except Exception as exc:
+                text = str(exc)
+                if "ERR_CONNECTION_REFUSED" in text or "ERR_CONNECTION_RESET" in text:
+                    if attempt >= max_attempts:
+                        raise
+                    logger.warning(
+                        f"Lattes {id_lattes} connection error (attempt "
+                        f"{attempt}/{max_attempts}), retrying in {retry_sleep_s}s."
+                    )
+                    time.sleep(retry_sleep_s)
+                    continue
+                raise
+            if os.path.exists(destino):
+                return
+            if attempt >= max_attempts:
+                raise ScriptLattesRuntimeError(
+                    f"scriptLattes did not create the cache file for Lattes ID "
+                    f"{id_lattes}"
+                )
+
+    baixa_lattes.baixaCVLattes = bounded_baixa_cv_lattes
     baixa_lattes._horizon_runtime_patched = True
 
 

@@ -1,12 +1,14 @@
 import os
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from src.flows.lattes.download import (
     ScriptLattesRuntimeError,
     clean_lattes_json_output,
     collect_lattes_ids_from_list,
     download_lattes_flow,
+    patch_script_lattes_runtime,
     prefetch_lattes_cache,
     validate_script_lattes_runtime,
 )
@@ -186,3 +188,48 @@ def test_download_lattes_flow(tmp_path, monkeypatch):
     # The flow mocks IDs, but scriptLattes might prefix them with numbers/names
     assert any("8400407353673370" in f for f in os.listdir("data/lattes_json"))
     assert any("9583314331960942" in f for f in os.listdir("data/lattes_json"))
+
+
+def test_bounded_baixa_cv_lattes_gives_up_after_bounded_timeouts(tmp_path, monkeypatch):
+    """A stuck CV must raise (so prefetch skips it) instead of retrying forever."""
+    import scriptLattes.baixaLattes as baixa_lattes
+
+    patch_script_lattes_runtime()
+
+    attempts = []
+
+    def always_timeout(id_lattes, diretorio):
+        attempts.append(id_lattes)
+        raise PlaywrightTimeoutError("navigation timeout")
+
+    monkeypatch.setattr(baixa_lattes, "__get_data", always_timeout)
+    monkeypatch.setenv("HORIZON_LATTES_DOWNLOAD_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("HORIZON_LATTES_DOWNLOAD_RETRY_SLEEP_S", "0")
+
+    with pytest.raises(PlaywrightTimeoutError):
+        baixa_lattes.baixaCVLattes("9583314331960942", str(tmp_path))
+
+    assert len(attempts) == 2
+
+
+def test_bounded_baixa_cv_lattes_skips_connection_resets(tmp_path, monkeypatch):
+    """ERR_CONNECTION_RESET (seen in CI) must be retried a bounded number of
+    times, then raise, rather than aborting immediately or hanging forever."""
+    import scriptLattes.baixaLattes as baixa_lattes
+
+    patch_script_lattes_runtime()
+
+    attempts = []
+
+    def always_reset(id_lattes, diretorio):
+        attempts.append(id_lattes)
+        raise Exception("net::ERR_CONNECTION_RESET")
+
+    monkeypatch.setattr(baixa_lattes, "__get_data", always_reset)
+    monkeypatch.setenv("HORIZON_LATTES_DOWNLOAD_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("HORIZON_LATTES_DOWNLOAD_RETRY_SLEEP_S", "0")
+
+    with pytest.raises(Exception, match="ERR_CONNECTION_RESET"):
+        baixa_lattes.baixaCVLattes("9583314331960942", str(tmp_path))
+
+    assert len(attempts) == 3
