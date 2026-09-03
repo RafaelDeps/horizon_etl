@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "horizon-dashboard-preview",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /home/rafael/horizon_dashboard_h && npm run preview -- --port 4321 --host"],
+      "port": 4321
+    }
+  ]
+}

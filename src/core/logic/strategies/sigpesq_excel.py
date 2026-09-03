@@ -45,16 +45,28 @@ class SigPesqOrganizationStrategy(OrganizationStrategy):
 
 
 class SigPesqCampusStrategy(CampusStrategy):
+    # O relatório de orientações traz o campus escrito à mão: "Serra",
+    # "Campus Serra", "serra", "Serra ". O normalize_text já resolve caixa,
+    # acento e espaço, mas não a palavra "campus" na frente — e como o caminho
+    # de falha aqui é criar o campus, a variante prefixada nasceria como uma
+    # unidade organizacional nova. Por isso o prefixo sai antes da comparação.
+    _CAMPUS_PREFIX = re.compile(r"^campus\s+", re.IGNORECASE)
+
+    @classmethod
+    def _strip_campus_prefix(cls, normalized_name: str) -> str:
+        """Remove o "campus " inicial, desde que sobre algum nome."""
+        stripped = cls._CAMPUS_PREFIX.sub("", normalized_name).strip()
+        return stripped or normalized_name
+
     def ensure(self, campus_ctrl, campus_name: str, org_id: int) -> int:
         """Ensures Campus exists."""
         try:
             all_campuses = campus_ctrl.get_all()
-            target_name = normalize_text(campus_name)
+            target_name = self._strip_campus_prefix(normalize_text(campus_name))
             for campus in all_campuses:
                 c_org = getattr(campus, "organization_id", None)
-                if normalize_text(campus.name) == target_name and (
-                    c_org is None or c_org == org_id
-                ):
+                existing_name = self._strip_campus_prefix(normalize_text(campus.name))
+                if existing_name == target_name and (c_org is None or c_org == org_id):
                     logger.debug(f"Campus found: {campus.name}")
                     return campus.id
         except Exception as e:

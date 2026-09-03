@@ -28,6 +28,7 @@ from src.core.logic.initiative_identity import (
 )
 from src.core.logic.initiative_linker import InitiativeLinker
 from src.core.logic.person_matcher import PersonMatcher
+from src.core.logic.strategies.sigpesq_excel import SigPesqCampusStrategy
 from src.core.logic.team_synchronizer import TeamSynchronizer
 from src.tracking.recorder import tracking_recorder
 
@@ -38,8 +39,9 @@ class ProjectLoader:
     Delegates specific tasks to specialized handlers, managers, and linkers.
     """
 
-    def __init__(self, mapping_strategy):
+    def __init__(self, mapping_strategy, campus_strategy=None):
         self.mapping_strategy = mapping_strategy
+        self.campus_strategy = campus_strategy or SigPesqCampusStrategy()
 
         # Controllers
         self.controller = InitiativeController()
@@ -47,6 +49,11 @@ class ProjectLoader:
         self.team_controller = TeamController()
         self.rg_controller = ResearchGroupController()
         self.adv_controller = AdvisorshipController()
+        self.campus_ctrl = CampusController()
+
+        # O mesmo campus se repete em quase toda linha do relatório; sem cache
+        # cada linha faria um get_all() de campi.
+        self._campus_cache: Dict[str, Optional[int]] = {}
 
         # Service/Logic Classes
         self.entity_manager = EntityManager(self.controller, self.person_controller)
@@ -79,6 +86,80 @@ class ProjectLoader:
             "Research Project"
         )
         self.org_id = self.entity_manager.ensure_organization()
+
+    def _resolve_execution_campus_id(self, campus_name: Any) -> Optional[int]:
+        """Resolve o campus de execução afirmado pela fonte para um id.
+
+        Nunca levanta: um campus irresolúvel não pode derrubar a ingestão da
+        linha (FR-004) — a linha entra sem campus e o nome cru continua
+        registrado para auditoria.
+        """
+        if campus_name is None:
+            return None
+
+        try:
+            if pd.isna(campus_name):
+                return None
+        except (TypeError, ValueError):
+            pass
+
+        stated = str(campus_name).strip()
+        if not stated:
+            return None
+
+        cache_key = normalize_text(stated)
+        if cache_key in self._campus_cache:
+            return self._campus_cache[cache_key]
+
+        campus_id = None
+        try:
+            campus_id = self.campus_strategy.ensure(
+                self.campus_ctrl, stated, self.org_id
+            )
+        except Exception as exc:
+            logger.warning(f"Could not resolve execution campus '{stated}': {exc}")
+
+        self._campus_cache[cache_key] = campus_id
+        return campus_id
+
+    def _execution_campus_attrs(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Atributos de campus a gravar como assertions para esta linha.
+
+        Independe de a linha ter grupo de pesquisa — é justamente o caso em que
+        o campus se perdia antes. Só devolve chaves com valor, para não encher
+        `attribute_assertions` de nulos vindos das fontes que não informam
+        campus (o Lattes manda `campus_name=None`).
+        """
+        campus_name = project_data.get("campus_name")
+        campus_id = self._resolve_execution_campus_id(campus_name)
+
+        attrs: Dict[str, Any] = {}
+        if campus_name is not None and str(campus_name).strip():
+            attrs["execution_campus_name"] = str(campus_name).strip()
+        if campus_id is not None:
+            attrs["execution_campus_id"] = campus_id
+        return attrs
+
+    def _tracked_attrs(
+        self, title: Any, project_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Valores que a linha afirma, gravados como assertions de auditoria.
+
+        Extraído de `_process_row` para que a ligação com o campus de execução
+        seja testável sem montar o loader inteiro — era justamente o trecho em
+        que o campus se perdia antes.
+        """
+        return {
+            "name": title,
+            "status": project_data.get("status"),
+            "description": project_data.get("description"),
+            "start_date": project_data.get("start_date"),
+            "end_date": project_data.get("end_date"),
+            "coordinator_name": project_data.get("coordinator_name"),
+            "student_names": project_data.get("student_names"),
+            "researcher_names": project_data.get("researcher_names"),
+            **self._execution_campus_attrs(project_data),
+        }
 
     def process_file(self, file_path: str) -> None:
         """
@@ -505,16 +586,7 @@ class ProjectLoader:
                 match_strategy="identity_key" if identity_key else "title_fallback",
                 match_confidence=1.0 if identity_key else 0.7,
             )
-            tracked_attrs = {
-                "name": title,
-                "status": project_data.get("status"),
-                "description": project_data.get("description"),
-                "start_date": project_data.get("start_date"),
-                "end_date": project_data.get("end_date"),
-                "coordinator_name": project_data.get("coordinator_name"),
-                "student_names": project_data.get("student_names"),
-                "researcher_names": project_data.get("researcher_names"),
-            }
+            tracked_attrs = self._tracked_attrs(title, project_data)
             tracking_recorder.record_attribute_assertions(
                 source_record_id=getattr(source_record, "id", None),
                 canonical_entity_type=canonical_entity_type,
