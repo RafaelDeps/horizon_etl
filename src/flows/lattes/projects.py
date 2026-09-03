@@ -73,6 +73,21 @@ def _resolve_sqlalchemy_engine(init_ctrl: InitiativeController) -> Engine:
     raise RuntimeError("Could not resolve SQLAlchemy engine for Lattes ingestion")
 
 
+def _expire_lattes_sessions(session):
+    """Release ORM identity-map references after each ingested CV file.
+
+    Keeps peak memory bounded across the 125-file loop. Ignores sessions that
+    cannot be expired so a partial ingest never aborts the phase.
+    """
+    for candidate in (session,):
+        if candidate is None:
+            continue
+        try:
+            candidate.expire_all()
+        except Exception:
+            pass
+
+
 def _hydrate_researcher(researcher_ctrl: ResearcherController, match):
     """Carrega a entidade completa do vencedor da correspondência.
 
@@ -888,6 +903,13 @@ def ingest_lattes_projects_flow():
     ):
         for json_file in json_files:
             ingest_researcher_data(json_file, entity_manager, parser, researcher_index)
+            # The ORM sessions accumulate every entity created for all 125 CV
+            # files in their identity maps; merely committing (done inside the
+            # ingest helpers) does not release those references. Expire them
+            # after each file so memory is bounded to one researcher at a time,
+            # otherwise private-runners OOM (+ signal 11) near the end of the
+            # loop. gc.collect() alone cannot reclaim identity-map-held objects.
+            _expire_lattes_sessions(session)
             gc.collect()
 
 
