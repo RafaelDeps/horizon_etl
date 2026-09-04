@@ -377,7 +377,7 @@ def ingest_articles_task(
 ):
     logger.info(f"Processing {len(articles)} articles for {target_researcher.name}...")
     article_ctrl = ArticleController()
-    researcher_ctrl = ResearcherController()
+    session = article_ctrl._service._repository._session
 
     for art in articles:
         try:
@@ -392,15 +392,28 @@ def ingest_articles_task(
                 source_path=source_file,
             )
 
-            existing_art = None
+            # Column-only lookups. The Article.authors relationship is
+            # lazy="joined" and Researcher carries several more lazy="joined"
+            # relationships, so an ORM query collapses into a combinatorial
+            # LEFT OUTER JOIN that crashes native psycopg2/libpq with SIGSEGV
+            # on PostgreSQL (see export_canonical for the same root cause).
+            # Fetch only the row id so the author graph is never materialized.
+            paper_id = None
             if doi:
-                existing_art = article_ctrl.get_by_doi(doi)
-            if not existing_art:
-                existing_art = article_ctrl.get_by_title_year(title, year)
+                paper_id = session.execute(
+                    text("SELECT id FROM articles WHERE doi = :doi LIMIT 1"),
+                    {"doi": doi},
+                ).scalar()
+            if paper_id is None:
+                paper_id = session.execute(
+                    text(
+                        "SELECT id FROM articles "
+                        "WHERE title = :t AND year = :y LIMIT 1"
+                    ),
+                    {"t": title, "y": year},
+                ).scalar()
 
-            if existing_art:
-                paper = existing_art
-            else:
+            if paper_id is None:
                 paper = article_ctrl.create_article(
                     title=title,
                     year=year,
@@ -410,10 +423,11 @@ def ingest_articles_task(
                     volume=art.get("volume"),
                     pages=art.get("pages"),
                 )
+                paper_id = paper.id
                 tracking_recorder.record_change(
                     source_record_id=getattr(source_record, "id", None),
                     canonical_entity_type="article",
-                    canonical_entity_id=paper.id,
+                    canonical_entity_id=paper_id,
                     operation="create",
                     changed_fields=[
                         "title",
@@ -437,14 +451,14 @@ def ingest_articles_task(
             tracking_recorder.record_entity_match(
                 source_record_id=getattr(source_record, "id", None),
                 canonical_entity_type="article",
-                canonical_entity_id=paper.id,
+                canonical_entity_id=paper_id,
                 match_strategy="doi_exact" if doi else "title_year",
                 match_confidence=1.0 if doi else 0.8,
             )
             tracking_recorder.record_attribute_assertions(
                 source_record_id=getattr(source_record, "id", None),
                 canonical_entity_type="article",
-                canonical_entity_id=paper.id,
+                canonical_entity_id=paper_id,
                 selected_attributes={
                     "title": title,
                     "year": year,
@@ -456,51 +470,33 @@ def ingest_articles_task(
                 selection_reason="lattes_article_selected_values",
             )
 
-            # Link primary author
-            current_author_ids = [
-                getattr(auth, "id") for auth in getattr(paper, "authors", [])
-            ]
-            if target_researcher.id not in current_author_ids:
+            # Link primary author via the association table, never the ORM
+            # graph (which would rebuild the crashing joined query).
+            already_linked = session.execute(
+                text(
+                    "SELECT 1 FROM article_authors "
+                    "WHERE article_id = :a AND researcher_id = :r LIMIT 1"
+                ),
+                {"a": paper_id, "r": target_researcher.id},
+            ).scalar()
+            if not already_linked:
                 try:
-                    _attach_article_author(
-                        article_ctrl, researcher_ctrl, paper.id, target_researcher.id
+                    session.execute(
+                        text(
+                            "INSERT INTO article_authors (article_id, researcher_id) "
+                            "VALUES (:a, :r)"
+                        ),
+                        {"a": paper_id, "r": target_researcher.id},
                     )
+                    session.commit()
                 except Exception as link_err:
+                    session.rollback()
                     logger.warning(
                         f"Failed to link article '{title}' to researcher {target_researcher.id}: {link_err}"
                     )
 
         except Exception as art_err:
             logger.error(f"Failed to ingest article {art.get('title')}: {art_err}")
-
-
-def _attach_article_author(
-    article_ctrl: ArticleController,
-    researcher_ctrl: ResearcherController,
-    article_id: int,
-    researcher_id: int,
-) -> None:
-    """Attach article author while tolerating controller/service version mismatches."""
-    try:
-        article_ctrl.add_author(article_id, researcher_id)
-        return
-    except AttributeError as exc:
-        if " has no attribute 'get'" not in str(exc):
-            raise
-
-    article = article_ctrl.get_by_id(article_id)
-    researcher = researcher_ctrl.get_by_id(researcher_id)
-    if not article or not researcher:
-        return
-
-    current_author_ids = [
-        getattr(author, "id", None) for author in getattr(article, "authors", [])
-    ]
-    if researcher_id in current_author_ids:
-        return
-
-    article.authors.append(researcher)
-    article_ctrl.update(article)
 
 
 def ingest_education_task(
