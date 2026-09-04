@@ -121,6 +121,7 @@ def collect_lattes_ids_from_list(list_path: str) -> List[str]:
 def _check_playwright_chromium() -> bool:
     try:
         from playwright.sync_api import sync_playwright
+
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             browser.close()
@@ -189,9 +190,7 @@ def patch_script_lattes_runtime(chrome_binary: str | None = None) -> None:
     try:
         import scriptLattes.baixaLattes as baixa_lattes
     except ImportError as exc:
-        raise ScriptLattesRuntimeError(
-            "scriptLattes is not installed."
-        ) from exc
+        raise ScriptLattesRuntimeError("scriptLattes is not installed.") from exc
 
     if getattr(baixa_lattes, "_horizon_runtime_patched", False):
         return
@@ -207,9 +206,7 @@ def patch_script_lattes_runtime(chrome_binary: str | None = None) -> None:
 
         try:
             rob.create_browser()
-            rob.context.set_default_navigation_timeout(
-                LATTES_PLAYWRIGHT_NAV_TIMEOUT_MS
-            )
+            rob.context.set_default_navigation_timeout(LATTES_PLAYWRIGHT_NAV_TIMEOUT_MS)
             rob.collect_html_cvs(0, None)
         finally:
             if getattr(rob, "browser", None):
@@ -329,10 +326,14 @@ def prefetch_lattes_cache(
             try:
                 _download_lattes_to_cache(lattes_id, str(cache_path), downloader)
             except Exception as exc:
-                logger.warning(f"Failed to download Lattes {lattes_id}, skipping: {exc}")
+                logger.warning(
+                    f"Failed to download Lattes {lattes_id}, skipping: {exc}"
+                )
                 failed_ids.append(lattes_id)
         if failed_ids:
-            logger.warning(f"Skipped {len(failed_ids)} curricula due to download errors: {failed_ids}")
+            logger.warning(
+                f"Skipped {len(failed_ids)} curricula due to download errors: {failed_ids}"
+            )
         return [lid for lid in missing_ids if lid not in failed_ids]
 
     failed_ids = []
@@ -348,11 +349,15 @@ def prefetch_lattes_cache(
             try:
                 future.result()
             except Exception as exc:
-                logger.warning(f"Failed to download Lattes {lattes_id}, skipping: {exc}")
+                logger.warning(
+                    f"Failed to download Lattes {lattes_id}, skipping: {exc}"
+                )
                 failed_ids.append(lattes_id)
 
     if failed_ids:
-        logger.warning(f"Skipped {len(failed_ids)} curricula due to download errors: {failed_ids}")
+        logger.warning(
+            f"Skipped {len(failed_ids)} curricula due to download errors: {failed_ids}"
+        )
 
     return [lid for lid in missing_ids if lid not in failed_ids]
 
@@ -370,7 +375,7 @@ def get_researchers_from_db() -> List[Dict]:
     # repo = ResearcherRepository(db_session)
     # return repo.get_all()
 
-    # Mock return for the scope of this task 
+    # Mock return for the scope of this task
     return [
         {"name": "Adilson Ribeiro Prado", "lattes_id": "3085491325255749"},
         {"name": "Adriana Padua Lovatte", "lattes_id": "7017732650864488"},
@@ -453,10 +458,16 @@ def get_researchers_from_db() -> List[Dict]:
         {"name": "Luiz Alberto Pinto", "lattes_id": "3550111932609658"},
         {"name": "Maikon Chaider Silva Scaldaferro", "lattes_id": "5909044646841082"},
         {"name": "Marcelo Franco de Almeida", "lattes_id": "3326528545654268"},
-        {"name": "Marco Antonio de Souza Leite Cuadros", "lattes_id": "8629256330944049"},
+        {
+            "name": "Marco Antonio de Souza Leite Cuadros",
+            "lattes_id": "8629256330944049",
+        },
         {"name": "Marcos Paulo Kohler Caldas", "lattes_id": "6499650719150590"},
         {"name": "Marcos Simão Guimarães", "lattes_id": "1309219372857869"},
-        {"name": "Marta Talitha Carvalho Freire Mendes", "lattes_id": "3770740577508464"},
+        {
+            "name": "Marta Talitha Carvalho Freire Mendes",
+            "lattes_id": "3770740577508464",
+        },
         {"name": "Mateus Conrad Barcellos da Costa", "lattes_id": "9244741653857997"},
         {"name": "Maxwell Eduardo Monteiro", "lattes_id": "8831352516689445"},
         {"name": "Milainy Ludmila Santos Goulart", "lattes_id": "4538755343018125"},
@@ -475,7 +486,10 @@ def get_researchers_from_db() -> List[Dict]:
         {"name": "Renato Tannure Rotta de Almeida", "lattes_id": "6927212610032092"},
         {"name": "Renner Sartório Camargo", "lattes_id": "3539297708118726"},
         {"name": "Ricardo Ramos Costa", "lattes_id": "3570729284909193"},
-        {"name": "Richard Junior Manuel Godinez Tello", "lattes_id": "3966230569744918"},
+        {
+            "name": "Richard Junior Manuel Godinez Tello",
+            "lattes_id": "3966230569744918",
+        },
         {"name": "Rodrigo Fernandes Calhau", "lattes_id": "5553396597490044"},
         {"name": "Rodrigo Varejão Andreão", "lattes_id": "5589662366089944"},
         {"name": "Rogério Passos do Amaral Pereira", "lattes_id": "2592658166362342"},
@@ -584,7 +598,9 @@ def download_lattes_flow():
                         continue
                     f.write(line + "\n")
             effective_list_path = tmp_list
-            logger.info(f"Excluded {len(failed_ids)} failed IDs from scriptLattes run: {failed_ids}")
+            logger.info(
+                f"Excluded {len(failed_ids)} failed IDs from scriptLattes run: {failed_ids}"
+            )
     else:
         logger.info(f"Lattes cache prefetch disabled by {LATTES_PREFETCH_ENABLED_ENV}.")
 

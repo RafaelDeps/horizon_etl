@@ -48,12 +48,8 @@ def test_get_groups_to_sync_returns_valid_and_invalid_keys_when_no_campus_matche
         MagicMock(name="Vitória", id=2),
     ]
     with (
-        patch(
-            "src.flows.cnpq.groups.get_run_logger", return_value=MagicMock()
-        ),
-        patch(
-            "src.flows.cnpq.groups.CampusController", return_value=fake_campus
-        ),
+        patch("src.flows.cnpq.groups.get_run_logger", return_value=MagicMock()),
+        patch("src.flows.cnpq.groups.CampusController", return_value=fake_campus),
         patch("src.flows.cnpq.groups.ResearchGroupController"),
     ):
         result = get_groups_to_sync.fn(campus_name="Serra")
