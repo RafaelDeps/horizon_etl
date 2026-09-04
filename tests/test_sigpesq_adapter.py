@@ -4,24 +4,20 @@ import shutil
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
-
 # agent_sigpesq.run() calls load_dotenv() at module scope, which crashes under
 # pytest's frame handling (dotenv's find_dotenv asserts on f_back). Finish the
 # required module-level side effect once here, under a patched no-op, so the
 # import in _trigger_download is a cached sys.modules hit and does not re-run
 # load_dotenv().
 import dotenv
+import pytest
 
 with patch.object(dotenv, "load_dotenv", lambda *a, **k: None):
     from agent_sigpesq.services.reports_service import (  # noqa: F401
         SigpesqReportService,
     )
 
-from src.adapters.sources.sigpesq.adapter import (
-    SigPesqAdapter,
-    _SIGPESQ_MAX_RETRIES,
-)
+from src.adapters.sources.sigpesq.adapter import _SIGPESQ_MAX_RETRIES, SigPesqAdapter
 
 
 @pytest.fixture

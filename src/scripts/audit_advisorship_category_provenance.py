@@ -13,7 +13,6 @@ from src.core.logic.advisorship_canonical_values import (
     resolve_advisorship_canonical_values,
 )
 
-
 DEFAULT_DB_PATH = "db/horizon.db"
 DEFAULT_JSON_PATH = "data/exports/advisorships_canonical.json"
 

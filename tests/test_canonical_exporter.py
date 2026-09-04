@@ -1,5 +1,5 @@
-from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from src.core.logic.canonical_exporter import CanonicalDataExporter
 from src.core.ports.export_sink import IExportSink

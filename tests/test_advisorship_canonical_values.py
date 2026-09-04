@@ -1,5 +1,7 @@
 """Tests for advisorship canonical program/provider/year resolution."""
 
+import json
+
 from src.core.logic.advisorship_canonical_values import (
     SIGPESQ_SYSTEM,
     AdvisorshipCanonicalValues,
@@ -8,7 +10,6 @@ from src.core.logic.advisorship_canonical_values import (
     report_year_from_path,
     resolve_advisorship_canonical_values,
 )
-import json
 
 
 def _sigpesq_record(

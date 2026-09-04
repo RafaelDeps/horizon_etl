@@ -1,9 +1,9 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import re
 import shutil
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from platform import system
 from typing import Callable, Dict, List
