@@ -53,3 +53,55 @@ Technical Story: O relatório Excel do SigPesq só traz um resumo raso dos proje
 ### Persistência C — tabela normalizada
 * Good: querytável, tipado.
 * Bad: mais invasivo (modelo/migração/ORM); adiado como follow-up.
+
+## Nota de correção (2026-08-24)
+
+A fase **nunca chegou a executar** desde a implementação original. O
+`ProjectEnrichmentLoader.run()` abria uma transação explícita depois que os
+carregamentos de índice já haviam aberto uma (autobegin do SQLAlchemy 2.0),
+levantando `InvalidRequestError: A transaction is already begun on this Session`
+antes de ler qualquer documento. Como a fase é não-crítica no orquestrador
+semanal, o pipeline seguia e reportava sucesso, e a falha ficava apenas numa linha
+de erro perdida no log.
+
+Consequência: os ganhos declarados acima ("70,6% → ~68% de descrições nulas
+preenchidas", objetivos/cronograma/linha/keywords passando a existir) **não se
+materializaram** — a auditoria do banco mostrava zero iniciativas com
+`enrichment_json`. Da mesma forma, a consequência "idempotente e reprodutível pelo
+pipeline (sem passo manual)" vale para o *consumo* dos documentos, mas não para a
+*produção* deles: os `PJ_*.json` continuam vindo de um processo externo executado
+manualmente, e não estão versionados neste repositório.
+
+Corrigido em `specs/004-fix-enrichment-transaction`, com teste de regressão em
+`tests/test_project_enrichment_db.py`. Ver `research.md` daquela feature para o
+diagnóstico completo, incluindo o achado de que a atomicidade por execução não é
+garantida no SQLite atual (o driver `pysqlite` confirma cada `SAVEPOINT`
+liberado) — registrado como follow-up.
+
+## Nota de correção (2026-08-25) — marca de revisão persistente
+
+A consequência declarada acima de que "matches incertos precisam ser auditáveis"
+via `needs_review` não se sustentava ao longo do tempo. O campo era derivado da
+estratégia de correspondência da execução corrente e o payload é sempre
+reescrito, de modo que uma iniciativa criada por documento (marca verdadeira)
+passava a casar por título exato na execução seguinte e tinha a marca apagada.
+Observado: 96 → 49, diferença de exatamente os 47 criados.
+
+O defeito era **latente** no fluxo semanal, porque o `weekly-flows` reconstrói o
+banco a cada execução e o enriquecimento roda uma única vez. Manifestava-se ao
+executar a fase isoladamente mais de uma vez — e contradizia a promessa de
+idempotência registrada neste ADR.
+
+Corrigido em `specs/006-preserve-review-origin`, separando os conceitos:
+
+* `origin` — como a iniciativa passou a existir. Fato histórico, permanente.
+* `match_strategy` — como o documento casou nesta execução. Volátil, continua
+  registrado por ser útil ao diagnóstico.
+* `needs_review` — **derivado** de origem, incerteza da correspondência e
+  revisão humana registrada. Só uma revisão registrada retira a marca.
+* `reviewed_at` / `reviewed_by` — preenchidos exclusivamente por
+  `python app.py mark_reviewed <id> <revisor>`. Use identificador não-pessoal
+  (matrícula ou iniciais): o campo viaja para o export canônico.
+
+Para bancos já afetados, `python app.py backfill_enrichment_origin` reconstrói a
+origem a partir de `entity_matches`, que a preservou. Não faz parte do pipeline.

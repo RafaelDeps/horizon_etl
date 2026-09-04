@@ -2,7 +2,7 @@ name: Weekly Horizon ETL Flows
 
 on:
   schedule:
-    - cron: "0 6 * * 6"
+    - cron: "0 */12 * * *"
   workflow_dispatch:
     inputs:
       weekly_campus:
@@ -71,11 +71,9 @@ jobs:
           test -n "$STORAGE_TYPE" || { echo "Missing GitHub secret: STORAGE_TYPE"; exit 1; }
           test -n "$SIGPESQ_USERNAME" || { echo "Missing GitHub secret: SIGPESQ_USERNAME"; exit 1; }
           test -n "$SIGPESQ_PASSWORD" || { echo "Missing GitHub secret: SIGPESQ_PASSWORD"; exit 1; }
-          test -n "$HORIZON_TELEGRAM_BOT_TOKEN" || { echo "Missing GitHub secret: HORIZON_TELEGRAM_BOT_TOKEN"; exit 1; }
-          test -n "$HORIZON_TELEGRAM_CHAT_ID" || { echo "Missing GitHub secret: HORIZON_TELEGRAM_CHAT_ID"; exit 1; }
 
-      - name: Run weekly flows
-        run: make weekly-flows
+      - name: Run weekly flows for Campus Serra
+        run: make weekly-flows WEEKLY_CAMPUS=Serra
 
       - name: Compress large export files
         if: always()

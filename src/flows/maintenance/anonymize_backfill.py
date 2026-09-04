@@ -11,12 +11,14 @@ from src.core.logic.pii_anonymizer import (
     anonymize_person_data,
     is_anonymized_cpf,
     is_anonymized_email,
+    is_anonymized_text,
 )
 from src.notifications.telegram import telegram_flow_state_handlers
 
 _ALREADY_ANONYMIZED_CHECKS = {
     "cpf": is_anonymized_cpf,
     "email": is_anonymized_email,
+    "free_text": is_anonymized_text,
 }
 
 
@@ -31,7 +33,13 @@ def _discover_pii_columns(conn: sqlite3.Connection) -> list[dict]:
         columns = [row[1] for row in cur.fetchall()]
         for col in columns:
             if col in PII_COLUMN_REGISTRY:
-                found.append({"table": table, "column": col, "field_type": PII_COLUMN_REGISTRY[col]})
+                found.append(
+                    {
+                        "table": table,
+                        "column": col,
+                        "field_type": PII_COLUMN_REGISTRY[col],
+                    }
+                )
 
     return found
 
@@ -104,7 +112,9 @@ def anonymize_backfill_flow(db_path: str = "db/horizon.db") -> dict:
 
         table_stats = []
         for entry in pii_columns:
-            stats = _anonymize_table_column(conn, entry["table"], entry["column"], entry["field_type"])
+            stats = _anonymize_table_column(
+                conn, entry["table"], entry["column"], entry["field_type"]
+            )
             table_stats.append(stats)
             run_logger.info(
                 f"{stats['table']}.{stats['column']}: "
@@ -148,7 +158,11 @@ def audit_pii(db_path: str = "db/horizon.db") -> None:
         print(f"\n=== LGPD PII Audit: {db_path} ===")
         any_unmasked = False
         for entry in pii_columns:
-            table, column, field_type = entry["table"], entry["column"], entry["field_type"]
+            table, column, field_type = (
+                entry["table"],
+                entry["column"],
+                entry["field_type"],
+            )
             is_already = _ALREADY_ANONYMIZED_CHECKS.get(field_type, lambda v: False)
             cur.execute(f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL")
             values = [row[0] for row in cur.fetchall()]

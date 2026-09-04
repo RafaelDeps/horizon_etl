@@ -71,8 +71,14 @@ class SigPesqAdvisorshipMappingStrategy(ProjectMappingStrategy):
                 ).strip(),
             }
 
+        # O código do plano de trabalho (CodPT) identifica o PLANO, não a bolsa:
+        # um mesmo plano pode ter bolsas consecutivas com bolsistas e períodos
+        # diferentes. Usá-lo sozinho como identidade fazia duas bolsas colapsarem
+        # na mesma chave, e a segunda tentava renomear a linha da primeira —
+        # batendo na restrição de unicidade de `initiatives.name` e sendo
+        # descartada. O `row_id` desempata sem perder o vínculo com o plano.
         identity_parts = (
-            ["sigpesq_workplan", workplan_code]
+            ["sigpesq_workplan", workplan_code, row_id]
             if workplan_code
             else [
                 "sigpesq_advisorship",
@@ -98,6 +104,7 @@ class SigPesqAdvisorshipMappingStrategy(ProjectMappingStrategy):
             "end_date": end_date,
             "cancelled": cancelled,
             "cancellation_date": cancellation_date,
+            "program": self._clean_optional(programa),
             "description": f"Programa: {programa or 'N/A'}",
             "coordinator_name": orientador,
             "coordinator_email": orientador_email,

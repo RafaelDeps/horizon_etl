@@ -349,16 +349,26 @@ class AdvisorshipHandler(BaseInitiativeHandler):
                 sponsor_id=sponsor_id,
             )
         else:
+            updated = False
+            new_value = fellowship_data.get("value", 0.0)
+            if new_value and fellowship.value != new_value:
+                logger.debug(
+                    f"Updating fellowship '{f_name}' value: {fellowship.value} → {new_value}"
+                )
+                fellowship.value = new_value
+                updated = True
             if sponsor_name and not fellowship.sponsor_id:
                 sponsor_id = self.entity_manager.ensure_organization(name=sponsor_name)
                 if sponsor_id:
                     fellowship.sponsor_id = sponsor_id
-                    self.fel_controller.update(fellowship)
-                    self._cache_fellowship(
-                        fellowship,
-                        fellowship_data,
-                        sponsor_id=sponsor_id,
-                    )
+                    updated = True
+            if updated:
+                self.fel_controller.update(fellowship)
+                self._cache_fellowship(
+                    fellowship,
+                    fellowship_data,
+                    sponsor_id=sponsor_id or fellowship.sponsor_id,
+                )
 
         return fellowship
 
@@ -589,6 +599,10 @@ class AdvisorshipHandler(BaseInitiativeHandler):
             )
 
         self._sync_advisorship_cancellation(initiative, project_data)
+
+        program = project_data.get("program")
+        if program is not None and hasattr(initiative, "program"):
+            initiative.program = program
 
         start_date = project_data.get("start_date")
 

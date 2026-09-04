@@ -14,6 +14,7 @@ Executar semanalmente um `make weekly-flows`, garantindo:
 - schema recriado
 - ingestao das fontes SigPesq, Lattes e CNPq
 - download SigPesq com um unico login no portal
+- extracao dos documentos de projeto SigPesq (PDF + Mistral) via `extract_project_files`
 - exportacao dos dados canonicos, marts e grafo de relacionamentos
 - escrita do relatorio `data/reports/weekly_pipeline_run.json`
 - publicacao dos artefatos gerados

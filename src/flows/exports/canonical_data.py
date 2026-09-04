@@ -270,15 +270,34 @@ def export_parquet_task(output_dir: str):
     logger.info("Parquet export: {} -> {}", stats, dst)
 
 
+# Directories that live under the export folder but are INPUT, not output.
+#
+# The SigPesq project documents are raw material: regenerable by
+# `make extract-project-files`, and carrying coordinator names and e-mail
+# addresses in clear text. The canonical exports built FROM them are already
+# scrubbed -- the enrichment payload drops those fields entirely -- so shipping
+# the sources alongside the results would smuggle back exactly the personal data
+# the rest of the pipeline is careful to anonymize. The zip is versioned, so this
+# would put those addresses in git.
+SKIP_DIRS = {"project_sigpesq_files_json"}
+
+
 @task(name="zip_exports_task")
 def zip_exports_task(output_dir: str):
     zip_path = os.path.join(output_dir, "exports_canonical.zip")
     tmp_zip_path = zip_path + ".tmp"
     logger.info("Zipping exports to {}...", zip_path)
     skip_names = {os.path.basename(zip_path), os.path.basename(tmp_zip_path)}
+    skipped_dirs = 0
     try:
         with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, _dirs, files in os.walk(output_dir):
+            for root, dirs, files in os.walk(output_dir):
+                # Prune in place so os.walk never descends into them.
+                pruned = [d for d in dirs if d in SKIP_DIRS]
+                for d in pruned:
+                    dirs.remove(d)
+                    skipped_dirs += 1
+                    logger.info("Excluded from zip (input, not output): {}/", d)
                 for fname in files:
                     if fname in skip_names:
                         continue

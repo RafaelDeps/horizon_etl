@@ -1,5 +1,5 @@
-from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from src.core.logic.canonical_exporter import CanonicalDataExporter
 from src.core.ports.export_sink import IExportSink
@@ -466,6 +466,8 @@ def test_export_advisorships_preserves_person_and_supervisor_fields_from_members
     class FakeSession:
         def execute(self, statement, params=None):
             statement_text = getattr(statement, "text", str(statement))
+            if "entity_matches" in statement_text:
+                return FakeResult([])
             assert "FROM advisorship_members" in statement_text
             assert params == {
                 "student_role": "Student",
@@ -481,6 +483,7 @@ def test_export_advisorships_preserves_person_and_supervisor_fields_from_members
                         "start_date": None,
                         "end_date": None,
                         "advisorship_type": "Scientific Initiation",
+                        "advisorship_program": None,
                         "initiative_type_name": "Advisorship",
                         "person_id": 452,
                         "person_name": "Aluno A",
@@ -526,6 +529,9 @@ def test_export_advisorships_preserves_person_and_supervisor_fields_from_members
             "supervisor_id": 2981,
             "supervisor_name": "Paulo Sergio",
             "campus": None,
+            "year": None,
+            "program": None,
+            "provider": None,
             "fellowship": None,
         }
     ]
@@ -556,6 +562,8 @@ def test_export_advisorships_falls_back_to_legacy_person_and_supervisor_columns(
 
         def execute(self, statement, params=None):
             statement_text = getattr(statement, "text", str(statement))
+            if "entity_matches" in statement_text:
+                return FakeResult([])
             if "FROM advisorship_members" in statement_text:
                 self.members_query_attempted = True
                 raise RuntimeError("no such table: advisorship_members")
@@ -572,6 +580,7 @@ def test_export_advisorships_falls_back_to_legacy_person_and_supervisor_columns(
                         "start_date": None,
                         "end_date": None,
                         "advisorship_type": "Scientific Initiation",
+                        "advisorship_program": None,
                         "initiative_type_name": "Advisorship",
                         "person_id": 88,
                         "person_name": "Aluno Legado",
@@ -601,6 +610,319 @@ def test_export_advisorships_falls_back_to_legacy_person_and_supervisor_columns(
     exported_data, _output_path = mock_sink.export.call_args[0]
     assert exported_data[0]["advisorships"][0]["person_name"] == "Aluno Legado"
     assert exported_data[0]["advisorships"][0]["supervisor_name"] == "Supervisor Legado"
+
+
+def test_export_advisorships_populates_year_program_provider_from_source_report():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeSession:
+        def execute(self, statement, params=None):
+            statement_text = getattr(statement, "text", str(statement))
+            if "entity_matches" in statement_text:
+                return FakeResult(
+                    [
+                        {
+                            "advisorship_id": 1,
+                            "source_record_id": 77,
+                            "source_system": "sigpesq_advisorships",
+                            "source_path": "data/sigpesq/advisorships/2023/planilha.xlsx",
+                            "raw_payload_json": {
+                                "Ano": "2023",
+                                "Programa": "Pivic",
+                                "AgFinanciadora": "FAPES",
+                            },
+                        }
+                    ]
+                )
+            assert "FROM advisorship_members" in statement_text
+            return FakeResult(
+                [
+                    {
+                        "id": 1,
+                        "name": "Orientacao 1",
+                        "status": "active",
+                        "description": "desc",
+                        "start_date": None,
+                        "end_date": None,
+                        "advisorship_type": "Scientific Initiation",
+                        "advisorship_program": None,
+                        "initiative_type_name": "Advisorship",
+                        "person_id": 452,
+                        "person_name": "Aluno A",
+                        "supervisor_id": 2981,
+                        "supervisor_name": "Paulo Sergio",
+                        "fellowship_id": None,
+                        "fellowship_name": None,
+                        "fellowship_description": None,
+                        "fellowship_value": None,
+                        "sponsor_name": None,
+                        "parent_id": None,
+                        "parent_name": None,
+                        "parent_status": None,
+                        "parent_description": None,
+                        "parent_start_date": None,
+                        "parent_end_date": None,
+                    }
+                ]
+            )
+
+    mock_sink = MagicMock(spec=IExportSink)
+
+    with (
+        patch("src.core.logic.canonical_exporter.OrganizationController"),
+        patch("src.core.logic.canonical_exporter.CampusController"),
+        patch("src.core.logic.canonical_exporter.KnowledgeAreaController"),
+        patch("src.core.logic.canonical_exporter.ResearcherController"),
+        patch("src.core.logic.canonical_exporter.InitiativeController"),
+    ):
+        exporter = CanonicalDataExporter(sink=mock_sink)
+    fake_session = FakeSession()
+    exporter.initiative_ctrl._service._repository._session = fake_session
+
+    exporter.export_advisorships("output/advisorships_canonical.json")
+
+    exported_data, _output_path = mock_sink.export.call_args[0]
+    advisor_1 = exported_data[0]["advisorships"][0]
+    assert advisor_1["year"] == 2023
+    assert advisor_1["program"] == "Pivic"
+    assert advisor_1["provider"] == "FAPES"
+
+
+def test_canonical_advisorship_fields_parity_with_source_report():
+    from src.core.logic.advisorship_canonical_values import (
+        AdvisorshipSourceInfo,
+        report_year_from_path,
+        resolve_advisorship_canonical_values,
+    )
+
+    source_path = "data/sigpesq/advisorships/2022/planilha.xlsx"
+    payload = {
+        "Ano": "2022",
+        "Programa": "Fapes",
+        "AgFinanciadora": "FUNDAÇÃO DE APOIO À PESQUISA",
+    }
+    values = resolve_advisorship_canonical_values(
+        [
+            AdvisorshipSourceInfo(
+                advisorship_id=1,
+                source_record_id=1,
+                source_system="sigpesq_advisorships",
+                source_path=source_path,
+                payload=payload,
+            )
+        ]
+    )
+
+    assert values.year == report_year_from_path(source_path) == 2022
+    assert values.year == int(payload["Ano"])
+    assert values.program == payload["Programa"]
+    assert values.provider == payload["AgFinanciadora"]
+
+
+def test_advisorship_export_keeps_ids_unique_and_original_keys_unchanged():
+    LEGACY_KEYS = [
+        "id",
+        "name",
+        "status",
+        "description",
+        "start_date",
+        "end_date",
+        "type",
+        "initiative_type",
+        "person_id",
+        "person_name",
+        "supervisor_id",
+        "supervisor_name",
+        "campus",
+        "fellowship",
+    ]
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeSession:
+        def execute(self, statement, params=None):
+            statement_text = getattr(statement, "text", str(statement))
+            if "entity_matches" in statement_text:
+                return FakeResult(
+                    [
+                        {
+                            "advisorship_id": 1,
+                            "source_record_id": 800,
+                            "source_system": "sigpesq_advisorships",
+                            "source_path": (
+                                "data/sigpesq/advisorships/2022/planilha.xlsx"
+                            ),
+                            "raw_payload_json": {
+                                "Ano": "2022",
+                                "Programa": "Fapes",
+                                "AgFinanciadora": "FAPES",
+                            },
+                        }
+                    ]
+                )
+            assert "FROM advisorship_members" in statement_text
+            return FakeResult(
+                [
+                    {
+                        "id": 1,
+                        "name": "Orientacao 1",
+                        "status": "active",
+                        "description": "desc",
+                        "start_date": None,
+                        "end_date": None,
+                        "advisorship_type": "Scientific Initiation",
+                        "advisorship_program": None,
+                        "initiative_type_name": "Advisorship",
+                        "person_id": 452,
+                        "person_name": "Aluno A",
+                        "supervisor_id": 2981,
+                        "supervisor_name": "Paulo Sergio",
+                        "fellowship_id": None,
+                        "fellowship_name": None,
+                        "fellowship_description": None,
+                        "fellowship_value": None,
+                        "sponsor_name": None,
+                        "parent_id": None,
+                        "parent_name": None,
+                        "parent_status": None,
+                        "parent_description": None,
+                        "parent_start_date": None,
+                        "parent_end_date": None,
+                    }
+                ]
+            )
+
+    mock_sink = MagicMock(spec=IExportSink)
+    with (
+        patch("src.core.logic.canonical_exporter.OrganizationController"),
+        patch("src.core.logic.canonical_exporter.CampusController"),
+        patch("src.core.logic.canonical_exporter.KnowledgeAreaController"),
+        patch("src.core.logic.canonical_exporter.ResearcherController"),
+        patch("src.core.logic.canonical_exporter.InitiativeController"),
+    ):
+        exporter = CanonicalDataExporter(sink=mock_sink)
+    exporter.initiative_ctrl._service._repository._session = FakeSession()
+
+    exporter.export_advisorships("output/advisorships_canonical.json")
+
+    exported_data, _output_path = mock_sink.export.call_args[0]
+    advisories = exported_data[0]["advisorships"]
+    ids = [adv["id"] for adv in advisories]
+    assert len(ids) == len(set(ids)) == 1
+    assert set(LEGACY_KEYS) <= set(advisories[0])
+    assert {"year", "program", "provider"} <= set(advisories[0])
+
+
+def test_cross_year_advisorship_export_counts_match_source_records_per_year():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeSession:
+        def execute(self, statement, params=None):
+            statement_text = getattr(statement, "text", str(statement))
+            if "entity_matches" in statement_text:
+                return FakeResult(
+                    [
+                        {
+                            "advisorship_id": 1,
+                            "source_record_id": 701,
+                            "source_system": "sigpesq_advisorships",
+                            "source_path": (
+                                "data/sigpesq/advisorships/2016/planilha.xlsx"
+                            ),
+                            "raw_payload_json": {
+                                "Ano": "2016",
+                                "Programa": "Pivic",
+                                "AgFinanciadora": "FAPES",
+                            },
+                        },
+                        {
+                            "advisorship_id": 2,
+                            "source_record_id": 702,
+                            "source_system": "sigpesq_advisorships",
+                            "source_path": (
+                                "data/sigpesq/advisorships/2025/planilha.xlsx"
+                            ),
+                            "raw_payload_json": {
+                                "Ano": "2025",
+                                "Programa": "Pibic",
+                                "AgFinanciadora": "FAPES",
+                            },
+                        },
+                    ]
+                )
+            assert "FROM advisorship_members" in statement_text
+            rows = []
+            for idx in (1, 2):
+                rows.append(
+                    {
+                        "id": idx,
+                        "name": f"Orientacao {idx}",
+                        "status": "active",
+                        "description": "desc",
+                        "start_date": None,
+                        "end_date": None,
+                        "advisorship_type": "Scientific Initiation",
+                        "advisorship_program": None,
+                        "initiative_type_name": "Advisorship",
+                        "person_id": idx,
+                        "person_name": f"Aluno {idx}",
+                        "supervisor_id": 2981,
+                        "supervisor_name": "Paulo Sergio",
+                        "fellowship_id": None,
+                        "fellowship_name": None,
+                        "fellowship_description": None,
+                        "fellowship_value": None,
+                        "sponsor_name": None,
+                        "parent_id": None,
+                        "parent_name": None,
+                        "parent_status": None,
+                        "parent_description": None,
+                        "parent_start_date": None,
+                        "parent_end_date": None,
+                    }
+                )
+            return FakeResult(rows)
+
+    mock_sink = MagicMock(spec=IExportSink)
+    with (
+        patch("src.core.logic.canonical_exporter.OrganizationController"),
+        patch("src.core.logic.canonical_exporter.CampusController"),
+        patch("src.core.logic.canonical_exporter.KnowledgeAreaController"),
+        patch("src.core.logic.canonical_exporter.ResearcherController"),
+        patch("src.core.logic.canonical_exporter.InitiativeController"),
+    ):
+        exporter = CanonicalDataExporter(sink=mock_sink)
+    exporter.initiative_ctrl._service._repository._session = FakeSession()
+
+    exporter.export_advisorships("output/advisorships_canonical.json")
+
+    exported_data, _output_path = mock_sink.export.call_args[0]
+    advisories = exported_data[0]["advisorships"]
+    counts_by_year = {}
+    for adv in advisories:
+        counts_by_year[adv["year"]] = counts_by_year.get(adv["year"], 0) + 1
+    assert counts_by_year[2016] == 1
+    assert counts_by_year[2025] == 1
+    by_id = {adv["id"]: adv for adv in advisories}
+    assert by_id[1]["year"] == 2016
+    assert by_id[1]["program"] == "Pivic"
+    assert by_id[2]["year"] == 2025
+    assert by_id[2]["program"] == "Pibic"
 
 
 def test_fetch_researcher_advisorship_rows_returns_person_id_from_members_query():
@@ -763,7 +1085,7 @@ def test_export_researchers_backfills_participant_only_people_from_projects_and_
             {
                 "id": 652,
                 "name": "Wilsiman Santos Evangelista Silva",
-                "identification_id": "wilsiman@example.com",
+                "identification_id": "1dade2367ac4@anon.lgpd",
                 "birthday": None,
                 "cnpq_url": None,
                 "google_scholar_url": None,

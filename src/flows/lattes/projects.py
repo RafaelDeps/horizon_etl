@@ -26,10 +26,14 @@ from sqlalchemy.engine import Engine
 
 from src.adapters.sources.lattes_parser import LattesParser
 from src.core.logic.entity_manager import EntityManager
+from src.core.logic.pii_anonymizer import scrub_pii_deep
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
+    ResearcherRef,
+    load_researcher_index,
     resolve_or_create_researcher,
     resolve_researcher_from_lattes,
+    sync_researcher_ref,
 )
 from src.core.logic.strategies.lattes_projects import LattesProjectMappingStrategy
 from src.notifications.telegram import telegram_flow_state_handlers
@@ -69,8 +73,45 @@ def _resolve_sqlalchemy_engine(init_ctrl: InitiativeController) -> Engine:
     raise RuntimeError("Could not resolve SQLAlchemy engine for Lattes ingestion")
 
 
+def _expire_lattes_sessions(session):
+    """Release ORM identity-map references after each ingested CV file.
+
+    Keeps peak memory bounded across the 125-file loop. Ignores sessions that
+    cannot be expired so a partial ingest never aborts the phase.
+    """
+    for candidate in (session,):
+        if candidate is None:
+            continue
+        try:
+            candidate.expire_all()
+        except Exception:
+            pass
+
+
+def _hydrate_researcher(researcher_ctrl: ResearcherController, match):
+    """Carrega a entidade completa do vencedor da correspondência.
+
+    O índice devolve um registro leve, suficiente para decidir de quem é o
+    currículo. Daí para a frente a ingestão grava atributos, persiste e vincula
+    — para isso precisa da entidade, e apenas dela: um registro por currículo,
+    não os 1060 do cadastro.
+    """
+    if not isinstance(match, ResearcherRef):
+        return match  # caminho de criação: já veio entidade
+
+    try:
+        return researcher_ctrl.get_by_id(match.id)
+    except Exception as exc:
+        logger.warning(f"Could not load researcher {match.id}: {exc}")
+        return None
+
+
 def _ingest_researcher_file(
-    file_path: str, entity_manager: EntityManager, parser: LattesParser
+    file_path: str,
+    entity_manager: EntityManager,
+    parser: LattesParser,
+    researcher_index: List[ResearcherRef],
+    project_loader: "ProjectLoader",
 ):
     try:
         filename = os.path.basename(file_path)
@@ -96,32 +137,40 @@ def _ingest_researcher_file(
         json_name = personal_info.get("name") or json_name
 
         researcher_ctrl = ResearcherController()
-        all_researchers = researcher_ctrl.get_all()
+        # O índice chega pronto do flow. Reconstruí-lo aqui custaria 7,8 s por
+        # currículo — 875 s por execução — para devolver sempre a mesma lista.
+        all_researchers = researcher_index
         session = None
         try:
             session = researcher_ctrl._service._repository._session
         except Exception:
             pass
 
-        target_researcher = resolve_researcher_from_lattes(
+        match = resolve_researcher_from_lattes(
             all_researchers,
             lattes_id=lattes_id,
             json_name=json_name,
             session=session,
         )
 
-        if not target_researcher:
+        if not match:
             # identification_id is a CPF-like column (LGPD-hashed on write);
             # a hashed lattes_id there never matches raw lookups. The stable
             # Lattes identity lives in cnpq_url, set right below.
-            target_researcher = resolve_or_create_researcher(
+            match = resolve_or_create_researcher(
                 researcher_ctrl,
                 all_researchers,
                 name=json_name,
             )
-        if not target_researcher:
+        if not match:
             raise RuntimeError(
                 f"Unable to resolve or create researcher for Lattes ID {lattes_id}."
+            )
+
+        target_researcher = _hydrate_researcher(researcher_ctrl, match)
+        if not target_researcher:
+            raise RuntimeError(
+                f"Unable to load researcher entity for Lattes ID {lattes_id}."
             )
 
         # Guarantee the Lattes URL identity so future runs resolve by cnpq_url.
@@ -137,6 +186,10 @@ def _ingest_researcher_file(
             target_researcher.cnpq_url = personal_info["cnpq_url"]
             needs_update = True
         if personal_info.get("resume"):
+            # LGPD: the resume is free text that can embed personal e-mails
+            # and phone numbers. Scrub it before persisting, so the column,
+            # the tracking payloads and the change log never carry raw PII.
+            personal_info["resume"] = scrub_pii_deep(personal_info["resume"])
             target_researcher.resume = personal_info["resume"]
             needs_update = True
 
@@ -188,6 +241,10 @@ def _ingest_researcher_file(
             except Exception as e:
                 logger.warning(f"Failed to update researcher data for {lattes_id}: {e}")
 
+        # O índice é lido uma vez só, então precisa acompanhar o que esta
+        # ingestão acabou de gravar — currículos seguintes pontuam sobre ele.
+        sync_researcher_ref(all_researchers, target_researcher)
+
         logger.info(
             f"Processing data for researcher: {target_researcher.name} (Lattes: {lattes_id})"
         )
@@ -218,9 +275,9 @@ def _ingest_researcher_file(
             mapping_strategy = LattesProjectMappingStrategy(
                 target_researcher.name, researcher_roles
             )
-            loader = ProjectLoader(mapping_strategy=mapping_strategy)
+            project_loader.mapping_strategy = mapping_strategy
 
-            loader.process_records(unique_projects, source_file=file_path)
+            project_loader.process_records(unique_projects, source_file=file_path)
 
         # 3. Handle Articles
         articles = []
@@ -275,28 +332,52 @@ def _ingest_researcher_file(
 
 @task(name="Ingest Lattes Researcher Data", cache_policy=NO_CACHE)
 def ingest_researcher_data(
-    file_path: str, entity_manager: EntityManager, parser: LattesParser
+    file_path: str,
+    entity_manager: EntityManager,
+    parser: LattesParser,
+    researcher_index: List[ResearcherRef],
+    project_loader: "ProjectLoader",
 ):
-    _ingest_researcher_file(file_path, entity_manager, parser)
+    _ingest_researcher_file(
+        file_path, entity_manager, parser, researcher_index, project_loader
+    )
 
 
 @task(name="Ingest Lattes Researcher File", cache_policy=NO_CACHE)
 def ingest_file_task(file_path: str, entity_manager: EntityManager):
-    """Compatibility wrapper kept for scripts/tests that still call this symbol."""
+    """Compatibility wrapper kept for scripts/tests that still call this symbol.
+
+    Builds its own index because it is invoked for a single file, outside the
+    flow that would otherwise provide one.
+    """
     parser = LattesParser()
-    _ingest_researcher_file(file_path, entity_manager, parser)
+    session = None
+    try:
+        session = ResearcherController()._service._repository._session
+    except Exception:
+        pass
+    from src.core.logic.project_loader import ProjectLoader
+
+    project_loader = ProjectLoader(mapping_strategy=None)
+    _ingest_researcher_file(
+        file_path,
+        entity_manager,
+        parser,
+        load_researcher_index(session),
+        project_loader,
+    )
 
 
 def ingest_articles_task(
     articles: List[Dict],
     target_researcher: Researcher,
-    all_researchers: List[Researcher],
+    all_researchers: List[ResearcherRef],
     parser: LattesParser,
     source_file: str,
 ):
     logger.info(f"Processing {len(articles)} articles for {target_researcher.name}...")
     article_ctrl = ArticleController()
-    researcher_ctrl = ResearcherController()
+    session = article_ctrl._service._repository._session
 
     for art in articles:
         try:
@@ -311,15 +392,28 @@ def ingest_articles_task(
                 source_path=source_file,
             )
 
-            existing_art = None
+            # Column-only lookups. The Article.authors relationship is
+            # lazy="joined" and Researcher carries several more lazy="joined"
+            # relationships, so an ORM query collapses into a combinatorial
+            # LEFT OUTER JOIN that crashes native psycopg2/libpq with SIGSEGV
+            # on PostgreSQL (see export_canonical for the same root cause).
+            # Fetch only the row id so the author graph is never materialized.
+            paper_id = None
             if doi:
-                existing_art = article_ctrl.get_by_doi(doi)
-            if not existing_art:
-                existing_art = article_ctrl.get_by_title_year(title, year)
+                paper_id = session.execute(
+                    text("SELECT id FROM articles WHERE doi = :doi LIMIT 1"),
+                    {"doi": doi},
+                ).scalar()
+            if paper_id is None:
+                paper_id = session.execute(
+                    text(
+                        "SELECT id FROM articles "
+                        "WHERE title = :t AND year = :y LIMIT 1"
+                    ),
+                    {"t": title, "y": year},
+                ).scalar()
 
-            if existing_art:
-                paper = existing_art
-            else:
+            if paper_id is None:
                 paper = article_ctrl.create_article(
                     title=title,
                     year=year,
@@ -329,10 +423,11 @@ def ingest_articles_task(
                     volume=art.get("volume"),
                     pages=art.get("pages"),
                 )
+                paper_id = paper.id
                 tracking_recorder.record_change(
                     source_record_id=getattr(source_record, "id", None),
                     canonical_entity_type="article",
-                    canonical_entity_id=paper.id,
+                    canonical_entity_id=paper_id,
                     operation="create",
                     changed_fields=[
                         "title",
@@ -356,14 +451,14 @@ def ingest_articles_task(
             tracking_recorder.record_entity_match(
                 source_record_id=getattr(source_record, "id", None),
                 canonical_entity_type="article",
-                canonical_entity_id=paper.id,
+                canonical_entity_id=paper_id,
                 match_strategy="doi_exact" if doi else "title_year",
                 match_confidence=1.0 if doi else 0.8,
             )
             tracking_recorder.record_attribute_assertions(
                 source_record_id=getattr(source_record, "id", None),
                 canonical_entity_type="article",
-                canonical_entity_id=paper.id,
+                canonical_entity_id=paper_id,
                 selected_attributes={
                     "title": title,
                     "year": year,
@@ -375,16 +470,27 @@ def ingest_articles_task(
                 selection_reason="lattes_article_selected_values",
             )
 
-            # Link primary author
-            current_author_ids = [
-                getattr(auth, "id") for auth in getattr(paper, "authors", [])
-            ]
-            if target_researcher.id not in current_author_ids:
+            # Link primary author via the association table, never the ORM
+            # graph (which would rebuild the crashing joined query).
+            already_linked = session.execute(
+                text(
+                    "SELECT 1 FROM article_authors "
+                    "WHERE article_id = :a AND researcher_id = :r LIMIT 1"
+                ),
+                {"a": paper_id, "r": target_researcher.id},
+            ).scalar()
+            if not already_linked:
                 try:
-                    _attach_article_author(
-                        article_ctrl, researcher_ctrl, paper.id, target_researcher.id
+                    session.execute(
+                        text(
+                            "INSERT INTO article_authors (article_id, researcher_id) "
+                            "VALUES (:a, :r)"
+                        ),
+                        {"a": paper_id, "r": target_researcher.id},
                     )
+                    session.commit()
                 except Exception as link_err:
+                    session.rollback()
                     logger.warning(
                         f"Failed to link article '{title}' to researcher {target_researcher.id}: {link_err}"
                     )
@@ -393,39 +499,10 @@ def ingest_articles_task(
             logger.error(f"Failed to ingest article {art.get('title')}: {art_err}")
 
 
-def _attach_article_author(
-    article_ctrl: ArticleController,
-    researcher_ctrl: ResearcherController,
-    article_id: int,
-    researcher_id: int,
-) -> None:
-    """Attach article author while tolerating controller/service version mismatches."""
-    try:
-        article_ctrl.add_author(article_id, researcher_id)
-        return
-    except AttributeError as exc:
-        if " has no attribute 'get'" not in str(exc):
-            raise
-
-    article = article_ctrl.get_by_id(article_id)
-    researcher = researcher_ctrl.get_by_id(researcher_id)
-    if not article or not researcher:
-        return
-
-    current_author_ids = [
-        getattr(author, "id", None) for author in getattr(article, "authors", [])
-    ]
-    if researcher_id in current_author_ids:
-        return
-
-    article.authors.append(researcher)
-    article_ctrl.update(article)
-
-
 def ingest_education_task(
     education_list: List[Dict],
     target_researcher: Researcher,
-    all_researchers: List[Researcher],
+    all_researchers: List[ResearcherRef],
     entity_manager: EntityManager,
     researcher_ctrl: ResearcherController,
     source_file: str,
@@ -767,16 +844,20 @@ def ingest_technical_productions_task(productions, target_researcher, session):
 
         existing_id = None
         if session is not None:
-            from research_domain.domain.entities.research_production import (
-                ResearchProduction,
-            )
-
-            row = (
-                session.query(ResearchProduction)
-                .filter_by(title=title, year=year, production_type_id=type_id)
-                .first()
-            )
-            existing_id = row.id if row else None
+            # Column-only lookup. ResearchProduction.authors is lazy="joined"
+            # and Researcher carries several more lazy="joined" relationships,
+            # so an ORM query collapses into a combinatorial LEFT OUTER JOIN
+            # that crashes native psycopg2/libpq with SIGSEGV on PostgreSQL
+            # (same root cause as Article.authors in the articles task). Fetch
+            # only the row id so the author graph is never materialized.
+            existing_id = session.execute(
+                text(
+                    "SELECT id FROM research_productions "
+                    "WHERE title = :t AND year = :y AND production_type_id = :pti "
+                    "LIMIT 1"
+                ),
+                {"t": title, "y": year, "pti": type_id},
+            ).scalar()
 
         try:
             if existing_id is None:
@@ -785,8 +866,24 @@ def ingest_technical_productions_task(productions, target_researcher, session):
                 )
                 existing_id = production.id
                 created += 1
-            prod_ctrl.add_author(existing_id, target_researcher.id)
+            already_linked = session.execute(
+                text(
+                    "SELECT 1 FROM production_authors "
+                    "WHERE production_id = :p AND researcher_id = :r LIMIT 1"
+                ),
+                {"p": existing_id, "r": target_researcher.id},
+            ).scalar()
+            if not already_linked:
+                session.execute(
+                    text(
+                        "INSERT INTO production_authors (production_id, researcher_id) "
+                        "VALUES (:p, :r)"
+                    ),
+                    {"p": existing_id, "r": target_researcher.id},
+                )
+                session.commit()
         except Exception as e:
+            session.rollback()
             logger.warning(f"Failed to ingest technical production '{title}': {e}")
     logger.info(
         f"Technical productions: {created} created for {target_researcher.name}"
@@ -819,9 +916,38 @@ def ingest_lattes_projects_flow():
     # destroy data ingested for researchers whose JSONs are absent from disk.
     Base.metadata.create_all(engine)
 
-    for json_file in json_files:
-        ingest_researcher_data(json_file, entity_manager, parser)
-        gc.collect()
+    # Uma leitura do cadastro por execução da fase, não por currículo.
+    session = None
+    try:
+        session = ResearcherController()._service._repository._session
+    except Exception:
+        logger.warning("Could not reach the DB session; researcher index is empty.")
+    researcher_index = load_researcher_index(session)
+    logger.info(f"Researcher index loaded with {len(researcher_index)} entries")
+
+    # Build each record's own mapping strategy per file, but reuse ONE
+    # ProjectLoader across all files: building it per CV reloads the full
+    # initiative + person tables each time (4449 initiatives / 4660 persons),
+    # spiking a single heavy file's peak well past runner limits.
+    from src.core.logic.project_loader import ProjectLoader
+
+    project_loader = ProjectLoader(mapping_strategy=None)
+
+    with tracking_recorder.run_context(
+        source_system="lattes_projects", flow_name="lattes_projects"
+    ):
+        for json_file in json_files:
+            ingest_researcher_data(
+                json_file, entity_manager, parser, researcher_index, project_loader
+            )
+            # The ORM sessions accumulate every entity created for all 125 CV
+            # files in their identity maps; merely committing (done inside the
+            # ingest helpers) does not release those references. Expire them
+            # after each file so memory is bounded to one researcher at a time,
+            # otherwise private-runners OOM (+ signal 11) near the end of the
+            # loop. gc.collect() alone cannot reclaim identity-map-held objects.
+            _expire_lattes_sessions(session)
+            gc.collect()
 
 
 if __name__ == "__main__":

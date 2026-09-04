@@ -34,6 +34,7 @@ def test_weekly_pipeline_flow_runs_all_pipelines_and_sends_final_summary(tmp_pat
         ),
         patch("src.flows.pipelines.weekly.send_telegram_etl_report_summary") as summary,
         patch("src.flows.pipelines.weekly.ingest_all_sources_flow") as all_sources,
+        patch("src.flows.pipelines.weekly.run_person_dedup") as dedup,
         patch("src.flows.pipelines.weekly.export_canonical_data_flow") as canonical,
         patch("src.flows.pipelines.weekly.export_knowledge_areas_mart_flow") as ka_mart,
         patch(
@@ -47,12 +48,14 @@ def test_weekly_pipeline_flow_runs_all_pipelines_and_sends_final_summary(tmp_pat
 
     assert executed_steps == [
         "all_sources",
+        "consolidate_duplicates",
         "export_canonical",
         "knowledge_areas_mart",
         "initiatives_analytics_mart",
         "people_relationship_graph",
     ]
     all_sources.assert_called_once_with(campus_name="Serra")
+    dedup.assert_called_once_with()
     canonical.assert_called_once_with(output_dir="out", campus="Serra")
     ka_mart.assert_called_once_with(
         output_path=str(Path("out") / "knowledge_areas_mart.json"), campus="Serra"

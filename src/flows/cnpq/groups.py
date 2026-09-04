@@ -1,15 +1,23 @@
+import re
 from typing import Optional
 
 from dotenv import load_dotenv
 from prefect import flow, get_run_logger, task
 from research_domain import CampusController, ResearchGroupController
 
-from src.adapters.sources.cnpq_crawler import CnpqCrawlerAdapter
+from src.adapters.sources.cnpq_crawler import CnpqCrawlerAdapter, normalize_cnpq_url
 from src.core.logic.strategies.cnpq_sync import CnpqSyncLogic
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
 load_dotenv()
+
+# O espelho do DGP resolve por um identificador de 16 dígitos. Das 345 URLs da
+# planilha do SigPesq, 344 seguem exatamente este formato; a exceção é digitação
+# manual no portal de origem.
+DGP_MIRROR_URL = re.compile(
+    r"^https?://dgp\.cnpq\.br/dgp/espelhogrupo/\d{16}$", re.IGNORECASE
+)
 
 
 @task
@@ -39,7 +47,7 @@ def get_groups_to_sync(
             logger.warning(
                 f"No campus found matching '{campus_name}'. Proceeding with no results."
             )
-            return []
+            return {"valid": [], "invalid": []}
 
         if len(matching_campuses) > 1:
             logger.warning(
@@ -50,13 +58,32 @@ def get_groups_to_sync(
         logger.info(f"Using Campus ID {campus_id} for filtering.")
 
     sync_list = []
+    invalid_list = []
     for g in all_groups:
         if getattr(g, "cnpq_url", None):
             # Check campus filter
             if campus_id and getattr(g, "campus_id", None) != campus_id:
                 continue
 
-            sync_list.append({"id": g.id, "name": g.name, "url": g.cnpq_url})
+            url = normalize_cnpq_url(g.cnpq_url)
+            if not DGP_MIRROR_URL.match(url):
+                # Defeito permanente de dado, não indisponibilidade do portal.
+                # Tentar mesmo assim custa ~36 s (o wait_for_selector espera
+                # 10 s e o retry relança o Chromium três vezes) e produz um
+                # "Timeout exceeded" idêntico ao do CNPq fora do ar — o que
+                # torna impossível distinguir os dois casos no log.
+                invalid_list.append({"id": g.id, "name": g.name, "url": g.cnpq_url})
+                continue
+
+            sync_list.append({"id": g.id, "name": g.name, "url": url})
+
+    if invalid_list:
+        logger.warning(
+            f"{len(invalid_list)} grupo(s) com cnpq_url sem o identificador de 16 "
+            f"dígitos do DGP — não serão coletados, e o dado precisa ser corrigido "
+            f"no SigPesq: "
+            + "; ".join(f"{g['id']} {g['name']} → {g['url']}" for g in invalid_list[:5])
+        )
 
     # Simple slicing for limit/offset
     if limit is not None:
@@ -67,7 +94,7 @@ def get_groups_to_sync(
     else:
         logger.info(f"Found {len(sync_list)} groups to synchronize.")
 
-    return sync_list
+    return {"valid": sync_list, "invalid": invalid_list}
 
 
 @task
@@ -151,7 +178,9 @@ def sync_single_group(group_info: dict):
     }
 
 
-def build_cnpq_sync_summary(results: list[dict]) -> dict:
+def build_cnpq_sync_summary(
+    results: list[dict], invalid_groups: Optional[list[dict]] = None
+) -> dict:
     failed_groups = [
         {
             "group_id": result.get("group_id"),
@@ -177,12 +206,33 @@ def build_cnpq_sync_summary(results: list[dict]) -> dict:
             }
         )
 
+    invalid_groups = invalid_groups or []
+    if invalid_groups:
+        # Código distinto de propósito: URL inválida é defeito permanente, cujo
+        # dono é quem cura o dado no SigPesq. Falha de coleta é transitória, e
+        # o dono é o portal. Sob o mesmo código, um esconde o outro.
+        warnings.append(
+            {
+                "source": "cnpq",
+                "severity": "error",
+                "code": "cnpq_group_url_invalid",
+                "count": len(invalid_groups),
+                "examples": invalid_groups[:5],
+                "message": (
+                    f"{len(invalid_groups)} grupo(s) com cnpq_url fora do formato "
+                    "do espelho DGP; corrigir o cadastro no SigPesq."
+                ),
+            }
+        )
+
     return {
         "source": "cnpq",
         "total_groups": len(results),
         "success_count": len(results) - len(failed_groups),
         "failed_count": len(failed_groups),
         "failed_groups": failed_groups,
+        "invalid_url_count": len(invalid_groups),
+        "invalid_url_groups": invalid_groups,
         "warnings": warnings,
     }
 
@@ -195,15 +245,20 @@ def sync_cnpq_groups_flow(campus_name: Optional[str] = None):
     logger = get_run_logger()
     logger.info(f"Starting CNPq Synchronization Flow (Filter: {campus_name or 'None'})")
 
-    groups = get_groups_to_sync(campus_name=campus_name)
+    to_sync = get_groups_to_sync(campus_name=campus_name)
+    groups = to_sync["valid"]
+    invalid_groups = to_sync["invalid"]
 
     results = []
-    for g_info in groups:
-        res = sync_single_group(g_info)
-        results.append(res)
+    with tracking_recorder.run_context(
+        source_system="cnpq_sync", flow_name="cnpq_sync"
+    ):
+        for g_info in groups:
+            res = sync_single_group(g_info)
+            results.append(res)
 
     success_count = sum(1 for r in results if r.get("success"))
-    summary = build_cnpq_sync_summary(results)
+    summary = build_cnpq_sync_summary(results, invalid_groups)
     logger.info(
         f"Flow finished. Successfully synchronized {success_count}/{len(groups)} groups."
     )

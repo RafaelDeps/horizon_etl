@@ -79,3 +79,117 @@ Mapping Epics -> User Stories -> Tasks status.
     - T-009 [Ops] Flow: Pending
 ### R4 - Analytics
   - R4 - Analytics: [x] Mart de Analytics (US-016)
+
+## Follow-ups técnicos — origem: `specs/004-fix-enrichment-transaction` (2026-08-24)
+
+- **TD-001 — Atomicidade real das gravações de enriquecimento**: no SQLite atual
+  o driver `pysqlite` confirma cada `SAVEPOINT` liberado quando ele é o primeiro
+  comando da transação, então as gravações de linha são efetivamente confirmadas
+  uma a uma e um `rollback()` posterior não as desfaz. A FR-004 daquela feature
+  fica parcialmente atendida. Mitigação exige configurar o engine
+  (`isolation_level=None` + listener de `BEGIN`), que hoje é criado dentro da
+  dependência externa `eo_lib` e compartilhado por todos os flows. Status: Ready.
+- **TD-002 — Fronteira transacional do `ensure_schema()`**: `run_migrations()` faz
+  `commit()` próprio no meio de `run()`, o que torna confusa a fronteira de
+  transação e foi o pano de fundo do defeito corrigido. Mover a execução de
+  migrações para a subida do aplicativo, junto da eventual adoção de Alembic
+  (o ADR-002 já registra a DDL em runtime como *stopgap*). Status: Ready.
+- **TD-003 — `make ci-check` não é executável hoje**: o alvo roda black, isort e
+  flake8 sobre todo o repositório e falha (58 arquivos seriam reformatados por
+  black, além de apontamentos de isort e flake8), enquanto o CI real verifica
+  apenas arquivos alterados e flake8 restrito a `E9,F63,F7,F82`. A constituição
+  cita `make ci-check` como portão mínimo e também menciona verificação de tipos
+  (mypy), que o alvo não executa. Alinhar constituição, Makefile e CI. Status:
+  Ready.
+- **TD-004 — Ferramentas de desenvolvimento não declaradas**: pytest, pytest-mock,
+  flake8, black e isort não constam do `requirements.txt`; o CI as instala
+  ad hoc. Um venv criado por `make setup` não consegue rodar `make test`.
+  Considerar um `requirements-dev.txt`. Status: Ready.
+- **TD-005 — `agent_sigpesq` não distingue "sem anexo" de "página ilegível"**: a
+  `ProjectFilesDownloadStrategy` emite a mesma mensagem nos dois casos. Investigação
+  em 25/08 confirmou que a leitura dela estava **correta** (os projetos realmente não
+  têm anexo; o `Repeater` vazio simplesmente não renderiza), mas foram necessárias
+  cinco sondagens manuais ao portal para provar isso. O ETL já resolveu do seu lado
+  (ver `specs/005-resilient-pdf-download`); vale sugerir a mesma distinção à
+  biblioteca. Status: Ready.
+- **TD-006 — Anexos ausentes no SigPesq**: oito projetos com documento extraído de
+  PDF real em 10/08/2026 não têm mais arquivo anexado no portal (PJ 9760, 9742,
+  9720, 9702, 9674, 9642, 9628, 9608). Nenhuma correção de código recupera isso —
+  é questão de dado, para quem administra o SigPesq. Status: Ready.
+- **TD-007 — `lattes_advisorships` roda perto do teto de tempo**: a fase percorre
+  112 currículos Lattes em laço sequencial, um a um, cada um instanciando
+  controladores e consultando o banco. Durações medidas no Prefect: 1346, 1350,
+  1360, 1398, 1409 e **1741 s** — esta última a 59 segundos do limite de 1800 s
+  então vigente, e já houve estouro em máquina mais lenta. O limite foi elevado
+  para 3600 s em 26/08 como paliativo. A correção real é paralelizar o laço, como
+  o `lattes_download` já faz com `ThreadPoolExecutor`; a margem volta a encolher
+  conforme o instituto cresce. Status: **Resolvido em 27/08 — mas não como este
+  item previa.** A medição mostrou que paralelizar não resolveria: o parse de
+  cada currículo custa **0,1 ms** (0,0% da fase) e o restante é escrita em
+  SQLite, serializada por natureza. O tempo estava em `ResearcherController()
+  .get_all()`, chamado **uma vez por currículo**: 7,8 s por chamada, 867,1 s dos
+  1424,6 s da fase (60,9%). A causa é produto cartesiano — a entidade
+  `Researcher` declara quatro coleções `lazy="joined"`, então 1060 pesquisadores
+  viram 828.644 linhas; a consulta em si roda em 0,01 s. A correção substituiu a
+  leitura por um índice de correspondência carregado uma vez por fase
+  (`load_researcher_index`, 9,3 ms), ver `specs/007-researcher-lookup-index/`.
+
+## Follow-ups técnicos — origem: `specs/007-researcher-lookup-index` (2026-08-27)
+
+- **TD-008 — Mesma leitura repetida fora das fases do Lattes**: o padrão
+  corrigido no TD-007 existe em outros dois pontos, não medidos e não corrigidos:
+  `src/core/logic/strategies/sigpesq_excel.py:100` chama `get_all()` dentro de
+  `SigPesqResearcherStrategy.ensure()`, invocada por `research_group_loader.py:105`
+  uma vez por pesquisador de grupo (há cache por nome em `_researcher_cache`, então
+  o custo é por nome distinto); e `src/core/logic/strategies/cnpq_sync.py:250`
+  chama `get_all()` dentro de `sync_members()`, invocada **uma vez por grupo** em
+  `flows/cnpq/groups.py:139` — e o banco tem 347 grupos. O carregador
+  `load_researcher_index` já é compartilhado, então adotá-lo nesses pontos é
+  mudança de poucas linhas. Falta medir as fases `sigpesq` e `cnpq_sync` antes de
+  decidir a prioridade. Status: Ready.
+- **TD-009 — Coleções `lazy="joined"` em `Researcher` (biblioteca)**: a causa raiz
+  do TD-007 está na modelagem do `research_domain`: `knowledge_areas`, `articles`,
+  `productions` e `emails` são carregadas ansiosamente no mesmo SELECT, o que
+  torna qualquer leitura de muitos pesquisadores quadrática. O ETL contornou
+  deixando de pedir o que não usa, mas qualquer consumidor da biblioteca paga o
+  mesmo preço. Vale propor `lazy="selectin"` à biblioteca. Status: Ready.
+- **TD-010 — Correspondência de pesquisador apoia-se em menos critérios do que
+  aparenta**: `_score_candidate` pontuava `brand_id` com 500, o maior peso da
+  função, mas essa coluna não existe em `persons` nem em `researchers`, nem como
+  atributo mapeado — o ramo nunca disparou. Foi removido em 27/08. Como
+  `identification_id` é anonimizado na escrita, um Lattes ID cru também nunca casa
+  com ele. Na prática a correspondência se apoia em `cnpq_url` e no nome. Um teste
+  (`test_ingest_academic_education`) passava justamente por construir um mock com
+  `brand_id`, algo impossível contra o banco real. Avaliar se o critério de
+  correspondência precisa de um identificador estável adicional. Status: Ready.
+
+## Follow-ups — origin: `specs/008-guard-participant-merge` (2026-08-28)
+
+- **TD-011 — Lattes project sync wiped SigPesq students from project teams**:
+  observed while validating dedup on the real run — the fresh
+  `researchers_canonical.json` showed "Israel Magalhães do Carmo" (person 579)
+  with **5** initiatives vs. the previously deployed run (person 567) with **9**.
+  The four missing memberships were "*Research Project*" team links (BPM
+  Pós-Gestão + 3× Air Writing). Root cause, confirmed from DB artifacts only (no
+  replay needed):
+  1. `sigpesq` loads the project team correctly — raw row
+     `research_projects/Relatorio_28_08_2026.xlsx` (SR 367) lists "Israel
+     Magalhães do Carmo" under `Estudantes` of PJ 8438.
+  2. `ingest_lattes_projects` runs **after** SigPesq and upserts the *same*
+     initiative (`entity_matches` SR 2563 → initiative 18, `identity_key`) with
+     `raw_members` taken from the Lattes CV only — which lists just the
+     coordinator and one researcher ("Francisco de Assis Bold", a typo) and no
+     students.
+  3. `TeamSynchronizer.synchronize_members` is a full sync:
+     `_remove_obsolete_members` deleted every (person, role) not in the Lattes
+     list, dropping the SigPesq students (and leaving a typo person
+     `Francisco de Assis Bold`) on the project team. The dedup feature was NOT
+     involved: the merge transfers `team_members`/`advisorship_members` (unit
+     tested) and no orphaned rows referencing merged person 1209 exist.
+  **Fix applied**: removal in `TeamSynchronizer` is now scoped to the roles the
+  source actually provides (a Lattes sync claiming only coordinator/researcher
+  roles no longer removes `Student` members from SigPesq; an empty member list
+  removes nothing). Tests covering the invariant were added to
+  `tests/test_team_synchronizer.py`. Note: a re-run of the weekly pipeline is
+  required to restore Israel's BPM/Air Writing project memberships. Status: Fixed
+  (needs re-run).

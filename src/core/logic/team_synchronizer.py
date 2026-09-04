@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from eo_lib import TeamController
 from loguru import logger
+
 from src.core.logic.initiative_identity import normalize_text
 
 
@@ -62,6 +63,15 @@ class TeamSynchronizer:
     ):
         """
         Synchronizes team members: adds new ones and removes obsolete ones.
+
+        Removal is scoped to the roles present in ``members_to_sync``. A source
+        that only lists researchers/coordinators (e.g. a Lattes CV project
+        roster) therefore never deletes members holding roles it does not
+        provide -- most importantly the ``Student`` roster contributed by
+        SigPesq. Without this scoping, the last project load to touch a team
+        (Lattes runs after SigPesq in the weekly pipeline) would wipe every
+        student from the project team, dropping their project memberships from
+        the canonical export.
         """
         current_source_memberships: Set[Tuple[int, int]] = set()
 
@@ -82,7 +92,7 @@ class TeamSynchronizer:
                 team_id, person, role_obj, role_name, role_id, start_date
             )
 
-        # Remove obsolete members
+        # Remove obsolete members of the roles this source claims to manage.
         self._remove_obsolete_members(team_id, current_source_memberships)
 
     def add_members(
@@ -162,20 +172,27 @@ class TeamSynchronizer:
         self, team_id: int, current_source_memberships: Set[Tuple[int, int]]
     ):
         """
-        Removes members from the database that are not present in the current source data.
+        Removes members from the database that are not present in the current
+        source data -- but only for roles the source actually carries.
 
-        Args:
-            team_id (int): ID of the team.
-            current_source_memberships (Set[Tuple[int, int]]):
-                Set of (PersonID, RoleID) that should currently belong to the team.
+        ``current_source_memberships`` is a set of (PersonID, RoleID) pairs
+        present in the current source load. A member is only removed when the
+        role of that membership is part of the source's own roster; members
+        holding roles the source does not mention (e.g. ``Student`` from a
+        source that only lists researchers) are never removed here. The roles
+        effectively manage membership for those roles only.
         """
+        source_roles = {role_id for _, role_id in current_source_memberships}
         try:
             db_members = self.team_controller.get_members(team_id)
             for m in db_members:
                 m_person_id = getattr(m, "person_id", None)
                 m_role_id = getattr(m, "role_id", None)
 
-                if (m_person_id, m_role_id) not in current_source_memberships:
+                if (
+                    m_role_id in source_roles
+                    and (m_person_id, m_role_id) not in current_source_memberships
+                ):
                     logger.info(
                         f"Removing obsolete member (Person ID: {m_person_id}, Role ID: {m_role_id}) from team {team_id}"
                     )
@@ -184,7 +201,9 @@ class TeamSynchronizer:
                         if m_id:
                             self.team_controller.remove_member(m_id)
                         else:
-                            logger.warning(f"Could not find member ID for obsolete membership (Person {m_person_id})")
+                            logger.warning(
+                                f"Could not find member ID for obsolete membership (Person {m_person_id})"
+                            )
                     except Exception as e:
                         logger.warning(f"Failed to remove obsolete member: {e}")
         except Exception as e:

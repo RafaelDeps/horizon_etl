@@ -18,6 +18,7 @@ from src.notifications.telegram import (
     send_telegram_etl_report_summary,
     telegram_flow_state_handlers,
 )
+from src.scripts.consolidate_duplicates import run_person_dedup
 
 
 def load_etl_report(path: Path) -> dict:
@@ -46,6 +47,10 @@ def weekly_pipelines_flow(
         reporter.run_step(
             step_name="all_sources",
             runner=lambda: ingest_all_sources_flow(campus_name=campus_name),
+        )
+        reporter.run_step(
+            step_name="consolidate_duplicates",
+            runner=lambda: run_person_dedup(),
         )
         reporter.run_step(
             step_name="export_canonical",

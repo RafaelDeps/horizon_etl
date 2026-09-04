@@ -91,6 +91,85 @@ def test_advisorship_handler_creates_members_with_base_persons(
     assert created.parent_id == 10
 
 
+def _advisorship_handler(minimal=True):
+    initiative_controller = MagicMock()
+    person_matcher = MagicMock()
+    entity_manager = MagicMock()
+    entity_manager.role_controller.get_all.return_value = []
+    session = MagicMock()
+    session.execute.return_value.scalar.return_value = None
+    initiative_controller._service._repository._session = session
+    person_matcher.person_controller._service._repository._session = session
+    return AdvisorshipHandler(
+        initiative_controller=initiative_controller,
+        person_matcher=person_matcher,
+        entity_manager=entity_manager,
+    )
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_advisorship_handler_persists_program_on_create(
+    MockAdvisorshipController,
+    MockFellowshipController,
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+
+    created = handler.create_or_update(
+        project_data={
+            "title": "Advisorship Com Programa",
+            "status": "active",
+            "program": "Pibic",
+        },
+        existing_initiative=None,
+        initiative_type_name="Advisorship",
+        initiative_type_id=7,
+        organization_id=9,
+    )
+
+    assert isinstance(created, Advisorship)
+    assert created.program == "Pibic"
+    MockAdvisorshipController.return_value.create.assert_called_once_with(created)
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_advisorship_handler_persists_program_on_update(
+    _MockAdvisorshipController,
+    MockFellowshipController,
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+
+    created = handler.create_or_update(
+        project_data={
+            "title": "Advisorship Atualizada",
+            "status": "active",
+            "program": "Pibic",
+        },
+        existing_initiative=None,
+        initiative_type_name="Advisorship",
+        initiative_type_id=7,
+        organization_id=9,
+    )
+    assert created.program == "Pibic"
+
+    updated = handler.create_or_update(
+        project_data={
+            "title": "Advisorship Atualizada",
+            "status": "concluded",
+            "program": "Pivic",
+        },
+        existing_initiative=created,
+        initiative_type_name="Advisorship",
+        initiative_type_id=7,
+        organization_id=9,
+    )
+
+    assert updated.program == "Pivic"
+
+
 @patch("src.core.logic.initiative_handlers.FellowshipController")
 @patch("src.core.logic.initiative_handlers.AdvisorshipController")
 def test_advisorship_handler_disambiguates_title_when_name_is_already_taken(
@@ -257,6 +336,53 @@ def test_advisorship_handler_reuses_fellowships_by_program_and_sponsor_across_wo
         [call(name="Voluntario"), call(name="CNPq")]
     )
     assert MockFellowshipController.return_value.create.call_count == 2
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_ensure_fellowship_updates_stale_value_on_existing_fellowship(
+    MockAdvisorshipController,
+    MockFellowshipController,
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    initiative_controller = MagicMock()
+    person_matcher = MagicMock()
+    entity_manager = MagicMock()
+    entity_manager.role_controller.get_all.return_value = []
+    session = MagicMock()
+    session.execute.return_value.scalar.return_value = None
+    initiative_controller._service._repository._session = session
+    person_matcher.person_controller._service._repository._session = session
+
+    handler = AdvisorshipHandler(
+        initiative_controller=initiative_controller,
+        person_matcher=person_matcher,
+        entity_manager=entity_manager,
+    )
+
+    first = handler._ensure_fellowship(
+        {
+            "fellowship_data": {
+                "name": "PIBITI",
+                "sponsor_name": "Fapes",
+                "value": 400.0,
+            }
+        }
+    )
+    assert first.value == 400.0
+
+    second = handler._ensure_fellowship(
+        {
+            "fellowship_data": {
+                "name": "PIBITI",
+                "sponsor_name": "Fapes",
+                "value": 800.0,
+            }
+        }
+    )
+    assert second is first
+    assert second.value == 800.0
+    MockFellowshipController.return_value.update.assert_called_once()
 
 
 @patch("src.core.logic.initiative_handlers.FellowshipController")

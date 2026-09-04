@@ -4,10 +4,44 @@ import os
 import sqlite3
 import sys
 
+from loguru import logger
+
 sys.path.append(os.getcwd())
 
-from src.core.logic.person_consolidator import PersonConsolidator
-from src.core.logic.reference_consolidator import ReferenceConsolidator
+from src.core.logic.person_consolidator import PersonConsolidator  # noqa: E402
+from src.core.logic.reference_consolidator import ReferenceConsolidator  # noqa: E402
+
+DEFAULT_DB_PATH = "db/horizon.db"
+DEFAULT_REPORT_DIR = "data/reports"
+
+
+def _write_report(report: dict, report_dir: str = DEFAULT_REPORT_DIR) -> str:
+    os.makedirs(report_dir, exist_ok=True)
+    report_path = os.path.join(report_dir, "dedup_report.json")
+    with open(report_path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, ensure_ascii=False)
+    return report_path
+
+
+def run_person_dedup(
+    db_path: str = DEFAULT_DB_PATH, report_dir: str = DEFAULT_REPORT_DIR
+) -> dict:
+    """Weekly-pipeline person dedup: classify duplicates, merge the safe ones,
+    and persist a reviewable report (contract R12/R14)."""
+    consolidator = PersonConsolidator(db_path)
+    groups = consolidator.find_all_groups()
+    planned = consolidator.build_report(groups=groups)
+    merged_now = consolidator.consolidate_all()
+    planned["records_merged"] = merged_now
+    planned["report_path"] = _write_report(planned, report_dir)
+    logger.info(
+        "Person dedup on {}: {} records merged, {} groups refused (see {}).",
+        db_path,
+        merged_now,
+        planned["refused_groups"],
+        planned["report_path"],
+    )
+    return planned
 
 
 def _person_plan(db_path: str) -> dict:
@@ -40,7 +74,9 @@ def _reference_plan(db_path: str) -> dict:
         )
     return {
         "team_duplicate_groups": len(team_groups),
-        "team_duplicate_records": sum(len(group["members"]) - 1 for group in team_groups),
+        "team_duplicate_records": sum(
+            len(group["members"]) - 1 for group in team_groups
+        ),
         "knowledge_area_duplicate_groups": len(knowledge_area_groups),
         "knowledge_area_duplicate_records": sum(
             len(group["members"]) - 1 for group in knowledge_area_groups

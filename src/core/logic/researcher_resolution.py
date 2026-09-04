@@ -1,11 +1,121 @@
-from typing import Any, Iterable, Optional
+from dataclasses import dataclass
+from typing import Any, Iterable, List, Optional
 
 from loguru import logger
 from sqlalchemy import text
 
 from src.adapters.sources.lattes_parser import LattesParser
+from src.core.logic.person_identity import normalize_participant_name
 from src.core.logic.researcher_creation import create_researcher_with_resume_fallback
 from src.research_domain_compat import AdvisorshipRole
+
+
+@dataclass
+class ResearcherRef:
+    """Registro leve de pesquisador, usado apenas para achar o dono de um CV.
+
+    Expõe os MESMOS nomes de atributo da entidade ``Researcher`` de propósito: o
+    algoritmo de pontuação lê candidatos por ``getattr``, então este registro
+    atravessa a correspondência sem que o algoritmo mude — e é a equivalência do
+    algoritmo que precisa ser preservada.
+
+    Ao contrário da entidade, este registro NÃO pertence à sessão do SQLAlchemy.
+    Ele não expira quando ``ProjectLoader._rollback_session()`` descarta a
+    transação. Um índice de entidades ORM, sim: medido em 12,4 s para reidratar
+    1061 objetos depois de um único rollback, mesmo com ``lazyload``, porque o
+    refresh reexecuta o carregamento padrão do mapper.
+    """
+
+    id: Any
+    name: Optional[str] = None
+    identification_id: Optional[str] = None
+    cnpq_url: Optional[str] = None
+    resume: Optional[str] = None
+    citation_names: Optional[str] = None
+
+
+_RESEARCHER_INDEX_SQL = text(
+    """
+    SELECT r.id                AS id,
+           p.name              AS name,
+           p.identification_id AS identification_id,
+           r.cnpq_url          AS cnpq_url,
+           r.resume            AS resume,
+           r.citation_names    AS citation_names
+    FROM researchers r
+    JOIN persons p ON p.id = r.id
+    """
+)
+
+
+def load_researcher_index(session: Any) -> List[ResearcherRef]:
+    """Lê, numa única consulta, o mínimo necessário para casar currículos.
+
+    Substitui ``ResearcherController().get_all()`` nos laços de ingestão do
+    Lattes. Aquele traz junto quatro coleções carregadas de forma ansiosa
+    (``knowledge_areas``, ``articles``, ``productions``, ``emails``), o que
+    transforma 1060 pesquisadores em 828.644 linhas e custa 7,8 s por chamada.
+    Esta consulta devolve 1060 linhas de seis colunas em menos de 1 ms.
+
+    Devolve lista vazia — sem levantar — quando não há sessão ou quando as
+    tabelas ainda não existem, para que a primeira execução contra um banco
+    recém-criado não falhe.
+    """
+    if session is None:
+        logger.warning("No DB session available; researcher index will be empty.")
+        return []
+
+    try:
+        rows = session.execute(_RESEARCHER_INDEX_SQL).fetchall()
+    except Exception as exc:
+        logger.warning(f"Could not load researcher index: {exc}")
+        return []
+
+    return [
+        ResearcherRef(
+            id=row.id,
+            name=row.name,
+            identification_id=row.identification_id,
+            cnpq_url=row.cnpq_url,
+            resume=row.resume,
+            citation_names=row.citation_names,
+        )
+        for row in rows
+    ]
+
+
+def researcher_ref(researcher: Any) -> ResearcherRef:
+    """Converte uma entidade (ou objeto compatível) num registro do índice."""
+    return ResearcherRef(
+        id=getattr(researcher, "id", None),
+        name=getattr(researcher, "name", None),
+        identification_id=getattr(researcher, "identification_id", None),
+        cnpq_url=getattr(researcher, "cnpq_url", None),
+        resume=getattr(researcher, "resume", None),
+        citation_names=getattr(researcher, "citation_names", None),
+    )
+
+
+def sync_researcher_ref(candidates: Iterable[Any], researcher: Any) -> None:
+    """Reflete no índice os campos que a ingestão acabou de atualizar.
+
+    ``projects.py`` grava ``citation_names``, ``cnpq_url`` e ``resume`` do dono
+    do currículo. Sem isto, currículos processados em seguida pontuariam sobre
+    um estado velho — o índice é lido uma vez só, então ele precisa acompanhar.
+    """
+    researcher_id = getattr(researcher, "id", None)
+    if researcher_id is None:
+        return
+    for candidate in candidates:
+        if not isinstance(candidate, ResearcherRef) or candidate.id != researcher_id:
+            continue
+        candidate.name = getattr(researcher, "name", candidate.name)
+        candidate.cnpq_url = getattr(researcher, "cnpq_url", candidate.cnpq_url)
+        candidate.resume = getattr(researcher, "resume", candidate.resume)
+        candidate.citation_names = getattr(
+            researcher, "citation_names", candidate.citation_names
+        )
+        return
 
 
 def resolve_researcher_from_lattes(
@@ -20,6 +130,17 @@ def resolve_researcher_from_lattes(
     The dataset may contain duplicates that differ only by accents/casing.
     We score candidates using stable identifiers first, then normalized name,
     and finally prefer the record that already has linked data in the DB.
+
+    Accepts either ORM entities or ``ResearcherRef`` records — candidates are
+    read exclusively through ``getattr``, so both behave identically.
+
+    What actually matches, in practice: ``cnpq_url`` carries the Lattes ID and
+    is the stable identifier that fires. ``identification_id`` is anonymized on
+    write, so a raw Lattes ID never equals it. Name comparison covers the rest.
+    A ``brand_id`` branch used to sit here scoring 500 — the heaviest rule in
+    the function — but that column exists neither in ``persons`` nor in
+    ``researchers``, nor as a mapped attribute, so it never once fired. It was
+    removed rather than left implying a robustness that was not there.
     """
 
     parser = LattesParser()
@@ -62,8 +183,7 @@ def resolve_researcher_by_name(
     if not name:
         return None
 
-    parser = LattesParser()
-    target_norm = parser.normalize_title(name)
+    target_norm = normalize_participant_name(name)
 
     best = None
     best_score = float("-inf")
@@ -72,11 +192,15 @@ def resolve_researcher_by_name(
         res_name = getattr(researcher, "name", None) or ""
         res_identification = getattr(researcher, "identification_id", None) or ""
 
-        if identification_id and res_identification and str(res_identification).casefold() == str(identification_id).casefold():
+        if (
+            identification_id
+            and res_identification
+            and str(res_identification).casefold() == str(identification_id).casefold()
+        ):
             score += 200
         if res_name and res_name.casefold() == name.casefold():
             score += 150
-        elif parser.normalize_title(res_name) == target_norm:
+        elif normalize_participant_name(res_name) == target_norm:
             score += 100
 
         if score > best_score:
@@ -112,7 +236,14 @@ def resolve_or_create_researcher(
         emails=emails,
     )
     if researcher:
-        all_researchers.append(researcher)
+        # O índice de correspondência recebe um registro leve; listas de
+        # entidades ORM (cnpq_sync, sigpesq_excel) continuam recebendo a
+        # entidade, como antes. O algoritmo lê tudo por getattr, então os dois
+        # formatos convivem sem que ele precise saber a diferença.
+        if all_researchers and isinstance(all_researchers[0], ResearcherRef):
+            all_researchers.append(researcher_ref(researcher))
+        else:
+            all_researchers.append(researcher)
     return researcher
 
 
@@ -130,13 +261,9 @@ def _score_candidate(
     matched = False
     name = getattr(researcher, "name", None) or ""
     identification_id = getattr(researcher, "identification_id", None) or ""
-    brand_id = getattr(researcher, "brand_id", None) or ""
     cnpq_url = getattr(researcher, "cnpq_url", None) or ""
 
     if lattes_id:
-        if str(brand_id) == lattes_id:
-            score += 500
-            matched = True
         if str(identification_id) == lattes_id:
             score += 400
             matched = True

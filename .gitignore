@@ -5,7 +5,24 @@ __pycache__/
 .venv/
 data/*
 !data/exports/
-!data/exports/**
+# Artefatos gerados pelos pipelines (JSON/Parquet canônicos, marts, grafos e
+# demais produtos de saída) NÃO são versionados. Só os relatórios consumíveis
+# (.html/.pdf) e os pacotes (.zip) vão para o git; ver !data/exports/**/*.html.
+data/exports/**
+!data/exports/**/
+!data/exports/**/*.html
+!data/exports/**/*.pdf
+!data/exports/**/*.zip
+# Docentes/OpenAlex dashboard reports regenerate on every weekly run; exclude
+# them so the pipeline churn stays out of git (reports are still consumable
+# from the working tree / released zip).
+data/exports/docentes/*.html
+# Documentos de projeto extraídos por LLM dos PDFs do SigPesq (PJ_*.json).
+# NÃO versionar: são insumo de entrada regenerável pelo agent_sigpesq e contêm
+# dados pessoais em claro (nome de coordenador e de equipe; e-mails só são
+# anonimizados na gravação em source_records, não no arquivo em disco).
+# Commitá-los colocaria esses dados no histórico do git, que é irreversível.
+data/exports/project_sigpesq_files_json/
 # Qualis reference data (public, no PII) — build input for the weekly
 # docentes/OpenAlex report phases; must be versioned so CI can run them.
 !data/reference/
@@ -21,5 +38,7 @@ db/*.db-*
 cache/
 lattes.config
 lattes_effective.list
+# Loose scratch/test mapping spreadsheets (e.g. test_mapping.xlsx) at repo root.
+/test_mapping*.xlsx
 site/
 chromedriver

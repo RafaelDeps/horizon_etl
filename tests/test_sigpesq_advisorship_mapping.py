@@ -35,6 +35,7 @@ def test_sigpesq_advisorship_mapping():
     assert isinstance(mapped["start_date"], datetime)
     assert mapped["start_date"].year == 2026
     assert mapped["model_class"] == Advisorship
+    assert mapped["program"] == "PIBIC"
     assert mapped["fellowship_data"]["name"] == "PIBIC"
     assert mapped["fellowship_data"]["value"] == 400.0
     assert mapped["fellowship_data"]["sponsor_name"] == "FAPES"
@@ -149,15 +150,37 @@ def test_sigpesq_advisorship_mapping_uses_sigpesq_codes_for_pt_pj_and_fellowship
     assert (
         mapped["parent_title"] == "Desenvolvimento de um Modulo de Hidroponia Autonomo"
     )
-    assert mapped["identity_key"] == build_identity_key(["sigpesq_workplan", "17515"])
+    # A identidade inclui o Id da bolsa, e não só o código do plano de trabalho:
+    # um mesmo CodPT pode ter bolsas consecutivas, com bolsistas e períodos
+    # diferentes. Com a chave só do plano, duas bolsas colapsavam na mesma
+    # identidade e a segunda tentava renomear a linha da primeira, batendo na
+    # restrição de unicidade de `initiatives.name` e sendo descartada.
+    assert mapped["identity_key"] == build_identity_key(
+        ["sigpesq_workplan", "17515", "10701"]
+    )
     assert mapped["parent_identity_key"] == build_identity_key(
         ["sigpesq_project", "8748"]
     )
     assert mapped["metadata"]["sigpesq_workplan_code"] == "17515"
     assert mapped["metadata"]["sigpesq_project_code"] == "8748"
+    assert mapped["program"] == "Pibic"
     assert mapped["fellowship_data"]["sigpesq_workplan_code"] == "17515"
     assert mapped["fellowship_data"]["sigpesq_project_code"] == "8748"
     assert mapped["fellowship_data"]["sigpesq_id"] == 10701
+
+
+def test_sigpesq_advisorship_mapping_blank_program_is_explicit_none():
+    strategy = SigPesqAdvisorshipMappingStrategy()
+
+    row = {
+        "Orientado": "Student 1",
+        "Orientador": "Sup 1",
+        "TituloPT": "Proj 1",
+        "Programa": "",
+        "AgFinanciadora": "FAPES",
+    }
+    mapped = strategy.map_row(row)
+    assert mapped["program"] is None
 
 
 def test_advisorship_and_fellowship_controllers():

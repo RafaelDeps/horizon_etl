@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from research_domain.domain.entities.academic_education import AcademicEducation
 
+from src.core.logic.researcher_resolution import ResearcherRef
 from src.flows.lattes.projects import ingest_file_task
 
 
@@ -35,11 +36,18 @@ def mock_lattes_parser():
         yield mock
 
 
+@pytest.fixture
+def mock_researcher_index():
+    with patch("src.flows.lattes.projects.load_researcher_index") as mock:
+        yield mock
+
+
 def test_ingest_academic_education(
     mock_entity_manager,
     mock_researcher_controller,
     mock_education_controller,
     mock_lattes_parser,
+    mock_researcher_index,
 ):
     # Setup Mocks
     mock_edu_ctrl_instance = mock_education_controller.return_value
@@ -49,13 +57,19 @@ def test_ingest_academic_education(
     mock_entity_manager.academic_edu_controller = mock_edu_ctrl_instance
 
     # Mock Researcher
+    #
+    # Este teste casava por `brand_id` — coluna que não existe em `persons` nem
+    # em `researchers`, nem como atributo mapeado. Só um mock conseguia
+    # satisfazer aquela regra; contra o banco real ela nunca disparou. Agora o
+    # currículo casa por nome, como acontece de fato, e a entidade completa é
+    # carregada por id, como o código faz para o vencedor da correspondência.
     mock_researcher = MagicMock()
     mock_researcher.id = 123
     mock_researcher.name = "Test Researcher"
-    mock_researcher.brand_id = "1234567890"
     mock_session = MagicMock()
     mock_session.execute.return_value.fetchone.return_value = None
-    mock_researcher_controller.return_value.get_all.return_value = [mock_researcher]
+    mock_researcher_index.return_value = [ResearcherRef(id=123, name="Test Researcher")]
+    mock_researcher_controller.return_value.get_by_id.return_value = mock_researcher
     mock_researcher_controller.return_value._service._repository._session = mock_session
 
     # Mock Parser Output

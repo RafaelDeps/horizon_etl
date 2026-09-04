@@ -38,7 +38,12 @@ from loguru import logger
 # (name, argv tail, timeout seconds, critical, mode)
 #   mode "app"    -> `python app.py <argv...>`      (DB-writing phases; LGPD hook active)
 #   mode "module" -> `python -m <module>`           (read-only docentes/OpenAlex reports)
-# Order is load-bearing: SigPesq -> CNPq -> Lattes -> enrich_projects -> exports -> docentes -> LGPD.
+# Order is load-bearing: SigPesq -> CNPq -> Lattes -> extract_project_files ->
+# enrich_projects -> exports -> docentes -> LGPD.
+# extract_project_files (PDF download + Mistral) runs immediately before
+# enrich_projects so freshly extracted PJ document files feed it. It's slow and
+# costs per document, but is non-critical for the same reason enrich_projects is —
+# a portal or API problem must not sink the whole run.
 # enrich_projects runs after both project sources so PJ document files can match
 # initiatives by SigPesq code or Lattes title; it must precede export_canonical.
 # The docentes block runs after export_canonical (needs researchers_canonical.json /
@@ -49,8 +54,24 @@ _PHASES = [
     ("cnpq", ["cnpq_sync"], 5400, False, "app"),
     ("lattes_download", ["lattes_download"], 5400, False, "app"),
     ("lattes_projects", ["ingest_lattes_projects"], 3600, False, "app"),
-    ("lattes_advisorships", ["lattes_advisorships"], 1800, False, "app"),
+    # 3600s, not 1800s: measured runs sit at 1350-1741s against the old 1800s
+    # ceiling -- one of them cleared it by 59 seconds. The phase walks 112 Lattes
+    # CVs sequentially, so the margin shrinks as the institute grows, and a
+    # slower machine already times out. Raising the ceiling buys room; the real
+    # fix is to parallelise the loop (see docs/backlog.md TD-007).
+    ("lattes_advisorships", ["lattes_advisorships"], 3600, False, "app"),
+    (
+        "extract_project_files",
+        ["extract_project_files"],
+        7200,
+        False,
+        "app",
+    ),
     ("enrich_projects", ["enrich_projects"], 900, False, "app"),
+    # consolidate_duplicates merges the observed same-person pairs after all
+    # source phases loaded and before export_canonical, so the canonical export
+    # and downstream marts see exactly one record per person (contract R6-R14).
+    ("consolidate_duplicates", ["consolidate_duplicates"], 900, False, "app"),
     ("export_canonical", ["export_canonical"], 1800, True, "app"),
     ("knowledge_areas_mart", ["ka_mart"], 900, False, "app"),
     ("initiatives_analytics_mart", ["analytics_mart"], 900, False, "app"),
@@ -106,27 +127,55 @@ def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
         argv = [sys.executable, "-m", *argv_tail]
     else:
         argv = [sys.executable, "app.py", *argv_tail]
-        # Pass positional args only where app.py expects them.
+        # Pass positional args only where app.py expects them. app.py
+        # `export_canonical` and `ka_mart` read campus as sys.argv[3]; forward it
+        # so a WEEKLY_CAMPUS-scoped run filters those exports (e.g. campuses ->
+        # only that campus) instead of exporting the full dataset.
         if argv_tail[0] == "cnpq_sync" and campus:
             argv.append(campus)
         elif argv_tail[0] == "export_canonical":
             argv.append(output_dir)
+            if campus:
+                argv.append(campus)
     logger.info("▶ phase '{}': {}", name, " ".join(argv[1:]))
-    try:
-        proc = subprocess.run(argv, timeout=timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        logger.error("phase '{}' timed out after {}s", name, timeout)
-        rc = None
-    ok = rc == 0
-    log = logger.info if ok else logger.error
+    rc = _run_phase_subprocess(argv, timeout, name)
+    log = logger.info if rc == 0 else logger.error
     log("phase '{}' finished: {}", name, _describe_rc(rc))
     return {
         "name": name,
-        "ok": ok,
+        "ok": rc == 0,
         "rc": rc,
         "critical": bool(argv_tail and _critical(name)),
     }
+
+
+def _run_phase_subprocess(argv, timeout, name):
+    """Runs a phase subprocess, retrying once when it dies by signal.
+
+    A signal death (rc < 0) on non-critical phases is usually a transient native
+    crash (e.g. a SIGSEGV in a C extension) rather than a deterministic logic
+    error. Retrying once lets the run self-heal so a flaky native crash does not
+    leave a red phase when the next attempt would succeed. Regular exit codes
+    (rc >= 0) and timeouts are never retried, so real failures are not masked.
+    """
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            proc = subprocess.run(argv, timeout=timeout)
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            logger.error("phase '{}' timed out after {}s", name, timeout)
+            return None
+        is_signal_death = rc is not None and rc < 0
+        if is_signal_death and attempt < max_attempts:
+            logger.warning(
+                "phase '{}' {} — retrying once",
+                name,
+                _describe_rc(rc),
+            )
+            continue
+        return rc
+    return rc
 
 
 def _critical(name):
@@ -153,7 +202,8 @@ def _notify(results, crit_failed):
 
 
 def run_weekly(
-    campus_name: Optional[str] = None, output_dir: str = "data/exports"
+    campus_name: Optional[str] = None,
+    output_dir: str = "data/exports",
 ) -> int:
     """Run every weekly phase in its own subprocess. Returns a process exit code."""
     campus = (campus_name or "").strip()

@@ -37,5 +37,13 @@ def atomic_write_text(path: str, content: str, encoding: str = "utf-8") -> None:
 def atomic_write_json(
     path: str, data: Any, *, indent: int = 4, ensure_ascii: bool = False
 ) -> None:
-    """Serialize `data` as JSON and write it to `path` atomically."""
-    atomic_write_text(path, json.dumps(data, indent=indent, ensure_ascii=ensure_ascii))
+    """Serialize `data` as strict JSON and write it to `path` atomically.
+
+    ``allow_nan=False`` turns Python's non-standard ``NaN``/``Infinity`` tokens
+    into a ValueError instead of emitting JSON that strict consumers (JS) choke
+    on.
+    """
+    atomic_write_text(
+        path,
+        json.dumps(data, indent=indent, ensure_ascii=ensure_ascii, allow_nan=False),
+    )

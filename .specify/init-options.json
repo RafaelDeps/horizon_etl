@@ -1,13 +1,8 @@
 {
-  "ai": "codex",
-  "ai_skills": true,
-  "branch_numbering": "sequential",
-  "context_file": "AGENTS.md",
+  "ai": "opencode",
+  "feature_numbering": "sequential",
   "here": true,
-  "integration": "codex",
-  "additional_integrations": [
-    "claude"
-  ],
+  "integration": "opencode",
   "script": "sh",
-  "speckit_version": "0.8.11"
+  "speckit_version": "1.0.0"
 }

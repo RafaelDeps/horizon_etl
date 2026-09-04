@@ -48,6 +48,47 @@ os.environ.setdefault("PREFECT_API_URL", "http://127.0.0.1:4200/api")
 install_lgpd_session_hooks()
 
 
+def _report_cnpq_summary(summary) -> None:
+    """Torna visível o resultado da sincronização do CNPq.
+
+    Emite os avisos estruturados no nível certo — URL inválida é ERROR, porque
+    é defeito permanente de dado que se repete toda semana; falha de coleta é
+    WARNING, porque o portal pode estar fora — e grava um relatório em
+    ``data/reports/``, no mesmo padrão do backfill de LGPD, para que a cobertura
+    da fase seja auditável depois sem depender de grep no log.
+    """
+    if not isinstance(summary, dict):
+        return
+
+    for aviso in summary.get("warnings", []):
+        registrar = logger.error if aviso.get("severity") == "error" else logger.warning
+        registrar(f"[{aviso.get('code')}] {aviso.get('message')}")
+
+    logger.info(
+        "CNPq sync: {}/{} grupos sincronizados | {} falha(s) de coleta | "
+        "{} URL(s) inválida(s)",
+        summary.get("success_count", 0),
+        summary.get("total_groups", 0),
+        summary.get("failed_count", 0),
+        summary.get("invalid_url_count", 0),
+    )
+
+    try:
+        import json as _json
+        from datetime import datetime as _dt
+
+        destino = os.path.join("data", "reports")
+        os.makedirs(destino, exist_ok=True)
+        caminho = os.path.join(
+            destino, f"cnpq_sync_{_dt.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        with open(caminho, "w", encoding="utf-8") as arquivo:
+            _json.dump(summary, arquivo, ensure_ascii=False, indent=2)
+        logger.info(f"CNPq sync report: {caminho}")
+    except Exception as exc:  # relatório nunca pode derrubar a fase
+        logger.warning(f"Could not write CNPq sync report: {exc}")
+
+
 def main():
     """
     Main entry point for Horizon ETL.
@@ -106,7 +147,12 @@ def main():
             logger.info(
                 f"Executing Flow: Sync CNPq Groups (Campus Filter: {campus_filter})"
             )
-            sync_cnpq_groups_flow(campus_name=campus_filter)
+            cnpq_summary = sync_cnpq_groups_flow(campus_name=campus_filter)
+            # O resumo era descartado aqui: `build_cnpq_sync_summary` produzia a
+            # contagem de falhas e a lista de grupos, e nada consumia. Uma fase
+            # podia deixar de coletar centenas de grupos e ainda sair com
+            # código 0, porque o único sinal de sucesso é o exit code.
+            _report_cnpq_summary(cnpq_summary)
 
         if flow_to_run in ["export_canonical", "all"]:
             # Optional output dir as 2nd arg if running specific flow
@@ -244,11 +290,71 @@ def main():
             logger.info("Executing Flow: Ingest Lattes Advisorships")
             ingest_lattes_advisorships_flow()
 
+        if flow_to_run == "consolidate_duplicates":
+            from src.scripts.consolidate_duplicates import run_person_dedup
+
+            logger.info("Executing Flow: Consolidate Duplicate Persons")
+            report = run_person_dedup()
+            logger.info(
+                "Person dedup finished: {} records merged, {} groups refused "
+                "(report: {}).",
+                report["records_merged"],
+                report["refused_groups"],
+                report["report_path"],
+            )
+
         if flow_to_run == "enrich_projects":
             from src.flows.sigpesq.enrich_projects import enrich_projects_flow
 
             logger.info("Executing Flow: Enrich SigPesq Projects")
             enrich_projects_flow()
+
+        if flow_to_run == "mark_reviewed":
+            # Operational utility, not ingestion: records that a person checked
+            # an auto-created initiative, which is the ONLY way its review flag
+            # comes off.
+            #
+            #   python app.py mark_reviewed <initiative_id> <reviewer>
+            #
+            # Use a NON-PERSONAL identifier for <reviewer> -- registration
+            # number or initials. It travels into the exported catalogue, and
+            # the project forbids personal data such as e-mail in any output.
+            from src.core.logic.project_enrichment import ProjectEnrichmentLoader
+
+            if len(sys.argv) < 4:
+                logger.error(
+                    "Usage: python app.py mark_reviewed <initiative_id> <reviewer>"
+                )
+                sys.exit(2)
+            loader = ProjectEnrichmentLoader()
+            ok = loader.mark_reviewed(int(sys.argv[2]), sys.argv[3])
+            sys.exit(0 if ok else 1)
+
+        if flow_to_run == "backfill_enrichment_origin":
+            # Repairs a database whose payloads already lost the origin. Not part
+            # of the weekly run: it rebuilds the database each time, so this
+            # would be dead weight there.
+            from src.core.logic.project_enrichment import ProjectEnrichmentLoader
+
+            logger.info("Rebuilding initiative origin from the audit trail")
+            logger.info(
+                f"Done: {ProjectEnrichmentLoader().backfill_origin_from_tracking()}"
+            )
+
+        if flow_to_run == "extract_project_files":
+            from src.flows.sigpesq.project_files import extract_project_files_flow
+
+            # Optional limit, to keep smoke tests cheap. Accepted as a positional
+            # (make extract-project-files) or via env var, which is how the
+            # weekly phase subprocess passes it down.
+            raw_limit = (
+                sys.argv[2]
+                if len(sys.argv) > 2 and sys.argv[2]
+                else os.getenv("HORIZON_PROJECT_FILES_LIMIT", "")
+            )
+            limit = int(raw_limit) if raw_limit else None
+            logger.info("Executing Flow: Extract SigPesq Project Files")
+            extract_project_files_flow(limit=limit)
 
         if flow_to_run == "lattes_full":
             logger.info("Executing Flow: Lattes Complete Pipeline")

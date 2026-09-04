@@ -30,7 +30,7 @@ PREFECT_DB_SERVICE ?= database
 	db-clean db-init db-reset \
 	prefect-server prefect-stop prefect-status \
 	pipeline pipeline-log weekly-flows full-refresh \
-	ingest-sigpesq \
+	ingest-sigpesq extract-project-files \
 	ingest-lattes-download ingest-lattes-projects ingest-lattes-full \
 	sync-cnpq \
 	export-canonical export-knowledge-areas-mart export-initiatives-analytics-mart export-people-graph export-collaboration-graph export-researchers-collaboration-graph export-outside-ifes-collaboration-graph export-null-researchers-collaboration-graph export-students-collaboration-graph export-rg-membership-manifest \
@@ -116,13 +116,23 @@ pipeline-log: prefect-server logs-dir ## Run the unified pipeline and tee output
 full-refresh: db-reset prefect-server ## Reset DB and run full pipeline for all campuses
 	@$(FLOW_PYTHON) app.py full_pipeline "" "$(OUTPUT_DIR)"
 
-weekly-flows: db-reset prefect-server ## Reset DB and run weekly source flows plus exports
-	@$(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
+weekly-flows: db-reset prefect-server ## Reset DB and run weekly source flows plus exports (incl. SigPesq document extraction)
+	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" $(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
 
 # --- Ingestion ---
 
 ingest-sigpesq: prefect-server ## Ingest all SigPesq reports (groups, projects, advisorships)
 	@$(FLOW_PYTHON) app.py sigpesq
+
+# Produz os PJ_*.json que o enrich_projects consome. Também roda dentro do
+# weekly-flows (fase extract_project_files, imediatamente antes do
+# enrich_projects); este alvo permite rodá-lo sob demanda, quando entrar um
+# lote novo de projetos, sem esperar a próxima execução semanal. As duas etapas
+# pulam o que já existe, então uma nova execução só paga pelo que falta.
+# Exige MISTRAL_KEY no .env.
+# Use PROJECT_FILES_LIMIT=5 para um teste barato.
+extract-project-files: prefect-server ## Baixa os PDFs dos projetos e extrai PJ_*.json via Mistral (sob demanda)
+	@$(FLOW_PYTHON) app.py extract_project_files "$(PROJECT_FILES_LIMIT)"
 
 ingest-lattes-download: prefect-server ## Download Lattes curricula via scriptLattes
 	@$(FLOW_PYTHON) -m src.flows.lattes.download

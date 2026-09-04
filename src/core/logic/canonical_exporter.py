@@ -14,6 +14,10 @@ from research_domain import (
 )
 from sqlalchemy import text
 
+from src.core.logic.advisorship_canonical_values import (
+    load_advisorship_source_values,
+    resolve_advisorship_canonical_values,
+)
 from src.core.logic.export_campus_resolver import ExportCampusResolver
 from src.core.logic.pii_anonymizer import scrub_pii_deep, scrub_source_record_payload
 from src.core.ports.export_sink import IExportSink
@@ -28,6 +32,7 @@ from src.tracking.entities import (
 
 try:
     from research_domain.controllers import ArticleController
+    from research_domain.domain.entities.article import ArticleType
 except ImportError:
 
     class ArticleController:  # type: ignore[override]
@@ -234,6 +239,7 @@ class CanonicalDataExporter:
             SELECT
                 a.id, i.name, i.status, i.description, i.start_date, i.end_date,
                 a.type as advisorship_type,
+                a.program as advisorship_program,
                 it.name as initiative_type_name,
                 am_std.student_id AS person_id, p_std.name as person_name,
                 am_sup.supervisor_id, p_sup.name as supervisor_name,
@@ -288,6 +294,7 @@ class CanonicalDataExporter:
             SELECT
                 a.id, i.name, i.status, i.description, i.start_date, i.end_date,
                 a.type as advisorship_type,
+                a.program as advisorship_program,
                 it.name as initiative_type_name,
                 a.student_id AS person_id, p_std.name as person_name,
                 a.supervisor_id, p_sup.name as supervisor_name,
@@ -1573,6 +1580,11 @@ class CanonicalDataExporter:
             len(export_data),
         )
         logger.info(f"Exporting {len(export_data)} Researchers...")
+        # This bespoke export path bypasses _enrich_export_rows, so scrub the
+        # assembled rows here — resumes and free-text fields can carry e-mails
+        # and phone numbers (LGPD). The classification views exported below
+        # reuse this same (already scrubbed) list.
+        export_data = scrub_pii_deep(export_data)
         self.sink.export(export_data, output_path)
         logger.info(f"Successfully exported enriched Researchers to {output_path}")
         self._export_researcher_classification_views(export_data, output_path)
@@ -1863,10 +1875,42 @@ class CanonicalDataExporter:
         """
         Exports all articles to a JSON file.
 
+        Uses a column-only query instead of ``ArticleController.get_all()``:
+        the controller's ``authors`` relationship is ``lazy="joined"`` and
+        eagerly materializes the full researcher graph for every article,
+        spiking resident memory (~2.6GB for a few thousand rows) and
+        segfaulting with SIGSEGV on memory-constrained CI runners.
+
         Args:
             output_path (str): The destination file path.
         """
-        data = self.article_ctrl.get_all()
+        session = self._get_session()
+        if session is None:
+            logger.info("No session available. Skipping Articles export.")
+            return
+        columns = (
+            "id",
+            "title",
+            "doi",
+            "year",
+            "type",
+            "journal_conference",
+            "volume",
+            "pages",
+        )
+        rows = session.execute(
+            text(f"SELECT {', '.join(columns)} FROM articles ORDER BY id")
+        ).fetchall()
+        data = []
+        for row in rows:
+            item = {column: getattr(row, column) for column in columns}
+            raw_type = item.get("type")
+            if raw_type is not None:
+                try:
+                    item["type"] = ArticleType[raw_type].value
+                except KeyError:
+                    pass
+            data.append(item)
         self._export_entities(data, output_path, "Articles", entity_type="article")
 
     def _export_via_orm(self, model, output_path, label, entity_type=None):
@@ -1916,9 +1960,36 @@ class CanonicalDataExporter:
         )
 
     def export_research_productions(self, output_path: str):
-        from research_domain.controllers import ResearchProductionController
+        """
+        Exports all research productions via a column-only query.
 
-        data = ResearchProductionController().get_all()
+        ``ResearchProductionController().get_all()`` eagerly materializes the
+        ``authors`` relationship (``lazy="joined"``, many-to-many), spiking
+        resident memory and segfaulting on memory-constrained CI runners. Query
+        the production columns directly instead.
+        """
+        session = self._get_session()
+        if session is None:
+            logger.info("No session available. Skipping Research Productions export.")
+            return
+        columns = (
+            "id",
+            "title",
+            "year",
+            "production_type_id",
+            "publisher",
+            "isbn",
+            "edition",
+            "book_title",
+            "pages",
+            "version",
+            "platform",
+            "link",
+        )
+        rows = session.execute(
+            text(f"SELECT {', '.join(columns)} FROM research_productions ORDER BY id")
+        ).fetchall()
+        data = [{column: getattr(row, column) for column in columns} for row in rows]
         self._export_entities(
             data,
             output_path,
@@ -2062,12 +2133,16 @@ class CanonicalDataExporter:
         resolver = self._get_campus_resolver()
         session = self.initiative_ctrl._service._repository._session
         result = self._fetch_advisorship_export_rows(session)
+        source_values = load_advisorship_source_values(session)
 
         projects_map = {}
         orphans = []
 
         for row in result:
             row_data = self._row_to_dict(row)
+            values = resolve_advisorship_canonical_values(
+                source_values.get(row_data["id"], [])
+            )
             adv_data = {
                 "id": row_data["id"],
                 "name": row_data["name"],
@@ -2090,6 +2165,13 @@ class CanonicalDataExporter:
                 "supervisor_id": row_data["supervisor_id"],
                 "supervisor_name": row_data["supervisor_name"],
                 "campus": resolver.get_campus("advisorship", row_data["id"]),
+                "year": values.year,
+                "program": (
+                    values.program
+                    or row_data.get("advisorship_program")
+                    or row_data.get("fellowship_name")
+                ),
+                "provider": values.provider or row_data.get("sponsor_name"),
                 "fellowship": (
                     {
                         "id": row_data["fellowship_id"],

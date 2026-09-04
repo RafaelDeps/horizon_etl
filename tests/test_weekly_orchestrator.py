@@ -11,6 +11,24 @@ from unittest.mock import MagicMock, patch
 import src.flows.pipelines.weekly_orchestrator as wo
 
 
+def test_extract_project_files_is_a_fixed_phase_before_enrich_projects():
+    names = [p[0] for p in wo._PHASES]
+    assert "extract_project_files" in names
+    assert "enrich_projects" in names
+    assert names.index("extract_project_files") < names.index("enrich_projects")
+
+
+def test_consolidate_duplicates_phase_runs_before_canonical_export():
+    names = [p[0] for p in wo._PHASES]
+    assert "consolidate_duplicates" in names
+    assert "export_canonical" in names
+    assert names.index("consolidate_duplicates") < names.index("export_canonical")
+    entry = next(phase for phase in wo._PHASES if phase[0] == "consolidate_duplicates")
+    assert (
+        entry[4] == "app"
+    ), "the dedup phase writes to the DB; it must run under app.py"
+
+
 def _fake_run_factory(fail_cmd=None, rc=1, timeout_cmd=None, seen=None):
     def fake_run(argv, timeout=None):
         cmd = argv[2]
@@ -30,6 +48,60 @@ def test_describe_rc_signal_and_exit():
     assert wo._describe_rc(-11) == "killed by signal 11"
     assert wo._describe_rc(0) == "exit 0"
     assert wo._describe_rc(None) == "timeout"
+
+
+def test_signal_death_retries_once_and_self_heals():
+    codes = iter([-11, 0])  # SIGSEGV on first attempt, success on retry
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(1)
+        return MagicMock(returncode=next(codes))
+
+    with patch.object(wo.subprocess, "run", side_effect=fake_run):
+        rc = wo._run_phase_subprocess(["python", "-m", "x"], 60, "t")
+    assert rc == 0
+    assert len(calls) == 2
+
+
+def test_signal_death_retries_once_then_keeps_signal():
+    codes = iter([-11, -11])
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(1)
+        return MagicMock(returncode=next(codes))
+
+    with patch.object(wo.subprocess, "run", side_effect=fake_run):
+        rc = wo._run_phase_subprocess(["python", "-m", "x"], 60, "t")
+    assert rc == -11
+    assert len(calls) == 2
+
+
+def test_ordinary_nonzero_exit_is_not_retried():
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(1)
+        return MagicMock(returncode=1)
+
+    with patch.object(wo.subprocess, "run", side_effect=fake_run):
+        rc = wo._run_phase_subprocess(["python", "-m", "x"], 60, "t")
+    assert rc == 1
+    assert len(calls) == 1  # deterministic errors must not be masked by a retry
+
+
+def test_timeout_is_not_retried():
+    calls = []
+
+    def fake_run(argv, timeout=None):
+        calls.append(1)
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    with patch.object(wo.subprocess, "run", side_effect=fake_run):
+        rc = wo._run_phase_subprocess(["python", "-m", "x"], 60, "t")
+    assert rc is None
+    assert len(calls) == 1
 
 
 def test_noncritical_segfault_does_not_stop_later_phases():
@@ -91,3 +163,29 @@ def test_telegram_failure_never_changes_outcome():
         patch.object(wo.subprocess, "run", side_effect=_fake_run_factory()),
     ):
         assert wo.run_weekly() == 0
+
+
+def test_campus_is_forwarded_to_cnpq_sync_and_export_canonical():
+    captured = []
+
+    def fake_run(argv, timeout=None):
+        captured.append(argv)
+        m = MagicMock()
+        m.returncode = 0
+        return m
+
+    with (
+        patch("src.notifications.telegram.send_telegram_message", return_value=True),
+        patch.object(wo.subprocess, "run", side_effect=fake_run),
+    ):
+        assert wo.run_weekly(campus_name="Serra", output_dir="data/exports") == 0
+
+    cnpq = next(a for a in captured if "cnpq_sync" in a)
+    export = next(
+        a for a in captured if a[-1] == "export_canonical" or "export_canonical" in a
+    )
+    # cnpq_sync receives campus as trailing arg
+    assert cnpq[-1] == "Serra"
+    # export_canonical receives output_dir then campus
+    assert export[-1] == "Serra"
+    assert export[-2] == "data/exports"
