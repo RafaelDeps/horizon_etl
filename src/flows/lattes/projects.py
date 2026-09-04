@@ -844,16 +844,20 @@ def ingest_technical_productions_task(productions, target_researcher, session):
 
         existing_id = None
         if session is not None:
-            from research_domain.domain.entities.research_production import (
-                ResearchProduction,
-            )
-
-            row = (
-                session.query(ResearchProduction)
-                .filter_by(title=title, year=year, production_type_id=type_id)
-                .first()
-            )
-            existing_id = row.id if row else None
+            # Column-only lookup. ResearchProduction.authors is lazy="joined"
+            # and Researcher carries several more lazy="joined" relationships,
+            # so an ORM query collapses into a combinatorial LEFT OUTER JOIN
+            # that crashes native psycopg2/libpq with SIGSEGV on PostgreSQL
+            # (same root cause as Article.authors in the articles task). Fetch
+            # only the row id so the author graph is never materialized.
+            existing_id = session.execute(
+                text(
+                    "SELECT id FROM research_productions "
+                    "WHERE title = :t AND year = :y AND production_type_id = :pti "
+                    "LIMIT 1"
+                ),
+                {"t": title, "y": year, "pti": type_id},
+            ).scalar()
 
         try:
             if existing_id is None:
@@ -862,8 +866,24 @@ def ingest_technical_productions_task(productions, target_researcher, session):
                 )
                 existing_id = production.id
                 created += 1
-            prod_ctrl.add_author(existing_id, target_researcher.id)
+            already_linked = session.execute(
+                text(
+                    "SELECT 1 FROM production_authors "
+                    "WHERE production_id = :p AND researcher_id = :r LIMIT 1"
+                ),
+                {"p": existing_id, "r": target_researcher.id},
+            ).scalar()
+            if not already_linked:
+                session.execute(
+                    text(
+                        "INSERT INTO production_authors (production_id, researcher_id) "
+                        "VALUES (:p, :r)"
+                    ),
+                    {"p": existing_id, "r": target_researcher.id},
+                )
+                session.commit()
         except Exception as e:
+            session.rollback()
             logger.warning(f"Failed to ingest technical production '{title}': {e}")
     logger.info(
         f"Technical productions: {created} created for {target_researcher.name}"
