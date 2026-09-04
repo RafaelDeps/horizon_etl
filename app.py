@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from src.core.logic.pii_session_hook import install_lgpd_session_hooks
+from src.flows.all import ingest_all_sources_flow
+from src.flows.cnpq.groups import sync_cnpq_groups_flow
 from src.flows.exports.canonical_data import export_canonical_data_flow
 from src.flows.exports.initiatives_analytics_mart import (
     export_initiatives_analytics_mart_flow,
@@ -35,6 +37,9 @@ from src.flows.lattes.advisorships import ingest_lattes_advisorships_flow
 from src.flows.lattes.complete import lattes_complete_flow
 from src.flows.lattes.download import download_lattes_flow
 from src.flows.lattes.projects import ingest_lattes_projects_flow
+from src.flows.pipelines.unified import full_ingestion_pipeline
+from src.flows.pipelines.weekly import weekly_pipelines_flow
+from src.flows.sigpesq.all import ingest_sigpesq_flow
 
 load_dotenv()
 
@@ -96,8 +101,6 @@ def main():
 
     try:
         if flow_to_run == "full_pipeline":
-            from src.flows.pipelines.unified import full_ingestion_pipeline
-
             campus_filter = sys.argv[2] if len(sys.argv) > 2 else None
             output_dir = sys.argv[3] if len(sys.argv) > 3 else "data/exports"
             logger.info(
@@ -119,16 +122,12 @@ def main():
             sys.exit(run_weekly(campus_name=campus_filter, output_dir=output_dir))
 
         elif flow_to_run == "weekly_inprocess":
-            from src.flows.pipelines.weekly import weekly_pipelines_flow
-
             campus_filter = sys.argv[2] if len(sys.argv) > 2 else None
             output_dir = sys.argv[3] if len(sys.argv) > 3 else "data/exports"
             logger.info("Executing WEEKLY Pipelines in a single process (legacy).")
             weekly_pipelines_flow(campus_name=campus_filter, output_dir=output_dir)
 
         elif flow_to_run == "all_sources":
-            from src.flows.all import ingest_all_sources_flow
-
             campus_filter = sys.argv[2] if len(sys.argv) > 2 else None
             logger.info(
                 f"Executing Flow: Ingest All Sources (Campus Filter: {campus_filter})"
@@ -136,14 +135,10 @@ def main():
             ingest_all_sources_flow(campus_name=campus_filter)
 
         elif flow_to_run in ["sigpesq", "all"]:
-            from src.flows.sigpesq.all import ingest_sigpesq_flow
-
             logger.info("Executing Flow: Ingest SigPesq")
             ingest_sigpesq_flow()
 
         if flow_to_run in ["cnpq_sync", "all"]:
-            from src.flows.cnpq.groups import sync_cnpq_groups_flow
-
             campus_filter = (
                 sys.argv[2]
                 if len(sys.argv) > 2 and flow_to_run == "cnpq_sync"
