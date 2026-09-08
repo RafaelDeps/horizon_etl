@@ -1,16 +1,26 @@
+import os
 import re
 from typing import Optional
 
 from dotenv import load_dotenv
 from prefect import flow, get_run_logger, task
+from prefect.task_runners import ProcessPoolTaskRunner
 from research_domain import CampusController, ResearchGroupController
+from research_domain.controllers import ResearcherController
 
-from src.adapters.sources.cnpq_crawler import CnpqCrawlerAdapter, normalize_cnpq_url
+from src.adapters.sources.cnpq_crawler import normalize_cnpq_url
+from src.core.logic.researcher_resolution import ResearcherRef, load_researcher_index
 from src.core.logic.strategies.cnpq_sync import CnpqSyncLogic
+from src.flows.cnpq.fetch_worker import fetch_group
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
 load_dotenv()
+
+# Concurrent CNPq portal fetches. 4 is the level already agreed for this
+# portal (see specs/012-cnpq-concurrent-fetch/research.md R5); set to 1 to
+# reproduce the pre-012 fully sequential behavior without a code change.
+CNPQ_FETCH_CONCURRENCY = int(os.getenv("CNPQ_FETCH_CONCURRENCY", "4"))
 
 # O espelho do DGP resolve por um identificador de 16 dígitos. Das 345 URLs da
 # planilha do SigPesq, 344 seguem exatamente este formato; a exceção é digitação
@@ -97,31 +107,31 @@ def get_groups_to_sync(
     return {"valid": sync_list, "invalid": invalid_list}
 
 
-@task
-def sync_single_group(group_info: dict):
+def _write_group_result(
+    fetch_result: dict, sync_logic: "CnpqSyncLogic", researcher_index: list
+):
     """
-    Synchronizes a single research group.
+    Writes one already-fetched group's data to the database.
+
+    This is the serial half of the fetch/write split introduced in
+    specs/012-cnpq-concurrent-fetch/: fetching runs concurrently in separate
+    processes (see ``fetch_group`` in ``src.flows.cnpq.fetch_worker``), but
+    this function -- and the ``researcher_index`` list it mutates via
+    ``sync_members`` -- MUST only ever be called directly, one group at a
+    time, never via ``.submit()``. See
+    specs/012-cnpq-concurrent-fetch/contracts/fetch_write_contract.md for why.
+
+    ``researcher_index`` is built once per flow run (see
+    ``sync_cnpq_groups_flow``) and shared across every group, instead of each
+    call re-reading the full researcher registry -- see
+    specs/011-cnpq-sync-index-reuse/research.md R1.
     """
     logger = get_run_logger()
-    url = group_info["url"]
-    group_id = group_info["id"]
-    group_name = group_info["name"]
+    group_id = fetch_result["group_id"]
+    group_name = fetch_result["group_name"]
+    url = fetch_result["url"]
+    data = fetch_result["data"]
 
-    logger.info(f"Synchronizing group: {group_name} ({url})")
-
-    adapter = CnpqCrawlerAdapter()
-    sync_logic = CnpqSyncLogic()
-
-    # 1. Extract data
-    data = adapter.get_group_data(url)
-    if not data:
-        logger.error(f"Failed to extract data for {group_name}")
-        return {
-            "success": False,
-            "group_id": group_id,
-            "group_name": group_name,
-            "url": url,
-        }
     source_record = tracking_recorder.record_source_record(
         source_entity_type="cnpq_group_payload",
         payload=data,
@@ -130,43 +140,27 @@ def sync_single_group(group_info: dict):
         source_path=url,
     )
 
-    # 2. Sync group info
+    # 1. Sync group info
     sync_logic.sync_group(
         group_id,
         data,
         source_record_id=getattr(source_record, "id", None),
     )
 
-    # 3. Extract and sync members
-    members = adapter.extract_members(data)
-
-    # 3.1 Extract and merge Leaders
-    leaders = adapter.extract_leaders(data)
-    if leaders:
-        logger.info(f"Found {len(leaders)} leaders to sync.")
-        for leader_name in leaders:
-            # Check if leader is already in members list to avoid duplication (though sync_members handles it)
-            # We want to ensure they get the 'Líder' role if desired, or just ensure existence.
-            # If we add them as 'Líder', they might have double roles (Researcher + Leader), which is fine.
-            members.append(
-                {
-                    "name": leader_name,
-                    "role": "Líder",
-                    "data_inicio": None,  # Leaders usually started with the group, but we don't have specific data here
-                    "data_fim": None,
-                }
-            )
-
+    # 2. Sync members (leaders already merged in by fetch_group)
+    members = fetch_result["members"]
     from collections import Counter
 
     roles_count = Counter(m.get("role") for m in members)
     logger.info(
         f"Extracted {len(members)} members for {group_name}: {dict(roles_count)}"
     )
-    sync_logic.sync_members(group_id, members, source_file=url)
+    sync_logic.sync_members(
+        group_id, members, source_file=url, researcher_index=researcher_index
+    )
 
-    # 4. Extract and sync Research Lines (Knowledge Areas)
-    lines = adapter.extract_research_lines(data)
+    # 3. Sync Research Lines (Knowledge Areas)
+    lines = fetch_result["research_lines"]
     logger.info(f"Extracted {len(lines)} research lines for {group_name}")
     sync_logic.sync_knowledge_areas(group_id, lines, source_file=url)
 
@@ -237,10 +231,23 @@ def build_cnpq_sync_summary(
     }
 
 
-@flow(name="Sync CNPq Research Groups", **telegram_flow_state_handlers())
+@flow(
+    name="Sync CNPq Research Groups",
+    task_runner=ProcessPoolTaskRunner(max_workers=CNPQ_FETCH_CONCURRENCY),
+    **telegram_flow_state_handlers(),
+)
 def sync_cnpq_groups_flow(campus_name: Optional[str] = None):
     """
     Prefect flow to synchronize research groups with CNPq DGP mirror.
+
+    Fetching each group's page runs concurrently, in separate processes
+    (``CNPQ_FETCH_CONCURRENCY`` workers, see ``fetch_group`` in
+    ``src.flows.cnpq.fetch_worker``). Writing to the database stays strictly
+    serial: futures are consumed in submission order, and ``_write_group_result``
+    is always called directly -- never via ``.submit()`` -- so at most one
+    group's write is ever in progress. See
+    specs/012-cnpq-concurrent-fetch/contracts/fetch_write_contract.md for why
+    this separation exists and must be preserved.
     """
     logger = get_run_logger()
     logger.info(f"Starting CNPq Synchronization Flow (Filter: {campus_name or 'None'})")
@@ -249,12 +256,37 @@ def sync_cnpq_groups_flow(campus_name: Optional[str] = None):
     groups = to_sync["valid"]
     invalid_groups = to_sync["invalid"]
 
+    # Read the researcher registry once for the whole run, not once per
+    # group: ResearcherController().get_all() eagerly loads four unrelated
+    # collections per researcher and costs ~8.8s per call against the current
+    # data, versus 0.03s for this lightweight index -- 351 groups paid that
+    # cost separately before. See specs/011-cnpq-sync-index-reuse/research.md.
+    session = ResearcherController()._service._repository._session
+    researcher_index: list[ResearcherRef] = load_researcher_index(session)
+    logger.info(f"Researcher index loaded with {len(researcher_index)} entries")
+
+    sync_logic = CnpqSyncLogic()
+
     results = []
     with tracking_recorder.run_context(
         source_system="cnpq_sync", flow_name="cnpq_sync"
     ):
-        for g_info in groups:
-            res = sync_single_group(g_info)
+        # Submit every fetch up front (bounded by CNPQ_FETCH_CONCURRENCY
+        # worker processes), then consume results IN SUBMISSION ORDER --
+        # deterministic and reproducible, at the cost of the writer
+        # occasionally waiting on a slower group instead of taking whichever
+        # finishes first. See specs/012-cnpq-concurrent-fetch/research.md R4.
+        futures = [fetch_group.submit(g_info) for g_info in groups]
+
+        for g_info, future in zip(groups, futures):
+            fetch_result = future.result()
+            if not fetch_result["success"]:
+                logger.error(f"Failed to extract data for {g_info['name']}")
+                results.append(fetch_result)
+                continue
+            # Direct call, never .submit(): this is what keeps the write
+            # step -- and the researcher_index it mutates -- strictly serial.
+            res = _write_group_result(fetch_result, sync_logic, researcher_index)
             results.append(res)
 
     success_count = sum(1 for r in results if r.get("success"))

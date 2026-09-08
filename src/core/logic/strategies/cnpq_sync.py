@@ -240,14 +240,24 @@ class CnpqSyncLogic:
         members_data: List[Dict[str, Any]],
         *,
         source_file: str | None = None,
+        researcher_index: List[Any],
     ):
         """
         Synchronizes members of a research group.
+
+        ``researcher_index`` is built once per weekly run by the caller (see
+        ``src/flows/cnpq/groups.py:sync_cnpq_groups_flow``) and shared across
+        every group -- this method used to call ``self.res_ctrl.get_all()``
+        here, once per group (351 times per run, ~8.8s each against the
+        current data). See specs/011-cnpq-sync-index-reuse/.
         """
         from sqlalchemy import text
 
-        # Fetch all once to avoid N+1 and many session calls
-        all_res = self.res_ctrl.get_all()
+        all_res = researcher_index
+        # Read once per group, not once per member: the roles table has ~11
+        # rows and rarely changes, so a fresh read at the top of each group
+        # is both cheap and current. See specs/011-cnpq-sync-index-reuse/.
+        all_roles = self.role_ctrl.get_all()
 
         for m_data in members_data:
             name = m_data.get("name")
@@ -327,7 +337,6 @@ class CnpqSyncLogic:
                 role_name = m_data.get("role", "Pesquisador")
                 # Try to find existing role
                 role = None
-                all_roles = self.role_ctrl.get_all()
                 for r in all_roles:
                     if r.name.lower() == role_name.lower():
                         role = r
@@ -336,6 +345,12 @@ class CnpqSyncLogic:
                 if not role:
                     logger.info(f"Creating new role: {role_name}")
                     role = self.role_ctrl.create_role(name=role_name)
+                    # `all_roles` is now read once per group instead of once
+                    # per member: without this append, a second member in
+                    # the same group needing the same new role would create
+                    # it a second time, since the local snapshot would still
+                    # be missing it.
+                    all_roles.append(role)
 
                 # 3. Associate with group using the service's add_member
                 start_date = self._parse_date(m_data.get("data_inicio"))

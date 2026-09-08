@@ -1,1 +1,3 @@
-{"feature_directory":"specs/010-campus-resolution-fallback"}
+{
+  "feature_directory": "specs/012-cnpq-concurrent-fetch"
+}

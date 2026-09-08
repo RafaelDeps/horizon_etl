@@ -17,7 +17,6 @@ def test_sync_members_uses_resume_fallback_for_new_researcher():
     logic.rg_ctrl._service._repository._session = session
     logic.rg_ctrl._service.get_members.return_value = []
     logic.res_ctrl = MagicMock()
-    logic.res_ctrl.get_all.return_value = []
     logic.role_ctrl = MagicMock()
     logic.role_ctrl.get_all.return_value = []
     logic.role_ctrl.create_role.return_value = SimpleNamespace(id=7, name="Pesquisador")
@@ -46,8 +45,10 @@ def test_sync_members_uses_resume_fallback_for_new_researcher():
                 "data_fim": None,
             }
         ],
+        researcher_index=[],
     )
 
+    logic.res_ctrl.get_all.assert_not_called()
     logic.res_ctrl.create_researcher.assert_called_once_with(
         name="Alice",
         identification_id=None,
@@ -125,3 +126,165 @@ def test_sync_knowledge_areas_tracks_associations_after_commit(monkeypatch):
     )
 
     assert events == ["commit", "match", "assert", "change"]
+
+
+def test_researcher_created_by_one_group_is_found_by_the_next():
+    """Regression guard for specs/011-cnpq-sync-index-reuse.
+
+    The researcher index is built once per weekly run and shared across every
+    group. If a researcher created while processing one group were not
+    visible to the next, the same person would be created twice -- the exact
+    duplication bug feature 008 already guards against for a different
+    loader. This test proves the CNPq path shares that same guarantee.
+    """
+    logic = CnpqSyncLogic()
+
+    session = MagicMock()
+    exists_check = MagicMock()
+    exists_check.scalar.return_value = True
+    session.execute.return_value = exists_check
+
+    logic.rg_ctrl = MagicMock()
+    logic.rg_ctrl._service._repository._session = session
+    logic.rg_ctrl._service.get_members.return_value = []
+    logic.res_ctrl = MagicMock()
+    logic.res_ctrl._service._repository._session = session
+    logic.role_ctrl = MagicMock()
+    logic.role_ctrl.get_all.return_value = []
+    logic.role_ctrl.create_role.return_value = SimpleNamespace(id=7, name="Pesquisador")
+    logic.ka_ctrl = MagicMock()
+
+    created = MagicMock()
+    created.id = 999
+    created.name = "Bob Newly Created"
+    logic.res_ctrl.create_researcher.return_value = created
+
+    # A single index, shared across two calls to sync_members -- exactly as
+    # sync_cnpq_groups_flow shares one `researcher_index` list across every
+    # group in the real flow.
+    shared_researcher_index = []
+
+    member = {
+        "name": "Bob Newly Created",
+        "role": "Pesquisador",
+        "data_inicio": None,
+        "data_fim": None,
+    }
+
+    # First group: the researcher does not exist yet -> created.
+    logic.sync_members(
+        group_id=1,
+        members_data=[member],
+        researcher_index=shared_researcher_index,
+    )
+
+    # Second group, same shared index: the same name must be found, not
+    # created again.
+    logic.sync_members(
+        group_id=2,
+        members_data=[member],
+        researcher_index=shared_researcher_index,
+    )
+
+    assert logic.res_ctrl.create_researcher.call_count == 1, (
+        "the researcher was created more than once -- the index shared "
+        "across groups did not pick up the researcher created by the first "
+        "call, so the second call created a duplicate"
+    )
+    logic.res_ctrl.get_all.assert_not_called()
+
+
+def test_role_registry_read_once_per_group():
+    """Regression guard for the role-lookup half of specs/011-cnpq-sync-index-reuse.
+
+    ``self.role_ctrl.get_all()`` must be called once per call to
+    ``sync_members`` (i.e. once per group), not once per member.
+    """
+    logic = CnpqSyncLogic()
+
+    session = MagicMock()
+    exists_check = MagicMock()
+    exists_check.scalar.return_value = True
+    session.execute.return_value = exists_check
+
+    logic.rg_ctrl = MagicMock()
+    logic.rg_ctrl._service._repository._session = session
+    logic.rg_ctrl._service.get_members.return_value = []
+    logic.res_ctrl = MagicMock()
+    logic.res_ctrl._service._repository._session = session
+
+    existing_researcher = SimpleNamespace(id=1, name="Alice", identification_id=None)
+    existing_role = SimpleNamespace(id=1, name="Pesquisador")
+    logic.role_ctrl = MagicMock()
+    logic.role_ctrl.get_all.return_value = [existing_role]
+    logic.ka_ctrl = MagicMock()
+
+    members = [
+        {
+            "name": "Alice",
+            "role": "Pesquisador",
+            "data_inicio": None,
+            "data_fim": None,
+        },
+        {
+            "name": "Alice",
+            "role": "pesquisador",  # case-insensitive match, second member
+            "data_inicio": None,
+            "data_fim": None,
+        },
+    ]
+
+    logic.sync_members(
+        group_id=1,
+        members_data=members,
+        researcher_index=[existing_researcher],
+    )
+
+    assert logic.role_ctrl.get_all.call_count == 1, (
+        "role registry was read more than once for a single group -- it "
+        "must be read once per sync_members call, not once per member"
+    )
+
+
+def test_new_role_created_for_one_member_is_reused_by_the_next_in_same_group():
+    """Guards the append-on-create fix that hoisting the role read requires.
+
+    Two members in the same group need a role that does not exist yet. Since
+    the role registry is now read once per group (not once per member), the
+    role created for the first member must be appended to that in-memory
+    snapshot so the second member finds it instead of creating a duplicate.
+    """
+    logic = CnpqSyncLogic()
+
+    session = MagicMock()
+    exists_check = MagicMock()
+    exists_check.scalar.return_value = True
+    session.execute.return_value = exists_check
+
+    logic.rg_ctrl = MagicMock()
+    logic.rg_ctrl._service._repository._session = session
+    logic.rg_ctrl._service.get_members.return_value = []
+    logic.res_ctrl = MagicMock()
+    logic.res_ctrl._service._repository._session = session
+    logic.res_ctrl.create_researcher.side_effect = [
+        SimpleNamespace(id=1, name="Alice"),
+        SimpleNamespace(id=2, name="Bob"),
+    ]
+
+    new_role = SimpleNamespace(id=42, name="Novo Cargo")
+    logic.role_ctrl = MagicMock()
+    logic.role_ctrl.get_all.return_value = []  # the new role does not exist yet
+    logic.role_ctrl.create_role.return_value = new_role
+    logic.ka_ctrl = MagicMock()
+
+    members = [
+        {"name": "Alice", "role": "Novo Cargo", "data_inicio": None, "data_fim": None},
+        {"name": "Bob", "role": "Novo Cargo", "data_inicio": None, "data_fim": None},
+    ]
+
+    logic.sync_members(group_id=1, members_data=members, researcher_index=[])
+
+    assert logic.role_ctrl.create_role.call_count == 1, (
+        "the role was created twice in the same group -- the in-memory "
+        "role snapshot was not updated after the first member created it"
+    )
