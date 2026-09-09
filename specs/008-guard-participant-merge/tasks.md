@@ -160,6 +160,23 @@ description: "Task list for the reliable participant deduplication redesign"
 - [ ] T031 [P] Reproduce the real baseline: re-run the weekly pipeline on the current catalog and confirm the exported `researchers_canonical.json` drops from 176 duplicate groups to **zero**, with aggregate link counts equal to the pre-dedup union (SC-001, SC-002).
 - [ ] T032 Quickstart validation: follow every command in `quickstart.md` end-to-end.
 
+### Follow-up (2026-09-08, branch `fix/participant-name-variants`)
+
+- [x] T033 Review and document the researcher/student name-variant duplication across
+      ingestion and export (`findings-participant-name-variants.md`): particle omission
+      and `Jr.`/`Júnior` variants evade both the matcher and the consolidation grouping.
+- [x] T034 Extend `normalize_participant_name` (`person_identity.py`) with
+      `canonical_suffixes` (fold `JR`→`JUNIOR`) and `drop_particles` (omit particle
+      tokens); keep the R7 base output unchanged.
+- [x] T035 Wire the invariant exact key into `PersonMatcher` (new `_invariant_cache`),
+      the `PersonConsolidator` grouping key (merge the variant class before export) and
+      `resolve_researcher_by_name` (invariant exact fallback).
+- [x] T036 Guard test: `FILHO`/`NETO`/`SOBRINHO` are never equated with `JUNIOR`
+      (father/son guard), pinned in `test_person_identity.py` and
+      `test_person_consolidator.py`.
+- [x] T037 Contract and spec updates: R6/R7/R15 in `contracts/dedup_rules.md`,
+      invariant-key table in `data-model.md`, FR-003 and edge cases in `spec.md`.
+
 ---
 
 ## Dependencies & Execution Order

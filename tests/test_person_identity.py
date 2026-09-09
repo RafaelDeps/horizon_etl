@@ -36,6 +36,58 @@ def test_particles_e_and_y_are_canonicalized():
     )
 
 
+def test_jr_and_junior_share_one_key_under_suffix_canonicalization():
+    jr = normalize_participant_name("Roberto Carlos Jr.", canonical_suffixes=True)
+    junior = normalize_participant_name(
+        "roberto carlos júnior", canonical_suffixes=True
+    )
+    full = normalize_participant_name("ROBERTO CARLOS JUNIOR", canonical_suffixes=True)
+    assert jr == junior == full == "ROBERTO CARLOS JUNIOR"
+
+
+def test_default_key_preserves_jr_spelling():
+    assert normalize_participant_name("Roberto Carlos Jr.") == "ROBERTO CARLOS JR"
+
+
+def test_particles_are_invisible_under_drop_particles():
+    key = normalize_participant_name(
+        "Paulo Sérgio Dos Santos", canonical_suffixes=True, drop_particles=True
+    )
+    assert (
+        key
+        == normalize_participant_name(
+            "Paulo Sérgio Santos", canonical_suffixes=True, drop_particles=True
+        )
+        == "PAULO SERGIO SANTOS"
+    )
+
+
+def test_name_variant_trio_shares_one_invariant_key():
+    trio = (
+        "Paulo Sérgio Dos Santos Júnior",
+        "Paulo Sérgio Santos Júnior",
+        "Paulo Sérgio Santos Jr.",
+    )
+    keys = {
+        normalize_participant_name(name, canonical_suffixes=True, drop_particles=True)
+        for name in trio
+    }
+    assert keys == {"PAULO SERGIO SANTOS JUNIOR"}
+
+
+def test_filho_and_junior_remain_distinct_generational_suffixes():
+    assert normalize_participant_name(
+        "José Alves Filho", canonical_suffixes=True
+    ) != normalize_participant_name("José Alves Júnior", canonical_suffixes=True)
+
+
+def test_drop_particles_removes_e_and_y_too():
+    assert (
+        normalize_participant_name("Maria E Souza Y Cominho", drop_particles=True)
+        == "MARIA SOUZA COMINHO"
+    )
+
+
 def test_empty_and_none_produce_empty_key():
     assert normalize_participant_name("") == ""
     assert normalize_participant_name(None) == ""

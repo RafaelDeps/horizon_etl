@@ -79,19 +79,41 @@ def test_match_or_create_fuzzy(matcher):
     assert result.name == "Persona Beta"
 
 
-def test_strict_match_avoids_fuzzy(matcher):
-    person_a = MockPerson(1, "Jose Silva")
+def test_strict_match_resolves_particle_invariant_variants(matcher):
+    person = MockPerson(1, "Jose Silva")
+    matcher.person_controller.get_all.return_value = [person]
+    matcher.preload_cache()
+
+    # "Jose da Silva" differs from "Jose Silva" only by a particle: the
+    # invariant exact match resolves it even under the strict policy.
+    result = matcher.match_or_create("Jose da Silva", strict_match=True)
+    assert result.id == 1
+    matcher.person_controller.create_person.assert_not_called()
+
+
+def test_strict_match_still_blocks_fuzzy_only_matches(matcher):
+    person_a = MockPerson(1, "Persona A Alpha")
     matcher.person_controller.get_all.return_value = [person_a]
     matcher.preload_cache()
 
-    # Jose da Silva vs Jose Silva is high score (~90) but not 100
-    new_p = MockPerson(2, "Jose da Silva")
+    # A merely-similar name (no particle/suffix/order equivalence) is not an
+    # exact match; the strict policy refuses it and a new person is created.
+    new_p = MockPerson(2, "Persona Alpha")
     matcher.person_controller.create_person.return_value = new_p
 
-    # With strict_match=True, it should NOT match "Jose Silva" and should CREATE "Jose da Silva"
-    result = matcher.match_or_create("Jose da Silva", strict_match=True)
+    result = matcher.match_or_create("Persona Alpha", strict_match=True)
     assert result.id == 2
     matcher.person_controller.create_person.assert_called()
+
+
+def test_match_or_create_resolves_particle_and_suffix_variants(matcher):
+    person = MockPerson(9, "Paulo Sérgio Dos Santos Júnior")
+    matcher.person_controller.get_all.return_value = [person]
+    matcher.preload_cache()
+
+    result = matcher.match_or_create("Paulo Sérgio Santos Jr.")
+    assert result.id == 9
+    matcher.person_controller.create_person.assert_not_called()
 
 
 def test_match_or_create_uses_canonical_name_for_case_variants(matcher):

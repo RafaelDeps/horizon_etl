@@ -541,6 +541,52 @@ def test_homonyms_with_distinct_identification_ids_are_never_merged(tmp_path: Pa
     assert "identification_id" in refused["reason"]
 
 
+def test_name_variant_trio_groups_under_one_invariant_key(tmp_path: Path):
+    db_path = tmp_path / "variant_trio.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA_SQL)
+    conn.execute(
+        "INSERT INTO persons (id, name) VALUES (1, 'Paulo Sérgio Dos Santos Júnior')"
+    )
+    conn.execute(
+        "INSERT INTO persons (id, name) VALUES (2, 'Paulo Sérgio Santos Júnior')"
+    )
+    conn.execute("INSERT INTO persons (id, name) VALUES (3, 'Paulo Sérgio Santos Jr.')")
+    conn.commit()
+    conn.close()
+
+    consolidator = PersonConsolidator(str(db_path))
+    groups = consolidator.find_duplicate_groups()
+    assert len(groups) == 1
+    assert groups[0].canonical_name == "PAULO SERGIO SANTOS JUNIOR"
+    assert groups[0].winner_id == 1
+    assert groups[0].loser_ids == [2, 3]
+
+    assert consolidator.consolidate_all() == 2
+    check = sqlite3.connect(db_path)
+    assert (
+        check.execute("SELECT COUNT(*) FROM persons WHERE id IN (2, 3)").fetchone()[0]
+        == 0
+    )
+    assert check.execute("SELECT COUNT(*) FROM persons").fetchone()[0] == 1
+
+
+def test_filho_and_junior_are_never_grouped_as_the_same_person(tmp_path: Path):
+    db_path = tmp_path / "filho_junior.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA_SQL)
+    conn.execute("INSERT INTO persons (id, name) VALUES (1, 'José Alves Filho')")
+    conn.execute("INSERT INTO persons (id, name) VALUES (2, 'José Alves Júnior')")
+    conn.commit()
+    conn.close()
+
+    consolidator = PersonConsolidator(str(db_path))
+    assert consolidator.find_duplicate_groups() == []
+    assert consolidator.consolidate_all() == 0
+    check = sqlite3.connect(db_path)
+    assert check.execute("SELECT COUNT(*) FROM persons").fetchone()[0] == 2
+
+
 def test_junk_names_are_never_merged(tmp_path: Path):
     """Scenario G: honorific-only records are refused, never fused."""
     db_path = tmp_path / "junk.db"
@@ -579,7 +625,7 @@ def test_dedup_report_lists_merged_and_refused_groups(tmp_path: Path):
     assert report["merged_records"] == 1
     assert report["refused_groups"] == 1
     statuses = {g["canonical_name"]: g["status"] for g in report["groups"]}
-    assert statuses["ISRAEL MAGALHAES do CARMO"] == "merged"
+    assert statuses["ISRAEL MAGALHAES CARMO"] == "merged"
     assert statuses["FULANO CICLANO"] == "refused_homonym"
 
 
@@ -609,6 +655,6 @@ def test_weekly_phase_report_artifact_records_merged_and_refused(tmp_path: Path)
     assert loaded["merged_records"] == 1
     assert loaded["refused_groups"] == 1
     by_name = {g["canonical_name"]: g for g in loaded["groups"]}
-    assert by_name["ISRAEL MAGALHAES do CARMO"]["status"] == "merged"
+    assert by_name["ISRAEL MAGALHAES CARMO"]["status"] == "merged"
     assert by_name["FULANO CICLANO"]["status"] == "refused_homonym"
     assert "cnpq_url" in by_name["FULANO CICLANO"]["reason"]

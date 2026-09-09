@@ -9,8 +9,15 @@ _HONORIFICS = frozenset(
     {"DR", "DRA", "PROF", "MSC", "PHD", "ME", "MA", "BEL", "ESP", "ENG", "SR", "SRA"}
 )
 
+_GENERATIONAL_ABBREVIATIONS = {"JR": "JUNIOR"}
 
-def normalize_participant_name(name: Any, canonical_particles: bool = True) -> str:
+
+def normalize_participant_name(
+    name: Any,
+    canonical_particles: bool = True,
+    canonical_suffixes: bool = False,
+    drop_particles: bool = False,
+) -> str:
     """Builds the shared participant-name identity key (contract R7).
 
     The function is the single normal form every participant comparison path
@@ -18,6 +25,18 @@ def normalize_participant_name(name: Any, canonical_particles: bool = True) -> s
     hyphens turned into separators, whitespace collapsed, and surname particles
     canonicalized to one lower-case form. Any two spellings that differ only in
     those dimensions produce the same key.
+
+    ``canonical_suffixes`` folds the ``Jr.`` abbreviation into ``JUNIOR`` so the
+    two spellings of the same generational suffix produce one key. ``FILHO``,
+    ``NETO`` and ``SOBRINHO`` are deliberately left distinct: they separate
+    generations (father/son, grandfather/grandson) and folding them together
+    would create the false-merge class the dedup guards refuse. The default
+    keeps ``Jr.`` spelled as ``JR`` to preserve contract R7's pinned output.
+
+    ``drop_particles`` removes the surname particles entirely from the key, so a
+    spelling with or without ``dos``/``da``/``de`` yields one key. Exact-match
+    paths and consolidation grouping use this invariant form because they never
+    rely on fuzzy similarity (contract R7 and R15).
     """
     if name is None:
         return ""
@@ -25,10 +44,14 @@ def normalize_participant_name(name: Any, canonical_particles: bool = True) -> s
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
     text = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
     tokens = text.upper().split()
-    if canonical_particles:
+    if drop_particles:
+        tokens = [token for token in tokens if token not in _PARTICLES]
+    elif canonical_particles:
         tokens = [
             token if token not in _PARTICLES else token.lower() for token in tokens
         ]
+    if canonical_suffixes:
+        tokens = [_GENERATIONAL_ABBREVIATIONS.get(token, token) for token in tokens]
     return " ".join(tokens)
 
 

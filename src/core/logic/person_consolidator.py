@@ -88,7 +88,9 @@ class PersonConsolidator:
         classification the report describes."""
         groups: Dict[str, List[Dict[str, Any]]] = {}
         for record in self._load_people():
-            canonical = self._matcher.canonicalize_name(record.get("name") or "")
+            canonical = self._matcher.invariant_canonicalize_name(
+                record.get("name") or ""
+            )
             if canonical:
                 groups.setdefault(canonical, []).append(record)
 

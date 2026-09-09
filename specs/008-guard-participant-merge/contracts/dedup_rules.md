@@ -47,9 +47,9 @@ A missing, empty index or an empty title produces "not found", never an error.
 ### R6 — The normalized full name is the primary identity criterion
 
 Two participant records are candidates for being the same person
-**only when** their normalized full-name keys are equal. Exact-key equality is
-required; fuzzy similarity (e.g. token-sort ratio) must **not** merge
-participants at deduplication time.
+**only when** their normalized full-name keys (R7, or the invariant form of R15)
+are equal. Exact-key equality is required; fuzzy similarity (e.g. token-sort
+ratio) must **not** merge participants at deduplication time.
 
 *Why*: the name is the only signal shared by all sources (the observed
 duplicates carry no strong identifiers), and exact equality keeps homonyms and
@@ -63,7 +63,8 @@ diacritics (NFD + drop combining marks), collapse whitespace, turn punctuation
 and hyphens into separators, and canonicalize surname particles (`DE`, `DA`,
 `DO`, `DOS`, `DAS`, `DI`, `DU`, `DEL`, `DELA`, `E`, `Y`) to a single lower-case
 form. The same key must result from any spelling that differs only in these
-dimensions.
+dimensions. The base output keeps the particles and the ``JR`` spelling; the
+invariant form (R15) is an opt-in of the same function.
 
 ### R8 — Conflicting strong identifiers veto the merge
 
@@ -113,6 +114,18 @@ never merged with anything.
 Running the deduplication step twice over the same catalog changes nothing on
 the second run, and the step runs **before** the canonical exports in the weekly
 pipeline, so the exported catalog is already deduplicated.
+
+### R15 — The invariant key folds the two name-variant axes, exactly
+
+The key function offers an opt-in invariant form (particles omitted, the ``Jr.``
+abbreviation folded into ``JUNIOR``) used by the matching and consolidation
+paths. It is exact equality only — never fuzzy. `Paulo Sérgio Dos Santos
+Júnior`, `Paulo Sérgio Santos Júnior` and `Paulo Sérgio Santos Jr.` share the
+one invariant key `PAULO SERGIO SANTOS JUNIOR`. The generational suffixes
+`FILHO`, `NETO` and `SOBRINHO` are **not** equated with `JUNIOR`: they separate
+generations, so equating them would create a false merge the R8 veto cannot
+repair after ingestion. Conflicting strong identifiers still refuse a group
+(R8), and junk names are still refused (R13).
 
 ## Observable consequence (what the second layer checks)
 
