@@ -372,9 +372,9 @@ def test_resolve_by_name_delegates_to_shared_participant_key(monkeypatch):
     original = researcher_resolution.normalize_participant_name
     calls = []
 
-    def spy(name, canonical_particles=True):
+    def spy(name, **kwargs):
         calls.append(name)
-        return original(name, canonical_particles=canonical_particles)
+        return original(name, **kwargs)
 
     monkeypatch.setattr(researcher_resolution, "normalize_participant_name", spy)
 
@@ -383,3 +383,11 @@ def test_resolve_by_name_delegates_to_shared_participant_key(monkeypatch):
 
     assert escolha is not None and escolha.id == 7
     assert calls, "resolve_researcher_by_name must compare names through the shared key"
+
+
+def test_resolve_by_name_resolves_particle_and_suffix_variants():
+    index = [ResearcherRef(id=7, name="Paulo Sérgio Dos Santos Júnior")]
+
+    escolha = resolve_researcher_by_name(index, name="Paulo Sérgio Santos Jr.")
+
+    assert escolha is not None and escolha.id == 7

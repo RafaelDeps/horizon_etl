@@ -27,6 +27,7 @@ class PersonMatcher:
         self._persons_cache: Dict[str, Person] = {}
         self._emails_cache: Dict[str, Person] = {}
         self._canonical_cache: Dict[str, Person] = {}
+        self._invariant_cache: Dict[str, Person] = {}
 
     def preload_cache(self):
         """
@@ -41,6 +42,7 @@ class PersonMatcher:
             self._persons_cache = {}
             self._emails_cache = {}
             self._canonical_cache = {}
+            self._invariant_cache = {}
             for p in all_persons:
                 if isinstance(p, dict):
                     name = p.get("name")
@@ -61,6 +63,13 @@ class PersonMatcher:
                             p
                         ) > self._person_quality_score(current):
                             self._canonical_cache[canonical_name] = p
+                    invariant_name = self.invariant_canonicalize_name(name)
+                    if invariant_name:
+                        current = self._invariant_cache.get(invariant_name)
+                        if current is None or self._person_quality_score(
+                            p
+                        ) > self._person_quality_score(current):
+                            self._invariant_cache[invariant_name] = p
                 for email in emails:
                     if email:
                         self._emails_cache[email.strip().lower()] = p
@@ -81,6 +90,18 @@ class PersonMatcher:
     def canonicalize_name(self, name: str) -> str:
         """Builds a stable comparison key for names."""
         return normalize_participant_name(name, canonical_particles=True)
+
+    def invariant_canonicalize_name(self, name: str) -> str:
+        """Builds the particle- and suffix-omission-invariant name key.
+
+        ``Paulo Sérgio Dos Santos Júnior``, ``Paulo Sérgio Santos Júnior`` and
+        ``Paulo Sérgio Santos Jr.`` all yield ``PAULO SERGIO SANTOS JUNIOR``.
+        This is an exact-match key (never fuzzy), so it is safe to use when
+        consolidating groups or resolving participants by name.
+        """
+        return normalize_participant_name(
+            name, canonical_suffixes=True, drop_particles=True
+        )
 
     def _email_keys(self, email: str) -> List[str]:
         """Candidate cache keys for an email.
@@ -157,6 +178,7 @@ class PersonMatcher:
         name = name.strip() if name else ""
         normalized_input = self.normalize_name(name)
         canonical_input = self.canonicalize_name(name)
+        invariant_input = self.invariant_canonicalize_name(name)
 
         # 1.5 Canonical exact match.
         # This collapses duplicates such as "De"/"de" and accent-only variants.
@@ -179,6 +201,14 @@ class PersonMatcher:
                 self._persons_cache[name] = person
                 self._register_email(email, person)
                 return person
+
+        # 2.5 Invariant exact match: particles omitted and the generational
+        # suffix written canonically. Exact only — no fuzzy similarity.
+        if invariant_input and invariant_input in self._invariant_cache:
+            person = self._invariant_cache[invariant_input]
+            self._persons_cache[name] = person
+            self._register_email(email, person)
+            return person
 
         # 3. Fuzzy Matching in Cache
         names_in_cache = list(self._persons_cache.keys())
@@ -218,6 +248,12 @@ class PersonMatcher:
                     person
                 ) > self._person_quality_score(current):
                     self._canonical_cache[canonical_input] = person
+            if invariant_input:
+                current = self._invariant_cache.get(invariant_input)
+                if current is None or self._person_quality_score(
+                    person
+                ) > self._person_quality_score(current):
+                    self._invariant_cache[invariant_input] = person
             self._register_email(email, person)
             logger.debug(f"Created person: {name} (emails: {emails})")
             return person

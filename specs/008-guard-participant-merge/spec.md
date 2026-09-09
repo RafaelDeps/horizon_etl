@@ -221,13 +221,18 @@ contains one record for the pair.
   match anything and must be flagged instead of merged.
 - **Particles and connectors**: particles such as `de`, `da`, `do`, `dos`,
   `das`, `di`, `du`, `del`, `dela`, `e` and `y` must normalize to a single form
-  so `De`, `de`, `DO`, `do` compare equal.
+  so `De`, `de`, `DO`, `do` compare equal. The invitation is one-directional in
+  the invariant form: a record written with or without the particle is the same
+  key (R15) — exact equality only, guarded by the strong-identifier veto.
 - **Punctuation and hyphens**: hyphens, alphanumeric punctuation and stray
   marks become spaces, so `Santos-Junior` and `Santos Júnior` collapse to the
   same key.
 - **Honorifics and degree suffixes**: tokens such as `Dr`, `Prof`, `M.Sc.` are
   not part of the person's name. Where the data carries them, their treatment
-  must be deterministic and identical across every comparison path.
+  must be deterministic and identical across every comparison path. The `Jr.`
+  abbreviation is folded into `Júnior` by the invariant form; `Filho`, `Neto`
+  and `Sobrinho` remain distinct generational suffixes and must never be merged
+  with `Júnior` (father/son guard).
 - **Name changed between records (spouse/adoption/insertions)**: a record that
   legitimately uses a different surname does **not** share a normalized name and
   is therefore not merged automatically; it is only reported as a *candidate*,
@@ -248,7 +253,10 @@ contains one record for the pair.
 - **FR-003**: Name normalization MUST be a single, shared function used by every
   participant comparison path, and MUST produce equal keys regardless of letter
   case, accents (diacritics), whitespace, punctuation, hyphens and surname
-  particle capitalization.
+  particle capitalization. The same function MUST offer an invariant form whose
+  keys also ignore particle presence/absence and fold the `Jr.` abbreviation
+  into `Júnior` (exact equality only, R15); the base form keeps its pinned
+  output.
 - **FR-004**: Normalized name equality MUST be exact-key equality, not a fuzzy
   similarity threshold. Fuzzy matching MUST NOT merge participants; it may at
   most suggest candidate groups for review.

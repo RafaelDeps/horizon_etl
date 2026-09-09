@@ -30,6 +30,25 @@ Examples pinned by the tests:
 | `Maria Aparecida Santos` | `MARIA APARECIDA SANTOS` |
 | `Paulo Sérgio Dos Santos Júnior` | `PAULO SERGIO dos SANTOS JUNIOR` |
 
+### Invariant key (name-variant class, R15)
+
+The same function, opted into `canonical_suffixes=True` and
+`drop_particles=True`, produces one key for spellings that differ only by a
+surname particle or the `Jr.`/`Júnior` spelling:
+
+| Raw name | Invariant key |
+|---|---|
+| `Paulo Sérgio Dos Santos Júnior` | `PAULO SERGIO SANTOS JUNIOR` |
+| `Paulo Sérgio Santos Júnior` | `PAULO SERGIO SANTOS JUNIOR` |
+| `Paulo Sérgio Santos Jr.` | `PAULO SERGIO SANTOS JUNIOR` |
+| `José Alves Filho` | `JOSE ALVES FILHO` (distinct from `JUNIOR`) |
+| `José Alves Júnior` | `JOSE ALVES JUNIOR` (distinct from `FILHO`) |
+
+Consolidation groups by the invariant key; the matching paths resolve
+participants through it as an exact equality. The R7 base key keeps its pinned
+output — particles are only lower-cased and `Jr.` stays `JR` unless the
+invariant form is requested.
+
 ## Scenario A — the observed defect (same person, two sources)
 
 Two records for "Israel Magalhães do Carmo", neither holding a strong identifier:

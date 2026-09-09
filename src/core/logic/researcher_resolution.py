@@ -202,6 +202,12 @@ def resolve_researcher_by_name(
             score += 150
         elif normalize_participant_name(res_name) == target_norm:
             score += 100
+        elif normalize_participant_name(
+            res_name, canonical_suffixes=True, drop_particles=True
+        ) == normalize_participant_name(
+            name, canonical_suffixes=True, drop_particles=True
+        ):
+            score += 90
 
         if score > best_score:
             best = researcher
