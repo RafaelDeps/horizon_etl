@@ -35,6 +35,7 @@ jobs:
       SIGPESQ_PASSWORD: ${{ secrets.SIGPESQ_PASSWORD }}
       HORIZON_TELEGRAM_BOT_TOKEN: ${{ secrets.HORIZON_TELEGRAM_BOT_TOKEN }}
       HORIZON_TELEGRAM_CHAT_ID: ${{ secrets.HORIZON_TELEGRAM_CHAT_ID }}
+      MISTRAL_KEY: ${{ secrets.MISTRAL_KEY }}
       WEEKLY_CAMPUS: ${{ github.event.inputs.weekly_campus }}
       OUTPUT_DIR: ${{ github.event.inputs.output_dir || 'data/exports' }}
       PREFECT_UI_URL: http://127.0.0.1:4200
@@ -71,6 +72,7 @@ jobs:
           test -n "$STORAGE_TYPE" || { echo "Missing GitHub secret: STORAGE_TYPE"; exit 1; }
           test -n "$SIGPESQ_USERNAME" || { echo "Missing GitHub secret: SIGPESQ_USERNAME"; exit 1; }
           test -n "$SIGPESQ_PASSWORD" || { echo "Missing GitHub secret: SIGPESQ_PASSWORD"; exit 1; }
+          test -n "$MISTRAL_KEY" || { echo "Missing GitHub secret: MISTRAL_KEY"; exit 1; }
 
       - name: Run weekly flows for Campus Serra
         run: make weekly-flows WEEKLY_CAMPUS=Serra
