@@ -41,6 +41,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: horizon-etl:latest
+    user: "${UID:-1000}:${GID:-1000}"
     env_file: .env
     environment:
       PREFECT_API_URL: http://server:4200/api
