@@ -2210,7 +2210,9 @@ def render_html(
     </section>"""
 
     # ---- C. Mapas estratégicos (3 quadrantes juntos) ----
-    sec_maps = f"""
+    sec_maps = ""
+    if ranking:
+        sec_maps = f"""
     <section class="section">
       <div class="eyebrow">Mapas estratégicos</div>
       <h2>Quadrantes de posicionamento</h2>
