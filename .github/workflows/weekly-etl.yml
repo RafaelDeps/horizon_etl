@@ -74,8 +74,8 @@ jobs:
           test -n "$SIGPESQ_PASSWORD" || { echo "Missing GitHub secret: SIGPESQ_PASSWORD"; exit 1; }
           test -n "$MISTRAL_API_KEY" || { echo "Missing GitHub secret: MISTRAL_API_KEY"; exit 1; }
 
-      - name: Run weekly flows for Campus Serra
-        run: make weekly-flows WEEKLY_CAMPUS=Serra
+      - name: Run weekly flows
+        run: make weekly-flows
 
       - name: Compress large export files
         if: always()
