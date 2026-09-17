@@ -245,4 +245,3 @@ def test_project_status_inference(parser):
     assert by_name["Projeto Ano Corrente"]["status"] == "Active"
     assert by_name["Projeto Futuro"]["status"] == "Active"
     assert by_name["Projeto Passado"]["status"] == "Concluded"
-
