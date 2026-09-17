@@ -51,7 +51,7 @@ from loguru import logger
 # inputs exist: fetch_openalex -> rank -> {maturity, venues, impacto, ppp}.
 _PHASES = [
     ("sigpesq", ["sigpesq"], 3600, True, "app"),
-    ("cnpq", ["cnpq_sync"], 5400, False, "app"),
+    ("cnpq", ["cnpq_sync"], 10800, False, "app"),
     ("lattes_download", ["lattes_download"], 5400, False, "app"),
     ("lattes_projects", ["ingest_lattes_projects"], 3600, False, "app"),
     # 3600s, not 1800s: measured runs sit at 1350-1741s against the old 1800s
