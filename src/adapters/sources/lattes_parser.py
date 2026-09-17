@@ -345,9 +345,9 @@ class LattesParser:
             if end_year_str and end_year_str.lower() == "atual":
                 status = "Active"
                 end_year = None
-            elif end_year and end_year >= date.today().year:
-                # If end year is defined and in future (rare in Lattes manual entry but possible)
-                pass
+            elif end_year:
+                if date(end_year, 12, 31) >= date.today():
+                    status = "Active"
 
             # Description Cleaning
             # Description is often a list with one string containing "Descrição: ... Situação: ... Natureza: ..."
