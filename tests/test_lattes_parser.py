@@ -214,3 +214,34 @@ def test_parse_extras_empty_when_sections_absent(parser):
     assert parser.parse_languages({}) == []
     assert parser.parse_professional_activities({}) == []
     assert parser.parse_technical_productions({}) == []
+
+
+def test_project_status_inference(parser):
+    from datetime import date
+
+    current_year = date.today().year
+    data = {
+        "projetos_pesquisa": [
+            {
+                "nome": "Projeto Ano Corrente",
+                "ano_inicio": str(current_year - 1),
+                "ano_conclusao": str(current_year),
+            },
+            {
+                "nome": "Projeto Futuro",
+                "ano_inicio": str(current_year),
+                "ano_conclusao": str(current_year + 1),
+            },
+            {
+                "nome": "Projeto Passado",
+                "ano_inicio": str(current_year - 3),
+                "ano_conclusao": str(current_year - 1),
+            },
+        ]
+    }
+    projects = parser.parse_research_projects(data)
+    by_name = {p["name"]: p for p in projects}
+
+    assert by_name["Projeto Ano Corrente"]["status"] == "Active"
+    assert by_name["Projeto Futuro"]["status"] == "Active"
+    assert by_name["Projeto Passado"]["status"] == "Concluded"
