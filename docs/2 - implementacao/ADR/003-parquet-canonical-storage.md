@@ -1,8 +1,17 @@
 # ADR 003: Parquet como Formato de Armazenamento/Consumo dos Exports Canônicos
 
-* Status: Accepted
+* Status: Accepted (amended 2026-09-18 — see Amendment below)
 * Deciders: Claude, Paulo
 * Date: 2026-07-20
+
+> **Amendment (2026-09-18, feature 013-curate-export-zip)**: the weekly flow no
+> longer emits the parquet mirror — `export_parquet_task` and its call were
+> removed from `export_canonical_data_flow`, so `data/exports/parquet/` is not
+> produced and does not ship inside `exports_canonical.zip` anymore. The
+> decision itself (hybrid format, zstd, build-time consumption in the
+> dashboard) remains in force: the dashboard keeps reading its own committed
+> copies in `src/data`, not the ETL archive. The conversion capability remains
+> available on demand via `python -m src.scripts.export_parquet`.
 
 Technical Story: Os exports canônicos em JSON somam ~255 MB (44 arquivos), e o dashboard irmão (`horizon_dashboard`) versiona cópias desses JSON em `src/data` (~322 MB no git). O repositório e o build ficaram pesados. Avaliou-se migrar o armazenamento/consumo para Parquet.
 

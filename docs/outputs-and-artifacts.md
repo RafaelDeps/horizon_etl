@@ -15,6 +15,15 @@ Contem os JSONs canonicos e marts gerados pelo pipeline. Exemplos:
 - `knowledge_areas_mart.json`
 - `initiatives_analytics_mart.json`
 
+O artefato `exports_canonical.zip`, gerado ao final do export canonico, e
+curado: contem os JSONs canonicos e copias ANONIMIZADAS dos documentos de
+projeto SigPesq (`project_sigpesq_files_json/PJ_*.json`, com e-mails e
+telefones substituidos pelos tokens LGPD). Nao inclui a pasta bruta do corpus,
+arquivos `.zip` aninhados (ex.: `data_snapshot.zip`), as pastas de relatorios
+(`formandos/`, `docentes/`, `mestrado/`) nem `parquet/` (o espelho Parquet nao
+e mais gerado pelo fluxo semanal; conversao manual via
+`python -m src.scripts.export_parquet`).
+
 ### `data/reports/`
 
 Contem os relatorios operacionais e de auditoria. Exemplos:

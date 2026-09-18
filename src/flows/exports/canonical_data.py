@@ -1,3 +1,4 @@
+import json
 import os
 import zipfile
 from typing import Optional
@@ -7,6 +8,7 @@ from prefect import flow, task
 
 from src.adapters.sinks.json_sink import JsonSink
 from src.core.logic.canonical_exporter import CanonicalDataExporter
+from src.core.logic.pii_anonymizer import scrub_pii_deep
 from src.core.logic.research_group_exporter import ResearchGroupExporter
 from src.flows.exports.null_researchers_collaboration_graph import (
     export_null_researchers_collaboration_graph_flow,
@@ -256,30 +258,26 @@ def export_advisorship_analytics_task(output_dir: str):
     exporter.generate_advisorship_mart(input_path, output_path)
 
 
-@task(name="export_parquet_task")
-def export_parquet_task(output_dir: str):
-    """Emit a Parquet mirror of the canonical JSON exports under ``<output_dir>/parquet``.
-
-    Tables become ``<name>.parquet``; top-level node-link graphs are split into
-    ``<name>.nodes.parquet`` + ``<name>.edges.parquet`` + ``<name>.meta.json``.
-    """
-    from src.scripts.export_parquet import convert_dir
-
-    dst = os.path.join(output_dir, "parquet")
-    stats = convert_dir(output_dir, dst)
-    logger.info("Parquet export: {} -> {}", stats, dst)
-
-
-# Directories that live under the export folder but are INPUT, not output.
+# Directories that live under the export folder but are NOT deliverables.
 #
-# The SigPesq project documents are raw material: regenerable by
-# `make extract-project-files`, and carrying coordinator names and e-mail
-# addresses in clear text. The canonical exports built FROM them are already
-# scrubbed -- the enrichment payload drops those fields entirely -- so shipping
-# the sources alongside the results would smuggle back exactly the personal data
-# the rest of the pipeline is careful to anonymize. The zip is versioned, so this
-# would put those addresses in git.
-SKIP_DIRS = {"project_sigpesq_files_json"}
+# * project_sigpesq_files_json -- INPUT: regenerable by
+#   `make extract-project-files`, and carrying coordinator e-mail addresses in
+#   clear text. The canonical exports built FROM it are already scrubbed -- the
+#   enrichment payload drops those fields entirely -- so the raw corpus is kept
+#   out of the walk and scrubbed copies are added to the zip explicitly.
+# * formandos/, docentes/, mestrado/ -- formatted report views (HTML), not part
+#   of the dataset.
+# * parquet/ -- alternate format mirror; no longer emitted by the flow.
+#
+# The zip is versioned, so sweeping any of these in would put intermediate or
+# redundant material -- or raw personal data -- into git.
+SKIP_DIRS = {
+    "project_sigpesq_files_json",
+    "formandos",
+    "docentes",
+    "mestrado",
+    "parquet",
+}
 
 
 @task(name="zip_exports_task")
@@ -299,11 +297,45 @@ def zip_exports_task(output_dir: str):
                     skipped_dirs += 1
                     logger.info("Excluded from zip (input, not output): {}/", d)
                 for fname in files:
-                    if fname in skip_names:
+                    # No archive inside the archive: skip every nested .zip
+                    # (data_snapshot.zip, a previous archive, anything else).
+                    if fname in skip_names or fname.lower().endswith(".zip"):
                         continue
                     fpath = os.path.join(root, fname)
                     arcname = os.path.relpath(fpath, output_dir)
                     zf.write(fpath, arcname)
+
+            # The SigPesq project documents are INPUT, not output (regenerable,
+            # and carrying coordinator e-mails in clear text -- see SKIP_DIRS),
+            # so the raw folder is pruned from the walk above. What ships instead
+            # are scrubbed copies written here in memory: every e-mail/phone is
+            # replaced by its LGPD token and the raw corpus stays untouched.
+            pj_dir = os.path.join(output_dir, "project_sigpesq_files_json")
+            if os.path.isdir(pj_dir):
+                scrubbed_count = 0
+                for fname in sorted(os.listdir(pj_dir)):
+                    if not fname.startswith("PJ_") or not fname.endswith(".json"):
+                        continue
+                    try:
+                        with open(os.path.join(pj_dir, fname), encoding="utf-8") as fh:
+                            document = json.load(fh)
+                    except (OSError, json.JSONDecodeError) as exc:
+                        logger.warning(
+                            "Skipped unreadable project document {}: {}", fname, exc
+                        )
+                        continue
+                    zf.writestr(
+                        os.path.join("project_sigpesq_files_json", fname),
+                        json.dumps(
+                            scrub_pii_deep(document), ensure_ascii=False, indent=2
+                        ),
+                    )
+                    scrubbed_count += 1
+                if scrubbed_count:
+                    logger.info(
+                        "Added {} scrubbed project documents to the zip",
+                        scrubbed_count,
+                    )
         os.replace(tmp_zip_path, zip_path)
     except BaseException:
         if os.path.exists(tmp_zip_path):
@@ -362,7 +394,6 @@ def export_canonical_data_flow(
     export_outside_ifes_collaboration_graph_flow(output_dir=output_dir)
     export_null_researchers_collaboration_graph_flow(output_dir=output_dir)
     export_research_group_membership_graphs_manifest_flow(output_dir=output_dir)
-    export_parquet_task(output_dir)
     zip_exports_task(output_dir)
 
 
