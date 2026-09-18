@@ -163,6 +163,28 @@ def test_attachment_found_by_filename_when_id_says_nothing(page):
     assert result["by_label"] is False
 
 
+def test_attachment_found_when_link_lacks_id_attribute(page):
+    """Real portal markup: download links lack an id and carry the download in href."""
+    html = """
+    <div><h4>Arquivos</h4>
+      <table class="gvwTable">
+        <tr>
+          <td>pdf</td>
+          <td><a rel="nofollow" href="/download/Arquivo.ashx?t=abc">Projeto</a></td>
+        </tr>
+      </table>
+    </div>
+    """
+    result = discover(page, html)
+
+    assert result["outcome"] == "found"
+    assert result["text"] == "Projeto"
+    assert result["by_label"] is True
+    assert result["id"].startswith("__sigpesq_dl_")
+    # Playwright can locate the newly assigned id in the page
+    assert page.locator(f"[id='{result['id']}']").count() == 1
+
+
 def test_word_arquivos_outside_the_modal_does_not_count(page):
     """The scoping guard, and a real defect caught during implementation.
 

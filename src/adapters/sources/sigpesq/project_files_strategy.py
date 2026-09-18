@@ -76,8 +76,13 @@ _DISCOVER_JS = """(args) => {
   }
 
   const candidates = Array.from(
-      region.querySelectorAll('a[id], input[type=submit][id], button[id]'))
-    .filter(e => DOWNLOADISH.test(e.id) || DOCEXT.test(textOf(e)));
+      region.querySelectorAll('a, input[type=submit], button'))
+    .filter(e =>
+      DOWNLOADISH.test(e.id || '') ||
+      DOWNLOADISH.test(e.getAttribute('href') || '') ||
+      DOCEXT.test(textOf(e)) ||
+      (label && textOf(e).toLowerCase() === String(label).toLowerCase())
+    );
 
   if (candidates.length === 0) {
     // Attachments area inside the modal? If yes the project simply has none;
@@ -92,6 +97,9 @@ _DISCOVER_JS = """(args) => {
   const exact = candidates.find(
       e => textOf(e).toLowerCase() === String(label).toLowerCase());
   const chosen = exact || candidates[0];
+  if (!chosen.id) {
+    chosen.id = '__sigpesq_dl_' + Math.random().toString(36).slice(2, 9);
+  }
   return {outcome: 'found', id: chosen.id, text: textOf(chosen),
           total: candidates.length, by_label: !!exact, scoped: true};
 }"""

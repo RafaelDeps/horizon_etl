@@ -297,7 +297,23 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
             logger.error(MISSING_EXTRACTION_DEPS_HELP)
             raise ImportError(MISSING_EXTRACTION_DEPS_HELP) from exc
 
-        return ProjectExtractor()
+        # Defensive: patch finalize so 'financiamento.moeda: None' doesn't fail Pydantic
+        if hasattr(ProjectExtractor, "finalize"):
+            orig_finalize = ProjectExtractor.finalize
+
+            def _safe_finalize(this, codigo, raw, arquivo, num_pages, source):
+                fin = raw.get("financiamento")
+                if isinstance(fin, dict) and not fin.get("moeda"):
+                    fin["moeda"] = "BRL"
+                return orig_finalize(this, codigo, raw, arquivo, num_pages, source)
+
+            ProjectExtractor.finalize = _safe_finalize
+
+        chat_model = os.getenv("MISTRAL_CHAT_MODEL", "ministral-8b-latest")
+        try:
+            return ProjectExtractor(chat_model=chat_model)
+        except TypeError:
+            return ProjectExtractor()
 
     # ------------------------------------------------------------------ helpers
     def _count_pdfs(self) -> int:
