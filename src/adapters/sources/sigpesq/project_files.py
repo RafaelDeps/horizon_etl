@@ -20,6 +20,7 @@ import glob
 import json
 import os
 import time
+import zipfile
 
 from loguru import logger
 
@@ -129,13 +130,23 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
         """Extracts each PDF into ``PJ_<code>.json``, skipping existing ones.
 
         Skipping is what keeps this affordable: only documents without a JSON
-        cost an API call. ``force=True`` re-extracts everything.
+        cost an API call. Before paying, each pending document is looked up in
+        the previous run's ``exports_canonical.zip`` (living next to the
+        corpus): an archived copy is restored locally instead of re-extracting.
+        ``force=True`` re-extracts everything, bypassing both the local skip
+        and the archive reuse.
         """
         pdfs = sorted(glob.glob(os.path.join(self.pdf_dir, "*.pdf")))
         if limit is not None:
             pdfs = pdfs[:limit]
 
-        stats = {"pdfs": len(pdfs), "extracted": 0, "skipped": 0, "errors": 0}
+        stats = {
+            "pdfs": len(pdfs),
+            "extracted": 0,
+            "skipped": 0,
+            "reused": 0,
+            "errors": 0,
+        }
         if not pdfs:
             logger.warning("No PDFs in {} — run the download stage first", self.pdf_dir)
             return stats
@@ -160,28 +171,37 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
         if not pending:
             return stats
 
+        # Reuse pass (feature 013): the previous run's archive may already
+        # hold the extracted document. Restoring it costs nothing, so it runs
+        # BEFORE the extractor is imported or built — a fully-reused run makes
+        # zero extraction calls and never needs the API key.
+        still_pending = pending
+        if not force:
+            archive = self._open_previous_archive()
+            if archive is not None:
+                try:
+                    still_pending = self._reuse_from_archive(archive, pending, stats)
+                finally:
+                    archive.close()
+
+        if not still_pending:
+            logger.info("Extraction finished: {}", stats)
+            return stats
+
         # Imported only when there is work to do, for two reasons: it pulls the
         # optional [extract] dependencies, and it raises without MISTRAL_KEY. A
         # machine with neither can still run this phase as a no-op.
-        try:
-            from agent_sigpesq.extraction import ProjectExtractor
-        except ImportError as exc:
-            from src.adapters.sources.sigpesq.project_files_strategy import (
-                MISSING_EXTRACTION_DEPS_HELP,
-            )
+        extractor = self._build_extractor()
 
-            logger.error(MISSING_EXTRACTION_DEPS_HELP)
-            raise ImportError(MISSING_EXTRACTION_DEPS_HELP) from exc
-
-        extractor = ProjectExtractor()
-
-        for index, pdf in enumerate(pending, 1):
+        for index, pdf in enumerate(still_pending, 1):
             stem = os.path.splitext(os.path.basename(pdf))[0]
             out_path = os.path.join(self.json_dir, f"{stem}.json")
             try:
                 projeto = extractor.extract_project(pdf)
             except Exception as exc:  # one bad PDF must not sink the batch
-                logger.warning("[{}/{}] {} FAILED: {}", index, len(pending), stem, exc)
+                logger.warning(
+                    "[{}/{}] {} FAILED: {}", index, len(still_pending), stem, exc
+                )
                 stats["errors"] += 1
                 continue
             data = projeto.model_dump(by_alias=True)
@@ -192,7 +212,7 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
             logger.info(
                 "[{}/{}] {} -> {}{}",
                 index,
-                len(pending),
+                len(still_pending),
                 stem,
                 os.path.basename(out_path),
                 f" (campos ausentes: {', '.join(missing)})" if missing else "",
@@ -200,6 +220,84 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
 
         logger.info("Extraction finished: {}", stats)
         return stats
+
+    # --------------------------------------------------- archive reuse helpers
+    def _open_previous_archive(self):
+        """Opens ``exports_canonical.zip`` from the export folder, if readable.
+
+        The archive lives next to the corpus (it is written by
+        ``zip_exports_task`` into the same ``OUTPUT_DIR``). Any doubt — absent,
+        stale-corrupt, unreadable — degrades to normal extraction.
+        """
+        archive_path = os.path.join(
+            os.path.dirname(self.json_dir), "exports_canonical.zip"
+        )
+        if not os.path.exists(archive_path):
+            return None
+        try:
+            return zipfile.ZipFile(archive_path)
+        except (zipfile.BadZipFile, OSError) as exc:
+            logger.warning(
+                "Export archive unreadable ({}); extracting all pending documents",
+                exc,
+            )
+            return None
+
+    def _reuse_from_archive(self, archive, pending, stats):
+        """Restores archived documents for pending stems; returns the rest.
+
+        Matching is exactly ``project_sigpesq_files_json/<stem>.json`` — the
+        same folder the zip ships and the same stem the pipeline uses. A
+        malformed archived copy is not trusted: that PDF falls back to a real
+        extraction.
+        """
+        by_name = {
+            os.path.basename(name): name
+            for name in archive.namelist()
+            if os.path.dirname(name) == "project_sigpesq_files_json"
+        }
+        still_pending = []
+        for pdf in pending:
+            stem = os.path.splitext(os.path.basename(pdf))[0]
+            entry = by_name.get(f"{stem}.json")
+            if entry is None:
+                still_pending.append(pdf)
+                continue
+            try:
+                document = json.loads(archive.read(entry))
+            except (ValueError, zipfile.BadZipFile) as exc:
+                logger.warning(
+                    "Archived document {} unusable ({}); extracting instead",
+                    entry,
+                    exc,
+                )
+                still_pending.append(pdf)
+                continue
+            out_path = os.path.join(self.json_dir, f"{stem}.json")
+            with open(out_path, "w", encoding="utf-8") as handle:
+                json.dump(document, handle, ensure_ascii=False, indent=2)
+            stats["reused"] += 1
+            logger.info("Reused archived document for {} (no extraction call)", stem)
+        if stats["reused"]:
+            logger.info(
+                "{} documents restored from the export archive",
+                stats["reused"],
+            )
+        return still_pending
+
+    def _build_extractor(self):
+        """Builds the Mistral-backed extractor, with actionable import errors."""
+        try:
+            from agent_sigpesq.extraction import ProjectExtractor
+        except ImportError as exc:
+            from src.adapters.sources.sigpesq.project_files_strategy import (
+                MISSING_EXTRACTION_DEPS_HELP,
+            )
+
+            logger.error(MISSING_EXTRACTION_DEPS_HELP)
+            raise ImportError(MISSING_EXTRACTION_DEPS_HELP) from exc
+
+        return ProjectExtractor()
 
     # ------------------------------------------------------------------ helpers
     def _count_pdfs(self) -> int:
