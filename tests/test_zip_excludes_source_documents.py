@@ -150,3 +150,21 @@ def test_skip_list_is_explicit():
         "mestrado",
         "parquet",
     }
+
+
+def test_zip_excludes_unzipped_exports_canonical_folders(tmp_path):
+    (tmp_path / "initiatives_canonical.json").write_text("[]", encoding="utf-8")
+    unzipped_dir = tmp_path / "exports_canonical"
+    unzipped_dir.mkdir()
+    (unzipped_dir / "initiatives_canonical.json").write_text("[]", encoding="utf-8")
+    unzipped_dir_2 = tmp_path / "exports_canonical (2)"
+    unzipped_dir_2.mkdir()
+    (unzipped_dir_2 / "initiatives_canonical.json").write_text("[]", encoding="utf-8")
+
+    zip_exports_task.fn(str(tmp_path))
+
+    with zipfile.ZipFile(tmp_path / "exports_canonical.zip") as zf:
+        names = zf.namelist()
+    assert "initiatives_canonical.json" in names
+    assert not any(n.startswith(("exports_canonical/", "exports_canonical (2)/")) for n in names)
+

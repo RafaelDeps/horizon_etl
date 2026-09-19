@@ -291,7 +291,11 @@ def zip_exports_task(output_dir: str):
         with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for root, dirs, files in os.walk(output_dir):
                 # Prune in place so os.walk never descends into them.
-                pruned = [d for d in dirs if d in SKIP_DIRS]
+                pruned = [
+                    d
+                    for d in dirs
+                    if d in SKIP_DIRS or d.startswith("exports_canonical")
+                ]
                 for d in pruned:
                     dirs.remove(d)
                     skipped_dirs += 1
