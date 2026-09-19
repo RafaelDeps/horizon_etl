@@ -166,5 +166,6 @@ def test_zip_excludes_unzipped_exports_canonical_folders(tmp_path):
     with zipfile.ZipFile(tmp_path / "exports_canonical.zip") as zf:
         names = zf.namelist()
     assert "initiatives_canonical.json" in names
-    assert not any(n.startswith(("exports_canonical/", "exports_canonical (2)/")) for n in names)
-
+    assert not any(
+        n.startswith(("exports_canonical/", "exports_canonical (2)/")) for n in names
+    )
