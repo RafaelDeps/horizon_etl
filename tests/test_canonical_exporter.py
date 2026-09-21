@@ -134,13 +134,7 @@ def test_export_all_orchestrates_exports():
 
             # Campus export
             args, _ = calls[1]
-            assert args[0] == [
-                {
-                    "id": 10,
-                    "name": "Campus1",
-                    "campus": {"id": 10, "name": "Campus1"},
-                }
-            ]
+            assert args[0] == [{"id": 10, "name": "Campus1"}]
             assert "campuses_canonical.json" in args[1]
 
             # Knowledge Area export
