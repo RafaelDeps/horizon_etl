@@ -8,6 +8,9 @@
 
 **Input**: User description: "aplique anomizacao do cpf, telefone e email das pessoas nos arquvos exportados e no banco de dados, obedecendo a lgpd"
 
+**Revisions**:
+- 2026-09-21 — **Security review**: substitui SHA-256 com salt público/fixo por **HMAC-SHA256 com chave secreta** (padrão private-key/public-key; a chave privada é uma variável secreta de ambiente `HORIZON_PII_HMAC_KEY`). FR-005/FR-007 e Assumptions revisados; adicionados requisitos de gestão de chave (FR-008 a FR-010).
+
 ## Clarifications
 
 ### Session 2026-05-16
@@ -17,6 +20,13 @@
 - Q: Consistência da anonimização no backfill — mesmo CPF → mesmo valor mascarado ou independente por linha? → A: Consistente — mesmo CPF produz sempre o mesmo valor mascarado (hash determinístico). Garante rastreabilidade interna sem revelar valor original.
 - Q: Escopo de tabelas — apenas `persons` ou todas as tabelas com campos pessoais? → A: Todas as tabelas que contenham CPF, telefone ou e-mail, com descoberta automática dos campos no schema.
 - Q: CPF inválido (formato incorreto) ao salvar — anonimizar, rejeitar ou logar? → A: Anonimizar mesmo assim — qualquer string é tratada como entrada opaca pelo anonimizador, independente de validade de formato.
+
+### Session 2026-09-21 (Security Review)
+
+- Q: A anonimização atual (SHA-256 + salt fixo versionado) é segura? → A: Não. O salt é público no repositório — qualquer leitor reconstroi o mapeamento via brute-force sobre CPF/e-mail de baixa entropia. É segurança por obscuridade, não tratamento adequado de dados pessoais.
+- Q: Qual a lógica segura a adotar? → A: Padrão private-key/public-key: **HMAC-SHA256 com chave secreta de ambiente** (chave privada = `HORIZON_PII_HMAC_KEY`). Algoritmo, formato dos tokens e labels de domínio são públicos; a segurança depende exclusivamente da chave secreta (princípio de Kerckhoffs).
+- Q: A deduplicação e a idempotência continuam funcionando? → A: Sim. Com a MESMA chave, o mesmo valor gera o mesmo token; os prefixos/sufixos de identificação (`LGPD-`, `@anon.lgpd`) não mudam, então backfill e guards permanecem válidos.
+- Q: Rotação da chave? → A: Trocá-la altera todos os tokens já persistidos (perde o determinismo histórico). Política: chave de longa duração, gerada com alta entropia e com cópia segura no secret manager; rotação coordenada documentada.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -54,7 +64,7 @@ Um administrador aplica anonimização nos dados pessoais (CPF, e-mail) já arma
 ### Edge Cases
 
 - CPF inválido ou incompleto ao persistir: anonimizado mesmo assim — o anonimizador trata qualquer string como entrada opaca, sem validação de formato.
-- Registros duplicados no banco durante o backfill: anonimização é consistente — mesmo CPF, telefone ou e-mail produz sempre o mesmo valor mascarado (hash determinístico), garantindo que duplicatas convergem para o mesmo valor mascarado.
+- Registros duplicados no banco durante o backfill: anonimização é consistente — mesmo CPF, telefone ou e-mail produz sempre o mesmo valor mascarado com a mesma chave secreta (HMAC determinístico), garantindo que duplicatas convergem para o mesmo valor mascarado.
 - O que acontece com dados pessoais em campos de texto livre (ex.: observações que contêm CPF escrito manualmente)? — Fora do escopo desta feature (ver Assumptions)
 
 ## Requirements *(mandatory)*
@@ -65,8 +75,11 @@ Um administrador aplica anonimização nos dados pessoais (CPF, e-mail) já arma
 - **FR-002**: O sistema DEVE oferecer operação de backfill (via `make` target ou CLI) que descobre automaticamente todas as tabelas com colunas CPF, telefone ou e-mail e anonimiza os registros existentes persistidos antes desta feature
 - **FR-003**: O sistema DEVE registrar em log de auditoria cada execução do backfill, incluindo: data/hora, quantidade de registros processados, quantidade anonimizados e resultado (sucesso/falha)
 - **FR-004**: O sistema DEVE manter a integridade referencial dos registros após anonimização — chaves, relacionamentos e campos não-pessoais permanecem inalterados
-- **FR-005**: O sistema DEVE garantir que a anonimização seja irreversível — não existe mecanismo de recuperação do valor original
-- **FR-007**: A função de anonimização DEVE ser determinística — o mesmo valor de entrada (CPF, telefone ou e-mail) produz sempre o mesmo valor mascarado, de modo que registros duplicados convergem para representação idêntica
+- **FR-005**: O sistema DEVE garantir que a anonimização seja **computacionalmente irreversível sem a chave secreta** — o mapeamento original→token só pode ser reproduzido por quem detém a chave (construção HMAC-SHA256 keyed). A chave secreta é variável de ambiente (`HORIZON_PII_HMAC_KEY`), nunca versionada no repositório
+- **FR-007**: A função de anonimização DEVE ser determinística para uma MESMA chave — o mesmo valor de entrada (CPF, telefone ou e-mail) com a mesma chave secreta produz sempre o mesmo valor mascarado, de modo que registros duplicados convergem para representação idêntica. Construção: `HMAC-SHA256(subchave_domínio, valor)`, truncada para o formato de token
+- **FR-008**: O sistema DEVE ler a chave secreta de anonimização de variável de ambiente / secret manager (`HORIZON_PII_HMAC_KEY`); na ausência da chave, a anonimização DEVE falhar de forma explícita — sem fallback silencioso para hash sem chave
+- **FR-009**: A chave secreta DEVE ser gerada com alta entropia (≥ 32 bytes aleatórios, ex.: `secrets.token_urlsafe(32)`) e armazenada fora do repositório (`.env` local / secret manager); um placeholder documentado DEVE existir em `.env.example` sem valor real
+- **FR-010**: A rotação da chave DEVE ser documentada com seu impacto: trocar a chave altera todos os tokens persistidos e quebra o determinismo histórico; a política é tratar a chave como de longa duração, com backup seguro no secret manager e rotação coordenada apenas quando necessária
 - **FR-006**: O sistema DEVE processar registros com CPF, telefone ou e-mail ausentes ou nulos sem gerar erros, mantendo o campo como nulo
 
 ### Key Entities *(include if feature involves data)*
@@ -89,7 +102,8 @@ Um administrador aplica anonimização nos dados pessoais (CPF, e-mail) já arma
 
 - Campos de texto livre (ex.: observações, comentários) que possam conter dados pessoais escritos manualmente estão fora do escopo desta feature; somente campos estruturados (CPF, telefone, e-mail) são cobertos
 - O sistema descobre automaticamente todas as tabelas e colunas com campos pessoais (CPF, telefone, e-mail) via inspeção do schema do banco — não há lista fixa de tabelas
-- A anonimização é irreversível por design (não é pseudonimização com chave de reversão)
+- A anonimização é **pseudonimização keyed**: computacionalmente irreversível SEM a chave secreta; quem detém a chave consegue reproduzir o mapeamento (necessário para auditoria e deduplicação). Não é anonimização irreversível no sentido estrito — é o modelo private-key/public-key em que a chave privada é variável secreta de ambiente
+- O salt público fixo anterior (`b":horizon-lgpd-v1"`) é substituído por chave secreta; algoritmo, formato dos tokens e labels de domínio são públicos (princípio de Kerckhoffs)
 - Os arquivos exportados refletem o estado do banco; como os dados são anonimizados na persistência, as exportações são conformes por construção
 - Dados de teste e ambientes não-produção seguem a mesma política de anonimização
 - O formato de mascaramento padrão é: CPF → `***.***.***-**`, telefone → `(**) *****-****`, e-mail → `***@***.***`

@@ -1085,7 +1085,7 @@ def test_export_researchers_backfills_participant_only_people_from_projects_and_
             {
                 "id": 652,
                 "name": "Wilsiman Santos Evangelista Silva",
-                "identification_id": "1dade2367ac4@anon.lgpd",
+                "identification_id": "463039255daa@anon.lgpd",
                 "birthday": None,
                 "cnpq_url": None,
                 "google_scholar_url": None,

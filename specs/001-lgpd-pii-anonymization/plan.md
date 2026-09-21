@@ -6,8 +6,11 @@
 
 ## Summary
 
-Aplicar anonimização determinística e irreversível de CPF (`identification_id`) e e-mail
-(`email`, `contact_email`) na camada de persistência do Horizon ETL, via SHA-256 com salt fixo.
+Aplicar anonimização determinística de CPF (`identification_id`) e e-mail
+(`email`, `contact_email`) na camada de persistência do Horizon ETL, via **HMAC-SHA256
+com chave secreta de ambiente** (`HORIZON_PII_HMAC_KEY` — padrão private-key/public-key;
+a chave privada é variável secreta). Revisão de segurança 2026-09-21 substitui o
+SHA-256 com salt fixo público (reversível por brute-force para qualquer leitor do repo).
 Novos registros são anonimizados no loader/creator layer antes de serem escritos no banco.
 Registros existentes são cobertos por um Prefect flow de backfill com schema discovery automático.
 
@@ -15,7 +18,7 @@ Registros existentes são cobertos por um Prefect flow de backfill com schema di
 
 **Language/Version**: Python 3.10+
 
-**Primary Dependencies**: hashlib (stdlib), loguru, Prefect 3, SQLite (sqlite3 stdlib), python-dotenv
+**Primary Dependencies**: hmac + hashlib (stdlib), loguru, Prefect 3, SQLite (sqlite3 stdlib), python-dotenv (carregar `HORIZON_PII_HMAC_KEY` de `.env`)
 
 **Storage**: SQLite (`db/horizon.db`) — tabelas `persons`, `person_emails`, `external_research_groups`
 
@@ -27,7 +30,7 @@ Registros existentes são cobertos por um Prefect flow de backfill com schema di
 
 **Performance Goals**: Backfill de 10.000 registros em ≤ 10 minutos (SC-003)
 
-**Constraints**: Anonimização irreversível, determinística, sem dependências externas além de stdlib
+**Constraints**: Anonimização computacionalmente irreversível sem a chave secreta, determinística (com a mesma chave), sem dependências externas além de stdlib; chave secreta via variável de ambiente (nunca versionada)
 
 **Scale/Scope**: 3 tabelas / 3 colunas PII confirmadas no schema atual; schema discovery cobre futuras adições
 
@@ -86,12 +89,13 @@ tests/
 Ver [research.md](research.md). Todas as decisões técnicas resolvidas:
 
 - Ponto de aplicação: loader/creator layer (`researcher_creation.py`, `research_group_loader.py`)
-- Algoritmo: SHA-256 + salt `":horizon-lgpd-v1"`, primeiros 16 chars do hexdigest
-- Formato: CPF → `LGPD-{hash[:16]}`, email → `{hash[:12]}@anon.lgpd`
-- Deduplicação: inalterada (hash determinístico preserva unicidade por titular)
+- Algoritmo (2026-09-21): **HMAC-SHA256 com chave secreta** `HORIZON_PII_HMAC_KEY` (subchaves por domínio via HKDF), primeiros 16 chars do hexdigest — substitui SHA-256 + salt público (revisão de segurança)
+- Formato: CPF → `LGPD-{hmac[:16]}`, email → `{hmac[:12]}@anon.lgpd` (inalterados)
+- Deduplicação: inalterada (HMAC determinístico com a mesma chave preserva unicidade por titular)
 - Backfill: Prefect flow com schema discovery via `PRAGMA table_info()`
 - Telefone: não existe coluna no schema atual — fora do escopo prático
 - Idempotência: backfill pula registros já anonimizados (`LGPD-` / `@anon.lgpd`)
+- Secret provisioning: `HORIZON_PII_HMAC_KEY` em `.env` / secret manager (≥ 32 bytes, `secrets.token_urlsafe(32)`); placeholder documentado em `.env.example`; ausente → falha explícita
 
 ## Phase 1: Design — Completed
 
@@ -102,7 +106,14 @@ Ver [data-model.md](data-model.md).
 ```python
 # src/core/logic/pii_anonymizer.py
 
-SALT = b":horizon-lgpd-v1"
+import hmac
+import hashlib
+import os
+
+# Chave secreta — variável de ambiente, NUNCA versionada.
+# _load_hmac_key() falha explicitamente se ausente; subchaves por domínio via
+# HKDF-SHA256(labels "cpf"/"email"/"phone"/"free_text") para separação de campos.
+HMAC_KEY_ENV = "HORIZON_PII_HMAC_KEY"
 
 # PII columns discovered in schema — add here when new PII columns are created
 PII_COLUMN_REGISTRY = {
@@ -111,12 +122,19 @@ PII_COLUMN_REGISTRY = {
     "contact_email": "email",
 }
 
-def anonymize_cpf(value: str | None) -> str | None: ...
-def anonymize_email(value: str | None) -> str | None: ...
+def _hmac_hex(domain: str, value: str) -> str:
+    key = os.environ[HMAC_KEY_ENV]          # hard-fail se ausente
+    subkey = hkdf_sha256(key.encode(), domain)  # domínio → subchave
+    return hmac.new(subkey, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def anonymize_cpf(value: str | None) -> str | None: ...   # "LGPD-{hmac[:16]}"
+def anonymize_email(value: str | None) -> str | None: ... # "{hmac[:12]}@anon.lgpd"
 def anonymize_field(value: str | None, field_type: str) -> str | None: ...
 def is_anonymized_cpf(value: str | None) -> bool: ...
 def is_anonymized_email(value: str | None) -> bool: ...
 ```
+
+A chave é provisionada localmente em `.env` (`HORIZON_PII_HMAC_KEY=<secrets.token_urlsafe(32)>`) e documentada como placeholder em `.env.example`. Ver research.md Decision 8 para rotação/backup.
 
 ### Pontos de aplicação no código existente
 

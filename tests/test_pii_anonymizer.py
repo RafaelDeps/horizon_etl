@@ -1,9 +1,12 @@
 import hashlib
+import hmac
+import os
 
 import pytest
 
 from src.core.logic.pii_anonymizer import (
     PII_COLUMN_REGISTRY,
+    _hmac_hex,
     anonymize_cpf,
     anonymize_email,
     anonymize_field,
@@ -21,12 +24,23 @@ from src.core.logic.pii_anonymizer import (
     scrub_source_record_phones,
 )
 
-SALT = b":horizon-lgpd-v1"
-PHONE_SALT = b":horizon-lgpd-phone-v1"
+TEST_KEY = "test-only-horizon-pii-hmac-key"
+
+# Force a deterministic key so expected-token assertions stay stable
+# regardless of machine-local .env values.
+os.environ["HORIZON_PII_HMAC_KEY"] = TEST_KEY
 
 
-def _sha(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8") + SALT).hexdigest()
+def _expected_hmac(domain: str, value: str) -> str:
+    """Independent RFC 5869 HKDF-SHA256 + HMAC-SHA256 oracle for tests.
+
+    Deliberately re-implements the keyed derivation here instead of reusing
+    module internals, so the test verifies the wiring (domain label, key
+    loading, truncation) rather than trusting the implementation under test.
+    """
+    prk = hmac.new(b"\x00" * 32, TEST_KEY.encode("utf-8"), hashlib.sha256).digest()
+    subkey = hmac.new(prk, domain.encode("utf-8") + b"\x01", hashlib.sha256).digest()
+    return hmac.new(subkey, value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 # --- anonymize_cpf ---
@@ -47,7 +61,7 @@ def test_anonymize_cpf_different_inputs_produce_different_hashes():
 
 def test_anonymize_cpf_correct_format():
     value = "12345678901"
-    expected = f"LGPD-{_sha(value)[:16]}"
+    expected = f"LGPD-{_expected_hmac('cpf', value)[:16]}"
     assert anonymize_cpf(value) == expected
 
 
@@ -83,7 +97,7 @@ def test_anonymize_email_different_inputs_differ():
 
 def test_anonymize_email_correct_format():
     value = "user@example.com"
-    expected = f"{_sha(value)[:12]}@anon.lgpd"
+    expected = f"{_expected_hmac('email', value)[:12]}@anon.lgpd"
     assert anonymize_email(value) == expected
 
 
@@ -541,3 +555,69 @@ def test_scrub_pii_deep_masks_phone_in_text():
 def test_scrub_source_record_payload_non_dict_passthrough():
     assert scrub_source_record_payload(["a@b.com"]) == [anonymize_email("a@b.com")]
     assert scrub_source_record_payload(None) is None
+
+
+# --- keyed HMAC security properties (2026-09-21 security review) ---
+
+
+def test_hkdf_matches_rfc5869_test_case_3():
+    """HKDF-SHA256 against the official RFC 5869 Test Case 3 vector.
+
+    TC3 uses zero-length salt/info: "salt not provided" defaults to HashLen
+    zero octets — exactly the salt our implementation uses. L=32 <= HashLen,
+    so a single-block expand suffices.
+    """
+    from src.core.logic.pii_anonymizer import _hkdf_sha256
+
+    ikm = b"\x0b" * 22
+    okm = _hkdf_sha256(ikm, b"", length=32)
+    assert okm.hex() == (
+        "8da4e775a563c18f715f802a063c5a31" "b8a11f5c5ee1879ec3454e5f3c738d2d"
+    )
+
+
+def test_anonymize_cpf_known_answer():
+    """Pins the full keyed pipeline (key → HKDF → HMAC → truncation)."""
+    assert anonymize_cpf("12345678901") == "LGPD-f3315dc948810753"
+
+
+def test_anonymize_email_known_answer():
+    assert anonymize_email("user@example.com") == "8ee2d0066628@anon.lgpd"
+
+
+def test_anonymize_phone_correct_format():
+    value = "(27) 99959-5708"
+    expected = f"LGPD-PHONE-{_expected_hmac('phone', value)[:16]}"
+    assert anonymize_phone(value) == expected
+
+
+def test_anonymize_phone_known_answer():
+    assert anonymize_phone("(27) 99959-5708") == "LGPD-PHONE-50b7964c71b98d59"
+
+
+def test_domain_separation_same_value_different_fields():
+    """The same string must not tokenize identically across PII field types."""
+    value = "27999595708"
+    assert _hmac_hex("cpf", value) != _hmac_hex("email", value)
+    assert _hmac_hex("cpf", value) != _hmac_hex("phone", value)
+    assert _hmac_hex("email", value) != _hmac_hex("phone", value)
+
+
+def test_missing_key_raises_runtime_error(monkeypatch):
+    monkeypatch.delenv("HORIZON_PII_HMAC_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="HORIZON_PII_HMAC_KEY"):
+        anonymize_cpf("12345678901")
+
+
+def test_blank_key_raises_runtime_error(monkeypatch):
+    monkeypatch.setenv("HORIZON_PII_HMAC_KEY", "   ")
+    with pytest.raises(RuntimeError):
+        anonymize_email("user@example.com")
+
+
+def test_different_key_produces_different_tokens(monkeypatch):
+    first = anonymize_cpf("12345678901")
+    monkeypatch.setenv("HORIZON_PII_HMAC_KEY", "another-test-key")
+    second = anonymize_cpf("12345678901")
+    assert first != second
+    assert second.startswith("LGPD-")

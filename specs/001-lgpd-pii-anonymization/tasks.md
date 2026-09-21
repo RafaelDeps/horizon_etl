@@ -7,9 +7,11 @@ description: "Task list template for feature implementation"
 
 **Input**: Design documents from `/specs/001-lgpd-pii-anonymization/`
 
+**Security update (2026-09-21)**: A construção de T002 mudou de SHA-256 + salt público fixo para **HMAC-SHA256 com chave secreta** (`HORIZON_PII_HMAC_KEY`). Formato de tokens inalterado. Descrição abaixo atualizada; demais tasks (T003–T010) permanecem válidas.
+
 **Prerequisites**: plan.md ✅, spec.md ✅, research.md ✅, data-model.md ✅
 
-**Tech stack**: Python 3.10+, hashlib (stdlib), Prefect 3, SQLite, loguru
+**Tech stack**: Python 3.10+, hmac + hashlib (stdlib), Prefect 3, SQLite, loguru, python-dotenv
 
 **Tests**: Not explicitly requested — no test tasks generated.
 
@@ -33,10 +35,11 @@ description: "Task list template for feature implementation"
 **Purpose**: Módulo central de anonimização — MUST complete before US1 and US2.
 
 - [X] T002 Create `src/core/logic/pii_anonymizer.py` implementing:
-  - `SALT = b":horizon-lgpd-v1"`
+  - `HMAC_KEY_ENV = "HORIZON_PII_HMAC_KEY"` — chave secreta lida de variável de ambiente (nunca versionada; ausente → falha explícita)
   - `PII_COLUMN_REGISTRY = {"identification_id": "cpf", "email": "email", "contact_email": "email"}`
-  - `anonymize_cpf(value: str | None) -> str | None` — returns `"LGPD-{sha256(value+SALT)[:16]}"` or None if empty/None
-  - `anonymize_email(value: str | None) -> str | None` — returns `"{sha256[:12]}@anon.lgpd"` or None if empty/None
+  - `_hmac_hex(domain, value)` — `HMAC-SHA256(subchave_hkdf(domain), value).hexdigest()` com separação de domínio por campo (substitui `SALT = b":horizon-lgpd-v1"`)
+  - `anonymize_cpf(value: str | None) -> str | None` — returns `"LGPD-{hmac[:16]}"` or None if empty/None
+  - `anonymize_email(value: str | None) -> str | None` — returns `"{hmac[:12]}@anon.lgpd"` or None if empty/None
   - `anonymize_field(value: str | None, field_type: str) -> str | None` — dispatcher por field_type (`"cpf"` → `anonymize_cpf`, `"email"` → `anonymize_email`)
   - `anonymize_person_data(data: dict) -> dict` — recebe qualquer dict, itera `PII_COLUMN_REGISTRY`, aplica `anonymize_field()` para cada chave presente no dict; retorna novo dict com campos PII anonimizados e demais campos inalterados
   - `is_anonymized_cpf(value: str | None) -> bool` — True if starts with `"LGPD-"`
@@ -73,7 +76,7 @@ description: "Task list template for feature implementation"
 - [X] T007 [US2] Add `anonymize_backfill` command to `app.py`: import `anonymize_backfill_flow` from `src.flows.maintenance.anonymize_backfill` and add `elif command == "anonymize_backfill": anonymize_backfill_flow()` in the `main()` command dispatcher
 
 - [X] T008 [P] [US2] Add two new Make targets to `Makefile`:
-  - `anonymize-backfill: ## Anonymize PII (CPF/email) in existing DB records (LGPD backfill — irreversible)` calling `$(FLOW_PYTHON) app.py anonymize_backfill`
+  - `anonymize-backfill: ## Anonymize PII (CPF/email) in existing DB records (LGPD backfill — irreversible without the secret key)` calling `$(FLOW_PYTHON) app.py anonymize_backfill`
   - `anonymize-check: ## Audit DB for unmasked PII fields` calling `$(PYTHON) -c "from src.flows.maintenance.anonymize_backfill import audit_pii; audit_pii()"`
   - Add both to the `.PHONY` list in Makefile
 
@@ -89,12 +92,25 @@ description: "Task list template for feature implementation"
 
 ---
 
+## Security Review Follow-up (2026-09-21)
+
+**Purpose**: Migrar a construção de SHA-256 + salt público fixo para HMAC-SHA256 com chave secreta (padrão private-key/public-key; chave privada = variável secreta de ambiente).
+
+- [X] T011 [P] Add placeholder `HORIZON_PII_HMAC_KEY=your_generated_secret_here` (documented, no real value) to `.env.example`, and generate/provision a real key (`secrets.token_urlsafe(32)`) in the local `.env` / secret manager; never commit the real key
+
+- [X] T012 [P] Refactor `src/core/logic/pii_anonymizer.py` from public-salt SHA-256 to keyed HMAC-SHA256: `_load_hmac_key()` (env `HORIZON_PII_HMAC_KEY`, hard-fail if missing), HKDF domain separation (`cpf`/`email`/`phone`/`free_text`), same `LGPD-{hmac[:16]}` / `{hmac[:12]}@anon.lgpd` / `LGPD-PHONE-{hmac[:16]}` formats; update `tests/test_pii_anonymizer.py` to compute expected tokens with the test key. Additional wiring: `tests/conftest.py` default test key, `load_dotenv()` in the backfill flow, `HORIZON_PII_HMAC_KEY` secret added to `weekly-etl.yml` env.
+
+> Ações T011/T012 concluídas em 2026-09-21 — spec/plan/research/data-model refletem o novo design; implementação HMAC keyed entregue e testada.
+
+---
+
 ## Dependencies
 
 ```
 T001 (setup) → T002 (pii_anonymizer) → T003, T004, T005 (US1) — podem rodar em paralelo entre si
                                       → T006, T007, T008 (US2) — T007 depende de T006; T008 é paralelo a T006/T007
 T009, T010 — paralelos, sem dependências de implementação
+T011 (chave) → T012 (refactor HMAC) — follow-up da revisão de segurança; independente das demais
 ```
 
 **US2 depende de US1?** Não. US2 (backfill) usa `pii_anonymizer.py` (T002) diretamente. Pode ser implementado em paralelo com US1 após T002.

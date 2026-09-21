@@ -211,7 +211,7 @@ reports: report-captacao report-ppcomp-base report-ppcomp-egressos report-forman
 
 # --- LGPD ---
 
-anonymize-backfill: ## Anonymize PII (CPF/email) in existing DB records (LGPD — irreversible)
+anonymize-backfill: ## Anonymize PII (CPF/email) in existing DB records (LGPD — irreversible without the secret key)
 	@$(FLOW_PYTHON) app.py anonymize_backfill
 
 anonymize-check: ## Audit DB for unmasked PII fields

@@ -1,9 +1,19 @@
 import hashlib
+import hmac
+import os
 import re
 from typing import Any
 
-SALT = b":horizon-lgpd-v1"
-PHONE_SALT = b":horizon-lgpd-phone-v1"
+# Secret key for PII pseudonymization — private-key/public-key pattern.
+# The private key is a secret environment variable (never committed); the
+# algorithm, token formats and domain labels are public (Kerckhoffs).
+HMAC_KEY_ENV = "HORIZON_PII_HMAC_KEY"
+
+# Per-field domain labels — HKDF-derived subkeys keep the same string value
+# from tokenizing identically across different PII field types.
+_DOMAIN_CPF = "cpf"
+_DOMAIN_EMAIL = "email"
+_DOMAIN_PHONE = "phone"
 
 PII_COLUMN_REGISTRY: dict[str, str] = {
     "identification_id": "cpf",
@@ -37,6 +47,54 @@ _PHONE_RE = re.compile(
 )
 
 
+def _load_hmac_key() -> bytes:
+    """Load the secret HMAC key from the environment.
+
+    Hard-fails when the key is absent — silently falling back to an
+    unkeyed/public hash would defeat the anonymization guarantees.
+    """
+    value = os.environ.get(HMAC_KEY_ENV)
+    if value is None or not value.strip():
+        raise RuntimeError(
+            f"Missing required environment variable {HMAC_KEY_ENV!r}. "
+            "Generate a secret with: "
+            'python -c "import secrets; print(secrets.token_urlsafe(32))" '
+            "and store it in .env or a secret manager (never commit it)."
+        )
+    return value.strip().encode("utf-8")
+
+
+def _hkdf_sha256(ikm: bytes, info: bytes, length: int = 32) -> bytes:
+    """HKDF-SHA256 (RFC 5869) for domain-separated subkeys.
+
+    Single-block expand (length <= 32 bytes) is sufficient for HMAC keys.
+    """
+    prk = hmac.new(b"\x00" * 32, ikm, hashlib.sha256).digest()
+    okm = hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+    return okm[:length]
+
+
+_SUBKEY_CACHE: dict[tuple[bytes, str], bytes] = {}
+
+
+def _domain_subkey(domain: str) -> bytes:
+    """Derive (and cache) the per-field-type subkey from the master secret."""
+    key = _load_hmac_key()
+    cache_key = (key, domain)
+    subkey = _SUBKEY_CACHE.get(cache_key)
+    if subkey is None:
+        subkey = _hkdf_sha256(key, domain.encode("utf-8"))
+        _SUBKEY_CACHE[cache_key] = subkey
+    return subkey
+
+
+def _hmac_hex(domain: str, value: str) -> str:
+    """Deterministic keyed digest: HMAC-SHA256(domain subkey, value)."""
+    return hmac.new(
+        _domain_subkey(domain), value.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
 def anonymize_cpf(value: str | None) -> str | None:
     if not value:
         return None
@@ -44,8 +102,7 @@ def anonymize_cpf(value: str | None) -> str | None:
         # Idempotent: re-hashing an already-anonymized value on every ORM
         # flush makes the stored identity drift (hash-of-hash chains).
         return value
-    digest = hashlib.sha256(value.encode("utf-8") + SALT).hexdigest()
-    return f"LGPD-{digest[:16]}"
+    return f"LGPD-{_hmac_hex(_DOMAIN_CPF, value)[:16]}"
 
 
 def anonymize_email(value: str | None) -> str | None:
@@ -53,8 +110,7 @@ def anonymize_email(value: str | None) -> str | None:
         return None
     if is_anonymized_email(value):
         return value
-    digest = hashlib.sha256(value.encode("utf-8") + SALT).hexdigest()
-    return f"{digest[:12]}@anon.lgpd"
+    return f"{_hmac_hex(_DOMAIN_EMAIL, value)[:12]}@anon.lgpd"
 
 
 def anonymize_phone(value: str | None) -> str | None:
@@ -62,8 +118,7 @@ def anonymize_phone(value: str | None) -> str | None:
         return None
     if is_anonymized_phone(value):
         return value
-    digest = hashlib.sha256(value.encode("utf-8") + PHONE_SALT).hexdigest()
-    return f"LGPD-PHONE-{digest[:16]}"
+    return f"LGPD-PHONE-{_hmac_hex(_DOMAIN_PHONE, value)[:16]}"
 
 
 def anonymize_field(value: str | None, field_type: str) -> str | None:

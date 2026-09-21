@@ -2,6 +2,8 @@
 
 **Branch**: `001-lgpd-pii-anonymization` | **Date**: 2026-05-16
 
+**Updated**: 2026-09-21 — **Security review**: Decision 3 substituída (HMAC-SHA256 com chave secreta no lugar de SHA-256 + salt público); adicionada Decision 8 (gestão da chave secreta).
+
 ## Decision 1: Ponto de aplicação da anonimização
 
 **Decision**: Aplicar anonimização na **camada de loader/strategy** (`src/core/logic/`), imediatamente antes de passar dados ao controller do domínio.
@@ -27,24 +29,32 @@
 
 **Implications**: Nenhuma mudança necessária no código de deduplicação.
 
-## Decision 3: Algoritmo de anonimização
+## Decision 3: Algoritmo de anonimização (REVISED 2026-09-21)
 
-**Decision**: `SHA-256(value.encode("utf-8") + b":horizon-lgpd-v1")`, primeiros 16 chars do hexdigest.
+**Decision (original, 2026-05-16)**: `SHA-256(value.encode("utf-8") + b":horizon-lgpd-v1")`, primeiros 16 chars do hexdigest — **SUPERSEDED** pela revisão de segurança abaixo.
+
+**Decision (security review, 2026-09-21)**: **HMAC-SHA256 keyed** — `hmac.new(subchave, value.encode(), hashlib.sha256).hexdigest()`, truncado para o token de exibição, com separação de domínio por tipo de campo (CPF/e-mail/telefone/texto-livre).
 
 **Rationale**:
-- SHA-256 é irreversível sem o salt
-- Salt fixo `":horizon-lgpd-v1"` garante determinismo entre execuções
-- 16 chars hex = 64 bits de entropia — colisões negligenciáveis para tamanho do dataset
-- Simples, sem dependências externas (hashlib é stdlib do Python)
+- O salt fixo anterior era **público no repositório** — qualquer leitor reconstruía o mapeamento por brute-force (CPF ~10¹¹ combinações; e-mail via dicionários/breaches). Segurança por obscuridade, não criptografia.
+- HMAC com **chave secreta de ambiente** (`HORIZON_PII_HMAC_KEY`): sem a chave, o atacante não consegue verificar candidatos nem pré-computar rainbow tables, mesmo conhecendo o algoritmo, o formato e o domínio dos valores (princípio de Kerckhoffs).
+- Determinístico com a mesma chave → deduplicação (Decision 2) e idempotência dos guards (`LGPD-` / `@anon.lgpd`) preservadas.
+- Sem dependências externas: `hmac` + `hashlib` são stdlib do Python.
 
-**Format stored**:
-- CPF (`identification_id`): `LGPD-{sha256[:16]}` — claramente marcado como anonimizado
-- Email (`email`, `contact_email`): `{sha256[:12]}@anon.lgpd` — formato e-mail inválido, claramente anonimizado
-- Telefone: não existe coluna no schema atual (schema discovery confirmou)
+**Construction**:
+- Chave maestra única: `HORIZON_PII_HMAC_KEY` (gerada com `secrets.token_urlsafe(32)`; ≥ 32 bytes de entropia).
+- Subchaves por domínio via HKDF-SHA256 com labels `"cpf"`, `"email"`, `"phone"`, `"free_text"` → o mesmo valor string em campos distintos não gera o mesmo token (substitui os salts distintos por campo, preservando o comportamento atual de `PHONE_SALT`).
+- Formatos persistidos (inalterados):
+  - CPF (`identification_id`): `LGPD-{hmac[:16]}`
+  - E-mail (`email`, `contact_email`): `{hmac[:12]}@anon.lgpd`
+  - Telefone (texto-livre/scrub): `LGPD-PHONE-{hmac[:16]}`
+- Ausência da chave → falha explícita (exceção), nunca fallback sem chave.
 
 **Alternatives considered**:
-- bcrypt/argon2 — rejeitado: projetados para ser lentos (backfill lento), e não precisamos de proteção contra brute-force sobre hash de CPF
+- Manter SHA-256 + salt público — REJEITADO: reversível por qualquer leitor do repo; viola o objetivo de tratamento de PII (LGPD art. 5)
+- bcrypt/argon2 — rejeitado: projetados para serem lentos (backfill lento) e não precisamos de trabalho extra quando a chave é secreta
 - Format-preserving encryption (FPE) — rejeitado: requer biblioteca externa e manutenção de chave de reversão
+- RSA determinístico (textbook) — rejeitado: saída longa, esquema determinístico desencorajado, e sem ganho sobre HMAC para tokenização determinística com reversão restrita a quem detém a chave
 
 ## Decision 4: Escopo de tabelas via schema discovery
 
@@ -89,3 +99,22 @@
 **Rationale**: Análise do schema `PRAGMA table_info()` em todas as 40 tabelas não encontrou coluna `phone` ou `telefone`. O campo telefone não é persistido no banco Horizon ETL atual.
 
 **Follow-up**: Se telefone for adicionado ao schema no futuro, adicionar `phone`/`telefone` à lista de PII column names no anonymizer.
+
+## Decision 8: Gestão da chave secreta (adicionada 2026-09-21)
+
+**Decision**: A chave de anonimização (`HORIZON_PII_HMAC_KEY`) é **variável secreta de ambiente** — provisionada localmente em `.env` (ignorado pelo git) ou em secret manager; um placeholder documentado fica em `.env.example` sem valor real.
+
+**Rationale**:
+- A segurança do esquema HMAC repousa integralmente no segredo (Kerckhoffs); versionar a chave no repo anularia a mudança
+- `python-dotenv` já é usado pelo projeto — carregar a chave no boot é consistente com o padrão atual
+- Fraco/omitida → falha explícita: melhor um sistema que pare do que um que "anonimiza" com material público
+
+**Provisioning**:
+- Geração: `python -c "import secrets; print(secrets.token_urlsafe(32))"` (ou `openssl rand -base64 32`)
+- Armazenamento: `.env` local / secret manager (cópia segura — perda da chave impede recomputar tokens e re-anonimizar dados legados)
+- Checagem no boot/core: `_load_hmac_key()` lê `os.environ["HORIZON_PII_HMAC_KEY"]`; ausente → `RuntimeError` explícito
+
+**Rotation**:
+- HMAC keyed: trocar a chave altera TODOS os tokens persistidos e quebra o determinismo histórico (valores antigos não correspondem aos novos)
+- Política: chave de **longa duração**, rotacionada somente de forma coordenada (janela de manutenção, re-anonimização completa e consistente) e com registro no log de auditoria
+- Não há versionamento de chave previsto no MVP; se rotação frequente for exigida no futuro, adotar `HORIZON_PII_HMAC_KEY_{version}` + verificação dupla na validação de `is_anonymized_*`

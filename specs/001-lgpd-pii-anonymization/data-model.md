@@ -2,6 +2,8 @@
 
 **Branch**: `001-lgpd-pii-anonymization` | **Date**: 2026-05-16
 
+**Updated**: 2026-09-21 — **Security review**: salt público fixo substituído por chave secreta de ambiente (`HORIZON_PII_HMAC_KEY`) via HMAC-SHA256 keyed. Formatos de token inalterados.
+
 ## Tabelas afetadas (existentes — sem alteração de schema)
 
 ### `persons`
@@ -10,7 +12,7 @@
 |--------|------|-----|-----------|
 | `id` | INTEGER PK | Não | Inalterado |
 | `name` | TEXT | Não | Inalterado |
-| `identification_id` | TEXT | **CPF** | Anonimizado → `LGPD-{sha256[:16]}` |
+| `identification_id` | TEXT | **CPF** | Anonimizado → `LGPD-{hmac[:16]}` |
 | outros campos | — | Não | Inalterados |
 
 **Deduplication behavior**: `identification_id` continua sendo usado para deduplicação. Hash determinístico preserva a propriedade de unicidade por titular.
@@ -23,7 +25,7 @@
 |--------|------|-----|-----------|
 | `id` | INTEGER PK | Não | Inalterado |
 | `person_id` | INTEGER FK | Não | Inalterado |
-| `email` | TEXT | **E-mail** | Anonimizado → `{sha256[:12]}@anon.lgpd` |
+| `email` | TEXT | **E-mail** | Anonimizado → `{hmac[:12]}@anon.lgpd` |
 
 ---
 
@@ -32,7 +34,7 @@
 | Coluna | Tipo | PII | Tratamento |
 |--------|------|-----|-----------|
 | `id` | INTEGER PK | Não | Inalterado |
-| `contact_email` | TEXT | **E-mail** | Anonimizado → `{sha256[:12]}@anon.lgpd` |
+| `contact_email` | TEXT | **E-mail** | Anonimizado → `{hmac[:12]}@anon.lgpd` |
 | outros campos | — | Não | Inalterados |
 
 ---
@@ -44,16 +46,23 @@ Localização: `src/core/logic/pii_anonymizer.py`
 ### Funções
 
 ```python
-SALT = b":horizon-lgpd-v1"
+# Chave secreta — variável de ambiente, NUNCA versionada.
+# (implementação: _load_hmac_key() lê os.environ["HORIZON_PII_HMAC_KEY"],
+#  falha explicitamente se ausente; subchaves por domínio via HKDF-SHA256)
+HMAC_KEY_ENV = "HORIZON_PII_HMAC_KEY"
+DOMAIN_LABELS = {"cpf", "email", "phone", "free_text"}
 
 def anonymize_cpf(value: str | None) -> str | None:
-    """SHA-256 determinístico. None/empty → None."""
+    """HMAC-SHA256 keyed determinístico. None/empty → None."""
 
 def anonymize_email(value: str | None) -> str | None:
-    """SHA-256 determinístico. None/empty → None."""
+    """HMAC-SHA256 keyed determinístico. None/empty → None."""
+
+def anonymize_phone(value: str | None) -> str | None:
+    """HMAC-SHA256 keyed determinístico. None/empty → None."""
 
 def anonymize_field(value: str | None, field_type: str) -> str | None:
-    """Dispatcher: field_type in {'cpf', 'email'}."""
+    """Dispatcher: field_type in {'cpf', 'email', 'phone', 'free_text'}."""
 
 def is_anonymized_cpf(value: str | None) -> bool:
     """True se começa com 'LGPD-'."""
@@ -64,12 +73,20 @@ def is_anonymized_email(value: str | None) -> bool:
 
 ### Invariantes
 
-- `anonymize_cpf(x) == anonymize_cpf(x)` para qualquer `x` (determinismo)
+- `anonymize_cpf(x) == anonymize_cpf(x)` para qualquer `x` (determinismo com a MESMA chave)
 - `anonymize_cpf(None) is None`
 - `anonymize_cpf("")` retorna `None`
 - Resultado de `anonymize_cpf` sempre começa com `"LGPD-"`
 - Resultado de `anonymize_email` sempre termina com `"@anon.lgpd"`
-- Nenhuma função é reversível sem o SALT
+- Nenhuma função é reversível sem a **chave secreta** (`HORIZON_PII_HMAC_KEY`); quem detém a chave consegue reproduzir o mapeamento
+- Chave ausente → falha explícita (exceção), nunca fallback para hash sem chave
+
+### Gestão da chave secreta (2026-09-21)
+
+- **Geração**: `secrets.token_urlsafe(32)` (≥ 32 bytes) ou `openssl rand -base64 32`
+- **Armazenamento**: `.env` local / secret manager; `.env.example` recebe apenas placeholder documentado
+- **Rotação**: trocar a chave altera todos os tokens persistidos — política de longa duração, rotação coordenada e auditada (ver research.md Decision 8)
+- **Perda**: sem a chave não é possível recomputar tokens nem re-anonimizar dados legados — manter cópia segura no secret manager
 
 ---
 

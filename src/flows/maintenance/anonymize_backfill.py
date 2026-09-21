@@ -3,8 +3,11 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
 from loguru import logger
 from prefect import flow, get_run_logger
+
+load_dotenv()
 
 from src.core.logic.pii_anonymizer import (
     PII_COLUMN_REGISTRY,
