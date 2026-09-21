@@ -945,7 +945,9 @@ class CanonicalDataExporter:
         for row in rows:
             item = dict(row)
             if entity_type != "campus":
-                item.setdefault("campus", self._resolve_record_campus(item, entity_type))
+                item.setdefault(
+                    "campus", self._resolve_record_campus(item, entity_type)
+                )
             item = scrub_pii_deep(item)
             if entity_type == "source_record":
                 payload = item.get("raw_payload_json")
