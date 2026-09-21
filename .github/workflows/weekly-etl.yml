@@ -73,6 +73,7 @@ jobs:
           test -n "$STORAGE_TYPE" || { echo "Missing GitHub secret: STORAGE_TYPE"; exit 1; }
           test -n "$SIGPESQ_USERNAME" || { echo "Missing GitHub secret: SIGPESQ_USERNAME"; exit 1; }
           test -n "$SIGPESQ_PASSWORD" || { echo "Missing GitHub secret: SIGPESQ_PASSWORD"; exit 1; }
+          test -n "$HORIZON_PII_HMAC_KEY" || { echo "Missing GitHub secret: HORIZON_PII_HMAC_KEY"; exit 1; }
           test -n "$MISTRAL_API_KEY" || { echo "Missing GitHub secret: MISTRAL_API_KEY"; exit 1; }
 
       - name: Run weekly flows
