@@ -25,6 +25,7 @@ class MockTeam:
 def project_loader():
     with (
         patch("src.core.logic.entity_manager.PostgresClient"),
+        patch("src.core.logic.entity_manager.OrganizationController"),
         patch("src.core.logic.project_loader.InitiativeController"),
         patch("src.core.logic.project_loader.TeamController"),
         patch("src.core.logic.project_loader.PersonController"),
@@ -70,7 +71,9 @@ def test_ensure_roles_exist(mock_role_ctrl, mock_pg_client, project_loader):
     mock_pg_client.return_value.get_session.return_value = session
 
     # Force failure in RoleController instance to trigger fallback
-    project_loader.entity_manager.role_controller.get_all.side_effect = Exception("DB Connection Failed")
+    project_loader.entity_manager.role_controller.get_all.side_effect = Exception(
+        "DB Connection Failed"
+    )
 
     # Mock no roles exist in fallback query
     session.query.return_value.filter_by.return_value.first.return_value = None
