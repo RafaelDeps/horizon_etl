@@ -183,7 +183,8 @@ export-rg-membership-manifest: prefect-server ## Export research group membershi
 # e das fontes FACTO/FAPES/bolsistas. Não precisam de Prefect nem Docker.
 
 .PHONY: reports report-captacao report-ppcomp-base report-ppcomp-egressos \
-	report-formandos report-formandos-exec report-docentes-exec report-institucional
+	report-formandos report-formandos-exec report-docentes-exec report-institucional \
+	pnp-xlsx
 
 report-captacao: ## Relatório de captação de projetos (FAPES + FACTO)
 	@$(REPORT_PYTHON) -m src.scripts.generate_captacao_report
@@ -208,6 +209,21 @@ report-institucional: report-ppcomp-base report-ppcomp-egressos report-formandos
 
 reports: report-captacao report-ppcomp-base report-ppcomp-egressos report-formandos report-formandos-exec report-docentes-exec report-institucional ## Gera TODOS os relatórios (FACTO/Lattes) na ordem correta
 	@echo "Relatórios gerados em $(OUTPUT_DIR) (formandos/, mestrado/, docentes/)."
+
+# --- PNP ---
+# Planilha de fornecimento de dados do PNP (9 abas PARCIAL) gerada apenas a
+# partir dos JSON canônicos de data/exports. Não precisa de Prefect nem Docker;
+# o SRC ETL não é consultado e os campos sem fonte ficam nulos.
+
+PNP_XLSX ?= data/reports/planilha-pnp-parcial.xlsx
+PNP_EXPORTS_DIR ?= data/exports
+
+.PHONY: pnp-xlsx
+
+pnp-xlsx: ## Planilha PNP (.xlsx) com as 9 abas PARCIAL, a partir de data/exports/*.json
+	@$(REPORT_PYTHON) -m src.scripts.export_pnp_xlsx \
+		--exports-dir "$(PNP_EXPORTS_DIR)" --out "$(PNP_XLSX)"
+	@echo "Planilha PNP gerada em $(PNP_XLSX)."
 
 # --- LGPD ---
 
