@@ -238,18 +238,56 @@ dominio.
 
 ## Configuracao
 
-Variaveis comuns:
+A origem das credenciais do SigPesq e uma escolha **explicita e obrigatoria**
+via `SIGPESQ_CREDENTIALS_SOURCE` (nao ha valor padrao):
 
 ```bash
+# infisical: resolve sigpesq-user/sigpesq-password no Infisical
+# legacy:    usa SIGPESQ_USERNAME/SIGPESQ_PASSWORD do ambiente (comportamento antigo)
+SIGPESQ_CREDENTIALS_SOURCE=legacy
+```
+
+Um valor ausente ou invalido aborta a execucao com uma mensagem clara, antes de
+qualquer acesso ao portal SigPesq.
+
+Modo **legacy** (retrocompativel):
+
+```bash
+SIGPESQ_CREDENTIALS_SOURCE=legacy
 SIGPESQ_USERNAME=<usuario>
 SIGPESQ_PASSWORD=<senha>
+```
+
+> Ambientes que ja existiam precisam adicionar `SIGPESQ_CREDENTIALS_SOURCE=legacy`
+> uma unica vez: o mode flag e obrigatorio de proposito.
+
+Modo **infisical** (as credenciais saem do `.env`):
+
+```bash
+SIGPESQ_CREDENTIALS_SOURCE=infisical
+INFISICAL_HOST=https://app.infisical.com      # default
+INFISICAL_CLIENT_ID=<machine-identity-id>     # obrigatorio
+INFISICAL_CLIENT_SECRET=<machine-identity-secret>  # obrigatorio
+INFISICAL_PROJECT_ID=<project-id>             # obrigatorio
+INFISICAL_ENV=dev                             # default
+INFISICAL_SECRET_PATH=/                       # default
+```
+
+Nesse modo o adapter resolve os secrets `sigpesq-user` e `sigpesq-password` e
+mantem o download inalterado. Valores de credenciais nunca sao escritos em logs
+ou artefatos.
+
+Outras variaveis comuns:
+
+```bash
 PREFECT_API_URL=http://127.0.0.1:4200/api
 PREFECT_CLIENT_SERVER_VERSION_CHECK_ENABLED=false
 HORIZON_TELEGRAM_BOT_TOKEN=<token-do-bot>
 HORIZON_TELEGRAM_CHAT_ID=<chat-id-do-grupo-horizon-messages>
 ```
 
-O adapter tambem aceita `SIGPESQ_USER` como alias para `SIGPESQ_USERNAME`.
+O adapter tambem aceita `SIGPESQ_USER` como alias para `SIGPESQ_USERNAME`
+(no modo legacy).
 
 ## Notificacoes Telegram
 
