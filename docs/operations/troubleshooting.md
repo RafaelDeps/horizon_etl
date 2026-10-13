@@ -25,7 +25,27 @@ make prefect-server
 make prefect-status
 ```
 
-## SigPesq sem credenciais
+## SigPesq: origem de credenciais ausente ou invalida
+
+Sintoma comum:
+
+```
+Missing or invalid SIGPESQ_CREDENTIALS_SOURCE: expected 'infisical' or 'legacy', got None.
+```
+
+Causa:
+
+- a origem das credenciais do SigPesq e uma escolha explicita e obrigatoria (nao
+  ha deteccao automatica nem valor padrao)
+
+Acao recomendada:
+
+- definir `SIGPESQ_CREDENTIALS_SOURCE=legacy` (usa `SIGPESQ_USERNAME` /
+  `SIGPESQ_PASSWORD`) ou `SIGPESQ_CREDENTIALS_SOURCE=infisical`
+- ambientes que ja existiam precisam adicionar `SIGPESQ_CREDENTIALS_SOURCE=legacy`
+  uma unica vez
+
+## SigPesq sem credenciais (modo legacy)
 
 Sintoma comum:
 
@@ -35,6 +55,34 @@ Acao recomendada:
 
 - configurar as variaveis no `.env` local
 - ou configurar os secrets correspondentes no GitHub
+
+## SigPesq: falha ao resolver credenciais no Infisical (modo infisical)
+
+Sintoma comum (mensagens distinguem a causa):
+
+```
+Missing required Infisical configuration: INFISICAL_CLIENT_ID, ...
+Infisical authentication failed (HTTP 401): ...
+Infisical denied access to secret '<nome>' (HTTP 403) ...
+Infisical secret '<nome>' was not found (project=... environment=... path=...) ...
+Could not reach Infisical at https://... ...
+Infisical secret '<nome>' is missing or empty ...
+```
+
+Acao recomendada:
+
+- configuracao ausente: definir `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`
+  e `INFISICAL_PROJECT_ID`
+- HTTP 401: conferir/rotacionar as credenciais da machine identity
+- HTTP 403: conceder leitura ao path configurado em `INFISICAL_SECRET_PATH`
+- HTTP 404: conferir `INFISICAL_PROJECT_ID`, `INFISICAL_ENV` e
+  `INFISICAL_SECRET_PATH`, e se os secrets `sigpesq-user` / `sigpesq-password`
+  existem nesse ambiente/path
+- conectividade: verificar `INFISICAL_HOST` e acesso de rede; usar o modo
+  `legacy` como alternativa se o Infisical estiver indisponivel
+
+A execucao aborta antes de qualquer acesso ao portal SigPesq: nenhuma mensagem
+de erro ou log contem os valores das credenciais.
 
 ## SigPesq retorna HTTP 429 (rate limit no login)
 

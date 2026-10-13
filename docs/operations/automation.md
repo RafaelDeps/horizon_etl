@@ -32,6 +32,25 @@ A workflow depende destes secrets do GitHub:
 - `HORIZON_TELEGRAM_BOT_TOKEN`
 - `HORIZON_TELEGRAM_CHAT_ID`
 
+## Origem das credenciais SigPesq
+
+A escolha da origem das credenciais do SigPesq e obrigatoria via
+`SIGPESQ_CREDENTIALS_SOURCE` (`infisical` ou `legacy`); ausente ou invalido
+aborta a execucao antes de qualquer acesso ao portal.
+
+Esta workflow continua usando os secrets do GitHub, portanto define
+explicitamente:
+
+```yaml
+env:
+  SIGPESQ_CREDENTIALS_SOURCE: legacy
+```
+
+Os secrets `SIGPESQ_USERNAME` / `SIGPESQ_PASSWORD` da workflow permanecem a
+fonte (modo `legacy`). O modo `infisical` (secrets `sigpesq-user` /
+`sigpesq-password` no Infisical) e uma alternativa para execucoes locais/outros
+ambientes, nao para esta workflow.
+
 ## Parametros manuais
 
 No `workflow_dispatch`, a execucao manual aceita:

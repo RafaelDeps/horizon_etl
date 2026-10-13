@@ -2,20 +2,31 @@ import asyncio
 import os
 import shutil
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
+
+from src.adapters.secrets.infisical import InfisicalSecretProvider
+from src.adapters.sources.sigpesq.credentials import (
+    parse_credential_source,
+    resolve_infisical_credentials,
+)
+from src.core.logic.loaders import SigPesqFileLoader
+from src.core.ports.secret_provider import ISecretProvider
+from src.core.ports.source import ISource
 
 _SIGPESQ_429_WAIT_SECONDS = int(os.getenv("SIGPESQ_429_WAIT_SECONDS", "60"))
 _SIGPESQ_MAX_RETRIES = int(os.getenv("SIGPESQ_MAX_RETRIES", "3"))
 
-from src.core.logic.loaders import SigPesqFileLoader
-from src.core.ports.source import ISource
-
 
 class SigPesqAdapter(ISource):
-    def __init__(self, download_dir: str = "data/raw/sigpesq"):
+    def __init__(
+        self,
+        download_dir: str = "data/raw/sigpesq",
+        secret_provider: Optional[ISecretProvider] = None,
+    ):
         self.download_dir = download_dir
+        self._secret_provider = secret_provider
         os.makedirs(self.download_dir, exist_ok=True)
 
     def extract(self, download_strategies: list = None) -> List[Dict[str, Any]]:
@@ -43,7 +54,24 @@ class SigPesqAdapter(ISource):
     def _validate_environment(self):
         """
         Ensures necessary environment variables are set for sigpesq_agent.
+
+        The credential source is selected explicitly by
+        ``SIGPESQ_CREDENTIALS_SOURCE`` (FR-003): ``infisical`` resolves the pair
+        via the ``ISecretProvider`` port and exports it for the download step;
+        ``legacy`` keeps the previous env-var behavior byte-for-byte.
         """
+        source = parse_credential_source()
+
+        if source == "infisical":
+            provider = self._secret_provider or InfisicalSecretProvider()
+            resolved = resolve_infisical_credentials(provider)
+            logger.info(
+                "SigPesq credential mode: infisical ({} secrets resolved).", resolved
+            )
+            return
+
+        logger.info("SigPesq credential mode: legacy.")
+
         # Support SIGPESQ_USER as alias for SIGPESQ_USERNAME and vice-versa
         if os.getenv("SIGPESQ_USER") and not os.getenv("SIGPESQ_USERNAME"):
             os.environ["SIGPESQ_USERNAME"] = os.getenv("SIGPESQ_USER")
