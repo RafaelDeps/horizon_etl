@@ -32,3 +32,4 @@
 ## Notes
 
 - All items pass. Spec ready for `/speckit-plan`.
+- **Amendment 2026-10-14**: added US4 (versioned archive publishing), FR-009–FR-011 (commit the archive when changed; exclude it from the downloadable artifact), the `! -name '*.zip'` compression guard, and SC-006/SC-007. Requirements remain testable: the independent test is a manual `workflow_dispatch` verifying the commit and the absence of the archive in the artifact.

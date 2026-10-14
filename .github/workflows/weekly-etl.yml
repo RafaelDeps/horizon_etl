@@ -16,7 +16,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 concurrency:
@@ -83,8 +83,30 @@ jobs:
       - name: Compress large export files
         if: always()
         run: |
-          find data/ -type f -size +10M \
+          # Never touch archives: exports_canonical.zip is the flow's own
+          # deliverable and must ship byte-for-byte as written by
+          # `make weekly-flows` (no double wrapping).
+          find data/ -type f -size +10M ! -name '*.zip' \
             -exec sh -c 'for f; do zip -m -j "$f.zip" "$f"; done' sh {} +
+
+      - name: Commit exports_canonical.zip if changed
+        if: success()
+        run: |
+          set -euo pipefail
+          ZIP="data/exports/exports_canonical.zip"
+          if [ ! -f "$ZIP" ]; then
+            echo "::warning::$ZIP was not generated; nothing to commit."
+            exit 0
+          fi
+          git add -- "$ZIP"
+          if git diff --cached --quiet; then
+            echo "No changes to $ZIP; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(exports_canonical.zip): update from weekly run $(date -u +%Y-%m-%d)"
+          git push origin "HEAD:${{ github.ref_name }}"
 
       - name: Upload ETL artifacts
         if: always()
@@ -96,6 +118,7 @@ jobs:
           path: |
             data
             db/horizon.db
+            !data/exports/exports_canonical.zip
             !.venv
             !.venv/**
             !.env

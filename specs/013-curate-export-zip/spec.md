@@ -10,9 +10,9 @@
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 - Download archive with project documents included (Priority: P1)
+### User Story 1 - Fetch the latest archive with project documents included (Priority: P1)
 
-As a downstream consumer of the export archive, I download the weekly artifact and find the research project documents (the PJ_*.json corpus) inside it under the folder they know, so I can inspect the raw material the enrichment phase was built from — without any coordinator/project contact information in clear text.
+As a downstream consumer of the export archive, I fetch the latest committed `exports_canonical.zip` from the repository and find the research project documents (the PJ_*.json corpus) inside it under the folder they know, so I can inspect the raw material the enrichment phase was built from — without any coordinator/project contact information in clear text.
 
 **Why this priority**: The project documents are the missing piece consumers currently have to obtain out-of-band; including them (scrubbed) closes that gap. This is the primary reason for the feature.
 
@@ -110,7 +110,7 @@ As a maintainer, I want the project-document extraction step (which sends projec
 
 ### Key Entities
 
-- **Export archive**: the single, versioned artifact (`exports_canonical.zip`) delivered after each weekly run.
+- **Export archive**: the single, versioned deliverable (`exports_canonical.zip`) produced after each weekly run and committed to the repository when it changes (delivery mechanism owned by feature 003-workflow-ci-zip-exports).
 - **SigPesq project documents**: the `PJ_*.json` corpus that feeds enrichment; now part of the archive in anonymized form.
 - **Canonical exports**: the curated dataset files (organizations, researchers, initiatives, graphs, tracking) that must keep being delivered unchanged.
 - **Excluded artifacts**: the dataset snapshot file, any other nested archive files, the formatted report folders (`formandos/`, `docentes/`, `mestrado/`), and the parquet mirror folder.
@@ -133,6 +133,7 @@ As a maintainer, I want the project-document extraction step (which sends projec
 - The on-disk project documents are never modified in place; only the copies placed inside the archive are anonymized.
 - The dedicated on-demand command that mirrors the canonical exports into the parquet format may remain available for manual use; only the weekly run stops producing it.
 - The archive continues to be generated once per weekly run, at the same point in the pipeline as today.
+- The archive is delivered through git: the weekly workflow (feature 003) commits `data/exports/exports_canonical.zip` when it changed and no longer publishes it as a downloadable CI artifact. Consumers read the latest committed copy, which is byte-for-byte the file this feature builds.
 - Existing consumers depend on the canonical export file names and paths; those are preserved exactly.
 - Documentation that describes the archive contents and the parquet emission (including ADR-003) will be updated as a follow-up; this is tracked, not a blocking acceptance criterion.
 - Reused archived documents are the anonymized copies that the feature ships in the archive: on re-runs, e-mail and phone fields in the local corpus may therefore carry anonymized tokens for reused projects and raw values for freshly extracted ones, which is acceptable because the consumers of these documents do not use contact fields.

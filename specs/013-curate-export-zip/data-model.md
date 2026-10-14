@@ -9,6 +9,11 @@ per-document state transitions the feature introduces.
 
 The single versioned deliverable written by `zip_exports_task(output_dir)`.
 
+**Delivery (2026-10-14)**: the weekly workflow (feature 003) commits this file
+to the repository when it changed and stops publishing it as a downloadable CI
+artifact. The committed archive is byte-for-byte the output below — it MUST NOT
+be a nested wrapper (no member named `exports_canonical.zip` inside it).
+
 ### Contents manifest
 
 | Entry kind | Source | Treatment |

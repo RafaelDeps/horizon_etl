@@ -74,8 +74,9 @@ Expected member list: `initiatives_canonical.json` and
 the fallback path; the reuse path itself makes no API calls)
 
 ```sh
-# 1) restore last week's artifact so the export folder has an archive with
-#    project_sigpesq_files_json/ inside it
+# 1) the archive lives in the export folder and is committed, so after a
+#    checkout it is already present with project_sigpesq_files_json/ inside it
+test -f data/exports/exports_canonical.zip && echo "archive present"
 # 2) remove a couple of local JSONs to make those PDFs "pending"
 rm data/exports/project_sigpesq_files_json/PJ_9760.json
 
