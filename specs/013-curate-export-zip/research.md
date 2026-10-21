@@ -100,11 +100,12 @@ malformed entry, or unreadable archive → normal extraction for that project.
 
 **Timing note**: within one weekly run, the archive is written by
 `export_canonical`, which runs *after* `extract_project_files` — so the reuse
-step always consults the **previous** run's archive (or none on a fresh
-runner). This matches the spec's "latest export archive" wording; the weekly
-db-reset does not wipe `data/`, so local JSONs persist and reuse mainly
-benefits fresh/restored environments — exactly the scenario the user asked
-for.
+step always consults the **previous** run's archive. As of 2026-10-14 that
+archive is committed to the repository by the workflow (feature 003), so a
+fresh CI runner has it available immediately after checkout; the weekly
+`db-reset` does not wipe `data/`. Reuse therefore benefits both persistent
+local environments and fresh/restored runners — exactly the scenario the user
+asked for.
 
 **Alternatives considered**:
 - *Mark reused files* (e.g. inject `_meta.fonte_texto = "archive"`): rejected
@@ -138,8 +139,10 @@ suite stays in the fast CI lane.
 flow; script + manual invocation remain; dashboard keeps consuming the JSON
 mirror of `src/data` as before — unaffected because the dashboard build reads
 its own repo copies, not the ETL archive). Add a short zip-contents note to
-`docs/outputs-and-artifacts.md`. No other docs reference the archive
-contents.
+`docs/outputs-and-artifacts.md`. Update `docs/operations/automation.md` for the
+2026-10-14 delivery change (the workflow commits `exports_canonical.zip` when it
+changed and no longer publishes it as a downloadable artifact). No other docs
+reference the archive contents.
 
 **Rationale**: ADR-003 explicitly states the parquet lives "dentro do zip" —
 leaving it unamended would make the record false after this feature.
