@@ -24,7 +24,13 @@ dependencies = [
     "rapidfuzz>=3.0.0",
     "python-Levenshtein>=0.25.0",
     "python-dotenv>=1.0.0",
-    "sigpesq-agent @ git+https://github.com/RafaelDeps/sigpesq_agent.git@75811f972ace27b32578975d93f67fcb14811aca",
+    # agent_sigpesq: repositorio oficial do ifesserra-lab, branch main (que ja
+    # mergeou a feat/project-pdf-download-and-mistral-extraction). O nome da
+    # distribuicao e "agent_sigpesq" -- "sigpesq-agent" faz o pip recusar a
+    # instalacao ("inconsistent name: expected 'sigpesq-agent', but metadata has
+    # 'agent-sigpesq'"). O extra [extract] traz mistralai e pypdf, exigidos
+    # pela extracao PDF->JSON dos documentos de projeto.
+    "agent-sigpesq[extract] @ git+https://github.com/ifesserra-lab/sigpesq_agent.git@main",
     "dgp-cnpq-lib @ git+https://github.com/ifesserra-lab/dgp.cnqp_lib.git@v0.5.0",
     "scriptLattes @ git+https://github.com/ifesserra-lab/scriptLattes.git@v0.8.0",
     "selenium>=4.0.0",

@@ -105,7 +105,8 @@ _DISCOVER_JS = """(args) => {
 }"""
 
 
-AGENT_SIGPESQ_SHA = "75811f972ace27b32578975d93f67fcb14811aca"
+AGENT_SIGPESQ_URL = "git+https://github.com/ifesserra-lab/sigpesq_agent.git"
+AGENT_SIGPESQ_REF = "main"
 
 # The branch that adds the project-file download did NOT bump the package
 # version: it is still 0.3.2, same as the release it supersedes. So on a machine
@@ -120,12 +121,11 @@ EXTRACTION_DEPS = '"mistralai>=1.9,<2" "pypdf>=4"'
 # that second line out is exactly how the first version of this message sent
 # someone straight into "No module named 'mistralai'".
 _REINSTALL_STEPS = (
-    "  .venv/bin/pip install --force-reinstall --no-deps \\\n"
-    '    "agent_sigpesq[extract] @ git+https://github.com/RafaelDeps/'
-    f'sigpesq_agent.git@{AGENT_SIGPESQ_SHA}"\n'
+    "  .venv/bin/python -m pip install --force-reinstall --no-deps \\\n"
+    f'    "agent_sigpesq[extract] @ {AGENT_SIGPESQ_URL}@{AGENT_SIGPESQ_REF}"\n'
     "\n"
     "  # --no-deps skips the extras, so install them too:\n"
-    f"  .venv/bin/pip install {EXTRACTION_DEPS}\n"
+    f"  .venv/bin/python -m pip install {EXTRACTION_DEPS}\n"
 )
 
 STALE_LIBRARY_HELP = (
