@@ -50,64 +50,65 @@ from loguru import logger
 # openalex_citacoes.json produced upstream) and is ordered internally so each report's
 # inputs exist: fetch_openalex -> rank -> {maturity, venues, impacto, ppp}.
 _PHASES = [
-    ("sigpesq", ["sigpesq"], 3600, True, "app"),
-    ("cnpq", ["cnpq_sync"], 10800, False, "app"),
-    ("lattes_download", ["lattes_download"], 5400, False, "app"),
-    ("lattes_projects", ["ingest_lattes_projects"], 3600, False, "app"),
-    # 3600s, not 1800s: measured runs sit at 1350-1741s against the old 1800s
-    # ceiling -- one of them cleared it by 59 seconds. The phase walks 112 Lattes
-    # CVs sequentially, so the margin shrinks as the institute grows, and a
-    # slower machine already times out. Raising the ceiling buys room; the real
-    # fix is to parallelise the loop (see docs/backlog.md TD-007).
-    ("lattes_advisorships", ["lattes_advisorships"], 3600, False, "app"),
+    ("sigpesq", ["sigpesq"], 36000, True, "app"),
+    ("cnpq", ["cnpq_sync"], 108000, False, "app"),
+    ("lattes_download", ["lattes_download"], 54000, False, "app"),
+    ("lattes_projects", ["ingest_lattes_projects"], 108000, False, "app"),
+    # Every ceiling in this table was multiplied by 10 on 2026-10-21 so a full
+    # local run can finish and every phase gets measured end to end. With ~435
+    # Lattes CVs, lattes_advisorships ran past its previous 10800s ceiling
+    # (CV 352/435 at 145 min, slowing down per CV). These are not tuned
+    # budgets: the phases reload whole tables per record (see
+    # TeamSynchronizer.ensure_team), so their cost grows faster than the CV count.
+    ("lattes_advisorships", ["lattes_advisorships"], 108000, False, "app"),
     (
         "extract_project_files",
         ["extract_project_files"],
-        7200,
+        72000,
         False,
         "app",
     ),
-    ("enrich_projects", ["enrich_projects"], 900, False, "app"),
+    ("enrich_projects", ["enrich_projects"], 9000, False, "app"),
     # consolidate_duplicates merges the observed same-person pairs after all
     # source phases loaded and before export_canonical, so the canonical export
     # and downstream marts see exactly one record per person (contract R6-R14).
-    ("consolidate_duplicates", ["consolidate_duplicates"], 900, False, "app"),
-    ("export_canonical", ["export_canonical"], 1800, True, "app"),
-    ("knowledge_areas_mart", ["ka_mart"], 900, False, "app"),
-    ("initiatives_analytics_mart", ["analytics_mart"], 900, False, "app"),
-    ("people_relationship_graph", ["people_graph"], 1800, False, "app"),
+    ("consolidate_duplicates", ["consolidate_duplicates"], 9000, False, "app"),
+    ("export_canonical", ["export_canonical"], 18000, True, "app"),
+    ("knowledge_areas_mart", ["ka_mart"], 9000, False, "app"),
+    ("initiatives_analytics_mart", ["analytics_mart"], 9000, False, "app"),
+    ("people_relationship_graph", ["people_graph"], 18000, False, "app"),
     # --- docentes / OpenAlex analytics (read-only wrt DB; run as modules) ---
     (
         "openalex_citations",
         ["src.scripts.fetch_openalex_citations"],
-        3600,
+        36000,
         False,
         "module",
     ),
     (
         "rank_docentes_impact",
         ["src.scripts.rank_docentes_impact"],
-        600,
+        6000,
         False,
         "module",
     ),
-    ("analyze_maturity", ["src.scripts.analyze_maturity"], 900, False, "module"),
-    ("analyze_venues", ["src.scripts.analyze_venues"], 1800, False, "module"),
+    ("analyze_maturity", ["src.scripts.analyze_maturity"], 9000, False, "module"),
+    ("analyze_venues", ["src.scripts.analyze_venues"], 18000, False, "module"),
     (
         "impacto_dashboard",
         ["src.scripts.generate_impacto_dashboard"],
-        900,
+        9000,
         False,
         "module",
     ),
     (
         "ppp_edital_report",
         ["src.scripts.generate_ppp_edital_report"],
-        900,
+        9000,
         False,
         "module",
     ),
-    ("anonymize_backfill", ["anonymize_backfill"], 1800, True, "app"),
+    ("anonymize_backfill", ["anonymize_backfill"], 18000, True, "app"),
 ]
 
 
