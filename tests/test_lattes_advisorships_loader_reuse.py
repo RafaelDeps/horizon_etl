@@ -5,6 +5,8 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from prefect.utilities.annotations import quote
+
 from src.core.logic.strategies.lattes_advisorships import (
     LattesAdvisorshipMappingStrategy,
 )
@@ -29,6 +31,13 @@ def _resolve(index, lattes_id, json_name, session):
     return SimpleNamespace(id=int(lattes_id[0]), name=SUPERVISORS[lattes_id])
 
 
+_TASK_FN = module.ingest_advisorships_file_task.fn
+
+
+def _task_body(*args):
+    return _TASK_FN(*(a.unquote() if isinstance(a, quote) else a for a in args))
+
+
 def _patches():
     return (
         patch.object(module, "ProjectLoader"),
@@ -40,12 +49,9 @@ def _patches():
         patch.object(
             module.tracking_recorder, "run_context", return_value=nullcontext()
         ),
-        # Run the task body directly, without the Prefect engine.
-        patch.object(
-            module,
-            "ingest_advisorships_file_task",
-            module.ingest_advisorships_file_task.fn,
-        ),
+        # Run the task body directly, without the Prefect engine, unwrapping
+        # quote()d arguments the way Prefect does before calling the task.
+        patch.object(module, "ingest_advisorships_file_task", _task_body),
     )
 
 

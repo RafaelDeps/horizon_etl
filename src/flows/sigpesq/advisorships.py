@@ -82,6 +82,7 @@ def persist_advisorships():
         # Final pass: Recalculate parent project dates and status from DB
         loader.recalculate_all_parent_statuses()
     loader.team_synchronizer.log_lookup_summary("sigpesq_advisorships")
+    loader.person_matcher.log_match_summary("sigpesq_advisorships")
 
 
 @flow(name="Ingest SigPesq Advisorships", **telegram_flow_state_handlers())

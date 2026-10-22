@@ -106,6 +106,26 @@ DEBUG never reaches the weekly log:
 Lattes lattes_advisorships CV 214/435 lattes_id=1854684270507362 took 1.8s
 ```
 
+Spec 016 adds two more summary lines. Each loader logs one person-matching line
+(`sigpesq_projects`, `sigpesq_advisorships`, `lattes_projects`,
+`lattes_advisorships`), and each Lattes phase logs one researcher-resolution
+line:
+
+```text
+Person matching [lattes_projects]: email=0 canonical=11427 exact=190 normalised=7 invariant=49 fuzzy=86 strict_rejected=177 created=3504 create_failed=0
+Researcher resolution [lattes_projects]: lookups=1504 tier200=0 tier150=476 tier100=52 tier90=9 unresolved=967
+```
+
+| Counter | Meaning |
+|---|---|
+| `email` / `canonical` / `exact` / `normalised` / `invariant` / `fuzzy` | Persons found at each matching step, in that order |
+| `strict_rejected` | Fuzzy candidates refused because the caller asked for an exact match (score below 100) |
+| `created` / `create_failed` | Persons created because nothing matched, and creations that raised an error |
+| `lookups` / `tier200`..`tier90` / `unresolved` | Researcher name resolutions, and which score tier the winner reached (identification, exact name, normalised name, particle-invariant name) |
+
+`lattes_advisorships` resolves the CV owner by Lattes ID, not by name, so its
+researcher-resolution line shows zeros.
+
 To check that per-CV cost stays flat (SC-003 in
 `specs/015-team-lookup-index/spec.md`), compare the mean of the first and the
 last 50 such lines of a phase. The ratio should stay at or below 1.5.

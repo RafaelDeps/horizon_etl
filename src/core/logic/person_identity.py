@@ -1,4 +1,5 @@
 import unicodedata
+from functools import lru_cache
 from typing import Any
 
 _PARTICLES = frozenset(
@@ -40,7 +41,23 @@ def normalize_participant_name(
     """
     if name is None:
         return ""
-    text = unicodedata.normalize("NFD", str(name))
+    return _normalize_participant_text(
+        str(name), canonical_particles, canonical_suffixes, drop_particles
+    )
+
+
+# The key is a pure function of (text, flags), and name matching asks for the
+# same names again and again: resolve_researcher_by_name re-normalised every
+# researcher (~7.6k) on every lookup (spec 016). Each phase runs in its own
+# subprocess, so the cache never outlives a phase.
+@lru_cache(maxsize=262_144)
+def _normalize_participant_text(
+    name: str,
+    canonical_particles: bool,
+    canonical_suffixes: bool,
+    drop_particles: bool,
+) -> str:
+    text = unicodedata.normalize("NFD", name)
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
     text = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
     tokens = text.upper().split()

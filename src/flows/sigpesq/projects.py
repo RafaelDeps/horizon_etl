@@ -48,6 +48,7 @@ def persist_projects():
     ):
         loader.process_file(latest_file)
     loader.team_synchronizer.log_lookup_summary("sigpesq_projects")
+    loader.person_matcher.log_match_summary("sigpesq_projects")
 
 
 @flow(name="Ingest SigPesq Projects", **telegram_flow_state_handlers())

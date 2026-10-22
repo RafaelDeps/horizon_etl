@@ -212,7 +212,11 @@ Mapping Epics -> User Stories -> Tasks status.
   lookup. Together they are ~88% of what remains in the Lattes phases (33 and
   48 min). Same fix pattern as TD-012: pre-compute normalised keys once. Fold in
   the Prefect `quote()` change for large task parameters (spec 015 task T023,
-  ~5%). Status: Ready (next spec).
+  ~5%). Status: **Fixed** by spec 016 (name index in `PersonMatcher`,
+  memoised name key, `quote()`). Replays were identical. Full run 3 h 01 → 2 h 09;
+  Lattes phases 33.1 → 22.8 and 48.5 → 27.9 min on disk (9.9 and 13.8 on tmpfs).
+  See `docs/reports/2026-10-22-name-matching-validation.md`. The 20-minute
+  targets were not reached on disk; see TD-018.
 - **TD-014 — CNPq phase**: fix TD-008 (researcher `get_all()` per group) and
   fetch groups concurrently: 4 workers, previously tested by the maintainer; a
   single SQLite writer; `dgp_cnpq_lib` called as-is. Add retry and back-off on
@@ -224,3 +228,21 @@ Mapping Epics -> User Stories -> Tasks status.
 - **TD-016 — `lazy="joined"` on `Team.members` / `TeamMember.person` (`eo_lib`)**:
   the root cause of TD-012 on the library side, in the style of TD-009. Worth
   reporting upstream; the ETL no longer depends on it. Status: Ready (upstream).
+
+## Follow-ups — origin: `specs/016-name-matching-index` (2026-10-22)
+
+- **TD-017 — `RAPIDFUZZ_IMPLEMENTATION=fallback` is not a valid rapidfuzz value**:
+  rapidfuzz 3.14.5 recognises only `cpp` and `python`; any other value takes the
+  default branch, which loads the AVX2 build. The workaround added to
+  `.github/workflows/weekly-etl.yml` by commit `e0d137e` ("disable rapidfuzz
+  AVX2 SIMD to prevent segfault in CI") therefore probably has no effect. Fix
+  options: `cpp` (which tries AVX2 first, so it would not avoid AVX2 either),
+  `python` (pure Python, much slower fuzzy), or another way to force SSE2. Needs
+  the maintainer's decision given the segfault history. Status: Ready (decision).
+- **TD-018 — SQLite commit latency dominates the remaining Lattes time**: the same
+  CVs took ~2.1× longer in the full run (`db/horizon.db` on NVMe ext4) than in
+  the replay (tmpfs). A commit costs 3.3 ms vs 0.056 ms, and ingestion commits per
+  record. Candidate ETL-side fix: `PRAGMA journal_mode=WAL` +
+  `synchronous=NORMAL` via a SQLAlchemy `connect` event. Check that the final
+  database is complete for the CI artifact upload (WAL checkpoint on close) and
+  that no other process reads the file mid-run. Status: Ready.

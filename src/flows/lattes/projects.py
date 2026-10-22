@@ -13,6 +13,7 @@ from eo_lib import InitiativeController, PersonController, TeamController
 from loguru import logger
 from prefect import flow, task
 from prefect.cache_policies import NO_CACHE
+from prefect.utilities.annotations import quote
 from research_domain.controllers import (
     AcademicEducationController,
     ArticleController,
@@ -32,6 +33,7 @@ from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
     ResearcherRef,
     load_researcher_index,
+    log_researcher_resolution_summary,
     resolve_or_create_researcher,
     resolve_researcher_from_lattes,
     sync_researcher_ref,
@@ -940,8 +942,14 @@ def ingest_lattes_projects_flow():
     ):
         for position, json_file in enumerate(json_files, start=1):
             started = time.perf_counter()
+            # quote(): Prefect would otherwise walk these large objects (the
+            # ~7.6k-entry researcher index above all) on every task call.
             ingest_researcher_data(
-                json_file, entity_manager, parser, researcher_index, project_loader
+                json_file,
+                quote(entity_manager),
+                quote(parser),
+                quote(researcher_index),
+                quote(project_loader),
             )
             # The ORM sessions accumulate every entity created for all 125 CV
             # files in their identity maps; merely committing (done inside the
@@ -955,6 +963,8 @@ def ingest_lattes_projects_flow():
                 "lattes_projects", position, len(json_files), json_file, started
             )
     project_loader.team_synchronizer.log_lookup_summary("lattes_projects")
+    project_loader.person_matcher.log_match_summary("lattes_projects")
+    log_researcher_resolution_summary("lattes_projects")
 
 
 if __name__ == "__main__":

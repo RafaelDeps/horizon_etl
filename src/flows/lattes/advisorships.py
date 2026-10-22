@@ -7,6 +7,7 @@ from typing import List, Optional
 from loguru import logger as fallback_logger
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
+from prefect.utilities.annotations import quote
 from research_domain.controllers import ResearcherController
 
 from src.adapters.sources.lattes_parser import LattesParser
@@ -14,6 +15,7 @@ from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
     ResearcherRef,
     load_researcher_index,
+    log_researcher_resolution_summary,
     resolve_researcher_from_lattes,
 )
 from src.core.logic.strategies.lattes_advisorships import (
@@ -134,11 +136,15 @@ def ingest_lattes_advisorships_flow():
     ):
         for position, json_file in enumerate(json_files, start=1):
             started = time.perf_counter()
-            ingest_advisorships_file_task(json_file, researcher_index, project_loader)
+            ingest_advisorships_file_task(
+                json_file, quote(researcher_index), quote(project_loader)
+            )
             log_cv_duration(
                 "lattes_advisorships", position, len(json_files), json_file, started
             )
     project_loader.team_synchronizer.log_lookup_summary("lattes_advisorships")
+    project_loader.person_matcher.log_match_summary("lattes_advisorships")
+    log_researcher_resolution_summary("lattes_advisorships")
 
 
 if __name__ == "__main__":

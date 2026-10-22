@@ -174,13 +174,56 @@ def resolve_researcher_from_lattes(
     return best
 
 
+_RESOLUTION_COUNTERS = dict.fromkeys(
+    ("lookups", "tier200", "tier150", "tier100", "tier90", "unresolved"), 0
+)
+
+
+def log_researcher_resolution_summary(label: str) -> None:
+    """One INFO line per phase (spec 016, FR-015); counters restart afterwards."""
+    c = _RESOLUTION_COUNTERS
+    logger.info(
+        f"Researcher resolution [{label}]: lookups={c['lookups']} "
+        f"tier200={c['tier200']} tier150={c['tier150']} tier100={c['tier100']} "
+        f"tier90={c['tier90']} unresolved={c['unresolved']}"
+    )
+    for key in c:
+        c[key] = 0
+
+
+def _count_resolution(
+    best: Optional[Any], name: str, identification_id: Optional[str]
+) -> None:
+    """Records the tier of the winner only; the scoring loop stays untouched."""
+    if best is None:
+        _RESOLUTION_COUNTERS["unresolved"] += 1
+        return
+    res_name = getattr(best, "name", None) or ""
+    res_identification = getattr(best, "identification_id", None) or ""
+    if (
+        identification_id
+        and res_identification
+        and str(res_identification).casefold() == str(identification_id).casefold()
+    ):
+        tier = "tier200"
+    elif res_name and res_name.casefold() == name.casefold():
+        tier = "tier150"
+    elif normalize_participant_name(res_name) == normalize_participant_name(name):
+        tier = "tier100"
+    else:
+        tier = "tier90"
+    _RESOLUTION_COUNTERS[tier] += 1
+
+
 def resolve_researcher_by_name(
     all_researchers: Iterable[Any],
     *,
     name: Optional[str],
     identification_id: Optional[str] = None,
 ) -> Optional[Any]:
+    _RESOLUTION_COUNTERS["lookups"] += 1
     if not name:
+        _RESOLUTION_COUNTERS["unresolved"] += 1
         return None
 
     target_norm = normalize_participant_name(name)
@@ -213,7 +256,9 @@ def resolve_researcher_by_name(
             best = researcher
             best_score = score
 
-    return best if best_score > 0 else None
+    result = best if best_score > 0 else None
+    _count_resolution(result, name, identification_id)
+    return result
 
 
 def resolve_or_create_researcher(
