@@ -1,9 +1,40 @@
-from typing import Any, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from eo_lib import TeamController
 from loguru import logger
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from src.core.logic.initiative_identity import normalize_text
+
+_ALL_TEAMS_SQL = text("SELECT id, name FROM teams ORDER BY id")
+_TEAMS_AFTER_SQL = text("SELECT id, name FROM teams WHERE id > :max_id ORDER BY id")
+
+
+@dataclass(frozen=True)
+class TeamRef:
+    """What ensure_team returns: the team's id and stored name, nothing else.
+
+    Callers only use ``id`` (InitiativeLinker, synchronize_members). Holding ORM
+    Team entities for ~11k teams would keep them, and their eagerly joined
+    members, alive in the session's identity map.
+    """
+
+    id: int
+    name: str
+
+
+def _team_name(team: Any) -> str:
+    if hasattr(team, "name"):
+        return team.name or ""
+    if isinstance(team, dict):
+        return team.get("name") or ""
+    return ""
+
+
+def _team_id(team: Any) -> Any:
+    return team.get("id") if isinstance(team, dict) else getattr(team, "id", None)
 
 
 class TeamSynchronizer:
@@ -25,38 +56,121 @@ class TeamSynchronizer:
         self.team_controller = team_controller
         self.roles_cache = roles_cache
 
-    def ensure_team(self, team_name: str, description: str) -> Optional[Any]:
+        # Team lookup (spec 015), built on the first ensure_team call. It used
+        # to call team_controller.get_all() per record: eo_lib joins every
+        # team's members, persons and roles eagerly, ~3.7M objects and 1.5-1.9 s
+        # per call at ~10.6k teams, which made the Lattes phases quadratic.
+        self._by_key: Dict[str, TeamRef] = {}
+        self._max_id = 0
+        self._loaded = False
+        self._mode: Optional[str] = None  # "sql" or "controller"
+        self._stats = {
+            "loaded": 0,
+            "hits": 0,
+            "created": 0,
+            "refreshes": 0,
+            "refresh_found": 0,
+            "failed": 0,
+        }
+
+    def _session(self) -> Optional[Session]:
+        try:
+            session = self.team_controller._service._repository._session
+        except AttributeError:
+            return None
+        # A MagicMock controller (tests) answers any attribute chain; only a
+        # real session can run SQL.
+        return session if isinstance(session, Session) else None
+
+    def _merge(self, rows: Iterable[Tuple[int, Optional[str]]]) -> int:
+        """Merges (id, name) rows in ascending id; the lowest id keeps its key."""
+        merged = 0
+        for team_id, name in rows:
+            ref = TeamRef(team_id, name or "")
+            self._by_key.setdefault(normalize_text(ref.name), ref)
+            self._max_id = max(self._max_id, team_id)
+            merged += 1
+        return merged
+
+    def _load(self) -> None:
+        session = self._session()
+        if session is not None:
+            self._mode = "sql"
+            rows = session.execute(_ALL_TEAMS_SQL).fetchall()
+        else:
+            self._mode = "controller"
+            teams = [
+                t for t in self.team_controller.get_all() if _team_id(t) is not None
+            ]
+            rows = sorted(
+                ((_team_id(t), _team_name(t)) for t in teams), key=lambda r: r[0]
+            )
+        self._stats["loaded"] = self._merge(rows)
+        self._loaded = True
+
+    def _refresh(self) -> int:
+        """Merges teams created since the last read (by any code in this process)."""
+        if self._mode != "sql":
+            return 0
+        self._stats["refreshes"] += 1
+        rows = (
+            self._session()
+            .execute(_TEAMS_AFTER_SQL, {"max_id": self._max_id})
+            .fetchall()
+        )
+        return self._merge(rows)
+
+    def ensure_team(self, team_name: str, description: str) -> Optional[TeamRef]:
         """
         Ensures a team exists with the given name. If not, creates it.
+
+        Matches the lowest-id team whose normalized name equals the requested
+        one, the same answer the old full scan gave.
 
         Args:
             team_name (str): The name of the team.
             description (str): Description for the team if creation is needed.
 
         Returns:
-            Optional[Any]: The existing or newly created Team object, or None if error.
+            Optional[TeamRef]: The existing or newly created team, or None if error.
         """
         try:
-            existing_teams = self.team_controller.get_all()
-            team_name_key = normalize_text(team_name)
-            for t in existing_teams:
-                t_name = (
-                    t.name
-                    if hasattr(t, "name")
-                    else (t.get("name") if isinstance(t, dict) else "")
-                )
-                if t_name == team_name or normalize_text(t_name) == team_name_key:
-                    logger.debug(f"Team already exists: {team_name[:50]}...")
-                    return t
+            if not self._loaded:
+                self._load()
+
+            key = normalize_text(team_name)
+            ref = self._by_key.get(key)
+            if ref is not None:
+                self._stats["hits"] += 1
+                return ref
+
+            if self._refresh():
+                ref = self._by_key.get(key)
+                if ref is not None:
+                    self._stats["refresh_found"] += 1
+                    return ref
 
             team = self.team_controller.create_team(
                 name=team_name, description=description
             )
             logger.info(f"Created team: {team_name[:50]}...")
-            return team
+            ref = TeamRef(team.id, _team_name(team))
+            self._by_key.setdefault(key, ref)
+            self._max_id = max(self._max_id, ref.id)
+            self._stats["created"] += 1
+            return ref
         except Exception as e:
+            self._stats["failed"] += 1
             logger.warning(f"Failed to manage team '{team_name[:50]}': {e}")
             return None
+
+    def log_lookup_summary(self, label: str) -> None:
+        s = self._stats
+        logger.info(
+            f"Team lookup [{label}]: loaded={s['loaded']} hits={s['hits']} "
+            f"created={s['created']} refreshes={s['refreshes']} "
+            f"refresh_found={s['refresh_found']} failed={s['failed']}"
+        )
 
     def synchronize_members(
         self, team_id: int, members_to_sync: List[Tuple[Any, str, Optional[Any]]]

@@ -1,7 +1,8 @@
 import glob
 import json
 import os
-from typing import List
+import time
+from typing import List, Optional
 
 from loguru import logger as fallback_logger
 from prefect import flow, get_run_logger, task
@@ -18,13 +19,16 @@ from src.core.logic.researcher_resolution import (
 from src.core.logic.strategies.lattes_advisorships import (
     LattesAdvisorshipMappingStrategy,
 )
+from src.flows.lattes.cv_timing import log_cv_duration
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
 
 @task(name="Ingest Lattes Advisorships for File", cache_policy=NO_CACHE)
 def ingest_advisorships_file_task(
-    file_path: str, researcher_index: List[ResearcherRef]
+    file_path: str,
+    researcher_index: List[ResearcherRef],
+    project_loader: Optional[ProjectLoader] = None,
 ):
     try:
         logger = get_run_logger()
@@ -86,11 +90,17 @@ def ingest_advisorships_file_task(
 
     logger.info(f"Processing {len(advisorships)} advisorships for {json_name}...")
 
-    # 3. Ingest with Strategy & ProjectLoader
+    # 3. Ingest with Strategy & ProjectLoader. The flow passes one loader for
+    # the whole phase (its initiative/person caches and team lookup are built
+    # once); only the per-supervisor strategy changes between CVs, as in
+    # lattes/projects.py. Standalone callers still get a loader of their own.
     mapping_strategy = LattesAdvisorshipMappingStrategy(json_name)
-    loader = ProjectLoader(mapping_strategy=mapping_strategy)
+    if project_loader is None:
+        project_loader = ProjectLoader(mapping_strategy=mapping_strategy)
+    else:
+        project_loader.mapping_strategy = mapping_strategy
 
-    loader.process_records(advisorships, source_file=file_path)
+    project_loader.process_records(advisorships, source_file=file_path)
 
 
 @flow(name="Ingest Lattes Advisorships Flow", **telegram_flow_state_handlers())
@@ -115,11 +125,20 @@ def ingest_lattes_advisorships_flow():
     researcher_index = load_researcher_index(session)
     logger.info(f"Researcher index loaded with {len(researcher_index)} entries")
 
+    # Um loader por fase: montá-lo por currículo recarregava todas as
+    # iniciativas e pessoas a cada um dos ~435 CVs (spec 015).
+    project_loader = ProjectLoader(mapping_strategy=None)
+
     with tracking_recorder.run_context(
         source_system="lattes_advisorships", flow_name="lattes_advisorships"
     ):
-        for json_file in json_files:
-            ingest_advisorships_file_task(json_file, researcher_index)
+        for position, json_file in enumerate(json_files, start=1):
+            started = time.perf_counter()
+            ingest_advisorships_file_task(json_file, researcher_index, project_loader)
+            log_cv_duration(
+                "lattes_advisorships", position, len(json_files), json_file, started
+            )
+    project_loader.team_synchronizer.log_lookup_summary("lattes_advisorships")
 
 
 if __name__ == "__main__":

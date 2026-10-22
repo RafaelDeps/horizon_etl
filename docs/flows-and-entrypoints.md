@@ -73,6 +73,43 @@ ausentes no cache bruto `cache/`. O padrao usa 3 workers para reduzir o tempo de
 download sem abrir muitas sessoes do Chrome de uma vez. Ajuste com
 `HORIZON_LATTES_DOWNLOAD_WORKERS`; desative com `HORIZON_LATTES_PREFETCH=0`.
 
+### Team lookup and per-CV timing logs (spec 015)
+
+Team matching (`TeamSynchronizer.ensure_team`) reads `teams(id, name)` once per
+loader and answers each record from memory. On a miss it first reads only the
+teams created since its last read (for example research groups created by
+another loader), and only then creates a team.
+
+At the end of each loader's work, one INFO line summarises the lookup:
+
+```text
+Team lookup [lattes_advisorships]: loaded=3941 hits=1862 created=7844 refreshes=7844 refresh_found=0 failed=0
+```
+
+| Counter | Meaning |
+|---|---|
+| `loaded` | Teams read when the lookup was built |
+| `hits` | Records answered from the lookup with no query |
+| `created` | Teams created because no team matched |
+| `refreshes` | Incremental reads (`id > last seen id`) made on misses |
+| `refresh_found` | Misses answered by those reads: teams created by other code during the phase |
+| `failed` | `ensure_team` calls that failed (the record gets no team; see the WARNING line) |
+
+There are four labels per weekly run: `sigpesq_projects`,
+`sigpesq_advisorships`, `lattes_projects` and `lattes_advisorships`.
+
+In `lattes_projects` and `lattes_advisorships`, every CV also logs its duration
+at INFO. INFO is used because `dgp_cnpq_lib` resets the loguru level to INFO, so
+DEBUG never reaches the weekly log:
+
+```text
+Lattes lattes_advisorships CV 214/435 lattes_id=1854684270507362 took 1.8s
+```
+
+To check that per-CV cost stays flat (SC-003 in
+`specs/015-team-lookup-index/spec.md`), compare the mean of the first and the
+last 50 such lines of a phase. The ratio should stay at or below 1.5.
+
 ## Fluxos legados
 
 Alguns alvos ainda existem para casos especificos:

@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from src.core.logic.team_synchronizer import TeamSynchronizer
+from src.core.logic.team_synchronizer import TeamRef, TeamSynchronizer
 
 
 class MockTeam:
@@ -109,3 +109,97 @@ def test_sync_with_empty_member_list_removes_nothing():
     remaining = {(m.person_id, m.role_id) for m in team_controller.members}
     assert remaining == {(30, 1), (20, 2), (10, 3)}
     assert team_controller.removed_ids == []
+
+
+# --- Team lookup (spec 015): controller mode, i.e. no real SQLAlchemy session ---
+
+
+class LookupTeamController:
+    """Controller double without a SQLAlchemy session: forces controller mode."""
+
+    def __init__(self, teams, fail_on_create=False):
+        self.teams = list(teams)
+        self.fail_on_create = fail_on_create
+        self.get_all_calls = 0
+        self.created = []
+        self.next_id = 100
+
+    def get_all(self):
+        self.get_all_calls += 1
+        return list(self.teams)
+
+    def create_team(self, name, description):
+        if self.fail_on_create:
+            raise RuntimeError("db is down")
+        team = MockTeam(self.next_id, name)
+        self.next_id += 1
+        self.created.append((name, description))
+        self.teams.append(team)
+        return team
+
+
+def test_ensure_team_exact_hit_returns_team_ref_without_creating():
+    controller = LookupTeamController([MockTeam(1, "Projeto Alfa")])
+    synchronizer = TeamSynchronizer(controller, roles_cache={})
+
+    team = synchronizer.ensure_team("Projeto Alfa", "desc")
+
+    assert isinstance(team, TeamRef)
+    assert (team.id, team.name) == (1, "Projeto Alfa")
+    assert controller.created == []
+
+
+def test_ensure_team_normalised_hit():
+    controller = LookupTeamController([MockTeam(1, "Conecta FAPES")])
+    synchronizer = TeamSynchronizer(controller, roles_cache={})
+
+    assert synchronizer.ensure_team("Conecta Fapes", "desc").id == 1
+    assert synchronizer.ensure_team("conecta   fapes!", "desc").id == 1
+    assert controller.created == []
+
+
+def test_ensure_team_ties_resolve_to_lowest_id():
+    controller = LookupTeamController(
+        [MockTeam(7, "Projeto X"), MockTeam(3, "PROJETO X")]
+    )
+    synchronizer = TeamSynchronizer(controller, roles_cache={})
+
+    assert synchronizer.ensure_team("projeto x", "desc").id == 3
+    assert synchronizer.ensure_team("Projeto X", "desc").id == 3
+
+
+def test_ensure_team_creates_on_miss_and_finds_it_afterwards():
+    controller = LookupTeamController([MockTeam(1, "Outro")])
+    synchronizer = TeamSynchronizer(controller, roles_cache={})
+
+    created = synchronizer.ensure_team(
+        "Projeto Novo", "Equipe do projeto: Projeto Novo"
+    )
+    again = synchronizer.ensure_team("PROJETO NOVO", "Equipe do projeto: PROJETO NOVO")
+
+    assert controller.created == [("Projeto Novo", "Equipe do projeto: Projeto Novo")]
+    assert created.id == again.id == 100
+
+
+def test_ensure_team_failed_creation_leaves_lookup_unchanged():
+    controller = LookupTeamController([], fail_on_create=True)
+    synchronizer = TeamSynchronizer(controller, roles_cache={})
+
+    assert synchronizer.ensure_team("Projeto Z", "desc") is None
+
+    controller.fail_on_create = False
+    team = synchronizer.ensure_team("Projeto Z", "desc")
+    assert team is not None and team.id == 100
+    assert controller.created == [("Projeto Z", "desc")]
+
+
+def test_ensure_team_reads_the_register_once():
+    controller = LookupTeamController(
+        [MockTeam(i, f"Equipe {i}") for i in range(1, 30)]
+    )
+    synchronizer = TeamSynchronizer(controller, roles_cache={})
+
+    for i in range(50):
+        synchronizer.ensure_team(f"Equipe {i % 40}", "desc")
+
+    assert controller.get_all_calls == 1

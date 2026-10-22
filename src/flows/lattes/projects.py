@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List
 
 faulthandler.enable()
@@ -36,6 +37,7 @@ from src.core.logic.researcher_resolution import (
     sync_researcher_ref,
 )
 from src.core.logic.strategies.lattes_projects import LattesProjectMappingStrategy
+from src.flows.lattes.cv_timing import log_cv_duration
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
@@ -936,7 +938,8 @@ def ingest_lattes_projects_flow():
     with tracking_recorder.run_context(
         source_system="lattes_projects", flow_name="lattes_projects"
     ):
-        for json_file in json_files:
+        for position, json_file in enumerate(json_files, start=1):
+            started = time.perf_counter()
             ingest_researcher_data(
                 json_file, entity_manager, parser, researcher_index, project_loader
             )
@@ -948,6 +951,10 @@ def ingest_lattes_projects_flow():
             # loop. gc.collect() alone cannot reclaim identity-map-held objects.
             _expire_lattes_sessions(session)
             gc.collect()
+            log_cv_duration(
+                "lattes_projects", position, len(json_files), json_file, started
+            )
+    project_loader.team_synchronizer.log_lookup_summary("lattes_projects")
 
 
 if __name__ == "__main__":

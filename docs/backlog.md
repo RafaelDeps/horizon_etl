@@ -193,3 +193,34 @@ Mapping Epics -> User Stories -> Tasks status.
   `tests/test_team_synchronizer.py`. Note: a re-run of the weekly pipeline is
   required to restore Israel's BPM/Air Writing project memberships. Status: Fixed
   (needs re-run).
+
+## Follow-ups — origin: `specs/015-team-lookup-index` (2026-10-22)
+
+- **TD-012 — Team matching re-read the whole team register per record**:
+  `TeamSynchronizer.ensure_team` called `TeamController.get_all()` for every
+  project/advisorship record (eager joins of members, persons and roles: ~3.7M
+  objects, 1.5–1.9 s per call at ~10.6k teams) and re-normalised every name. It
+  made `lattes_projects` + `lattes_advisorships` take 333 of the 484 minutes of
+  the 2026-10-22 weekly run. Status: **Fixed** by spec 015 (lookup built once per
+  loader + one `ProjectLoader` per advisorships phase). Controlled replays were
+  identical. Full run 8 h 04 → 3 h 01; see
+  `docs/reports/2026-10-22-team-lookup-validation.md`.
+- **TD-013 — Person and researcher name matching re-normalise every name per
+  lookup**: on a miss, `PersonMatcher.match_or_create` re-normalises all ~17k
+  cached person names (and again for the fuzzy pass), and
+  `resolve_researcher_by_name` re-normalises all ~7.6k researcher names on every
+  lookup. Together they are ~88% of what remains in the Lattes phases (33 and
+  48 min). Same fix pattern as TD-012: pre-compute normalised keys once. Fold in
+  the Prefect `quote()` change for large task parameters (spec 015 task T023,
+  ~5%). Status: Ready (next spec).
+- **TD-014 — CNPq phase**: fix TD-008 (researcher `get_all()` per group) and
+  fetch groups concurrently: 4 workers, previously tested by the maintainer; a
+  single SQLite writer; `dgp_cnpq_lib` called as-is. Add retry and back-off on
+  `net::ERR_CONNECTION_RESET`: 85/350 groups failed that way in the 2026-10-22
+  validation run, after two back-to-back full crawls. Status: Ready.
+- **TD-015 — Phase ceilings still ×10**: `src/flows/pipelines/weekly_orchestrator.py`
+  carries temporary ×10 timeouts (up to 30 h for a phase). Bring them back to
+  ~3× the measured durations once TD-013/TD-014 land. Status: Ready.
+- **TD-016 — `lazy="joined"` on `Team.members` / `TeamMember.person` (`eo_lib`)**:
+  the root cause of TD-012 on the library side, in the style of TD-009. Worth
+  reporting upstream; the ETL no longer depends on it. Status: Ready (upstream).
