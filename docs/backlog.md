@@ -224,7 +224,10 @@ Mapping Epics -> User Stories -> Tasks status.
   validation run, after two back-to-back full crawls. Status: Ready.
 - **TD-015 — Phase ceilings still ×10**: `src/flows/pipelines/weekly_orchestrator.py`
   carries temporary ×10 timeouts (up to 30 h for a phase). Bring them back to
-  ~3× the measured durations once TD-013/TD-014 land. Status: Ready.
+  ~3× the measured durations once TD-013/TD-014 land. Status: **Fixed** (2026-10-23):
+  the ceilings are back to their original values (lattes phases 3600 s, cnpq
+  10800 s, …). With specs 015–017 the measured phases are well inside them
+  (spec 017 run: cnpq 28 min, lattes_projects 21 min, lattes_advisorships 25 min).
 - **TD-016 — `lazy="joined"` on `Team.members` / `TeamMember.person` (`eo_lib`)**:
   the root cause of TD-012 on the library side, in the style of TD-009. Worth
   reporting upstream; the ETL no longer depends on it. Status: Ready (upstream).
