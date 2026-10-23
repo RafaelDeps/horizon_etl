@@ -1,16 +1,27 @@
+import os
 import re
+import time
 from typing import Optional
 
 from dotenv import load_dotenv
+from loguru import logger as summary_logger
 from prefect import flow, get_run_logger, task
+from prefect.cache_policies import NO_CACHE
+from prefect.utilities.annotations import quote
 from research_domain import CampusController, ResearchGroupController
+from research_domain.controllers import ResearcherController
 
 from src.adapters.sources.cnpq_crawler import CnpqCrawlerAdapter, normalize_cnpq_url
+from src.core.logic.researcher_resolution import load_researcher_index
 from src.core.logic.strategies.cnpq_sync import CnpqSyncLogic
+from src.flows.cnpq.concurrent_fetch import fetch_all, resolve_workers
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
 load_dotenv()
+
+# Back-off sleep used by the concurrent fetcher; tests replace it.
+_SLEEP = time.sleep
 
 # O espelho do DGP resolve por um identificador de 16 dígitos. Das 345 URLs da
 # planilha do SigPesq, 344 seguem exatamente este formato; a exceção é digitação
@@ -97,10 +108,21 @@ def get_groups_to_sync(
     return {"valid": sync_list, "invalid": invalid_list}
 
 
-@task
-def sync_single_group(group_info: dict):
+# Distinguishes "the flow already fetched this group (maybe with no data)" from
+# "fetch it here", the original per-group behaviour kept for direct callers.
+_NOT_FETCHED = object()
+
+
+@task(cache_policy=NO_CACHE)
+def sync_single_group(
+    group_info: dict, data=_NOT_FETCHED, researcher_index: Optional[list] = None
+):
     """
     Synchronizes a single research group.
+
+    The flow fetches pages concurrently and passes each group's ``data`` here,
+    so every database write still happens in this task, one group at a time
+    (spec 017). Called with ``group_info`` alone, it fetches the page itself.
     """
     logger = get_run_logger()
     url = group_info["url"]
@@ -113,7 +135,8 @@ def sync_single_group(group_info: dict):
     sync_logic = CnpqSyncLogic()
 
     # 1. Extract data
-    data = adapter.get_group_data(url)
+    if data is _NOT_FETCHED:
+        data = adapter.get_group_data(url)
     if not data:
         logger.error(f"Failed to extract data for {group_name}")
         return {
@@ -163,7 +186,12 @@ def sync_single_group(group_info: dict):
     logger.info(
         f"Extracted {len(members)} members for {group_name}: {dict(roles_count)}"
     )
-    sync_logic.sync_members(group_id, members, source_file=url)
+    if researcher_index is None:
+        sync_logic.sync_members(group_id, members, source_file=url)
+    else:
+        sync_logic.sync_members(
+            group_id, members, source_file=url, researcher_index=researcher_index
+        )
 
     # 4. Extract and sync Research Lines (Knowledge Areas)
     lines = adapter.extract_research_lines(data)
@@ -249,13 +277,54 @@ def sync_cnpq_groups_flow(campus_name: Optional[str] = None):
     groups = to_sync["valid"]
     invalid_groups = to_sync["invalid"]
 
+    # Pages are fetched concurrently (the portal wait was 71% of the phase);
+    # every database write stays here, one group at a time, in the original
+    # order — SQLite allows a single writer (spec 017).
+    workers = resolve_workers(os.getenv("HORIZON_CNPQ_WORKERS"))
+
+    # One read of the researcher register per phase, not per group (TD-008):
+    # same researchers, same id order as ResearcherController().get_all().
+    CnpqSyncLogic.reset_researcher_counters()
+    session = None
+    try:
+        session = ResearcherController()._service._repository._session
+    except Exception:
+        logger.warning("Could not reach the DB session; researcher index is empty.")
+    researcher_index = load_researcher_index(session)
+    researcher_index_loaded = len(researcher_index)
+
     results = []
-    with tracking_recorder.run_context(
-        source_system="cnpq_sync", flow_name="cnpq_sync"
-    ):
-        for g_info in groups:
-            res = sync_single_group(g_info)
-            results.append(res)
+    outcomes = []
+    batch = fetch_all(groups, CnpqCrawlerAdapter, workers, sleep=_SLEEP)
+    try:
+        with tracking_recorder.run_context(
+            source_system="cnpq_sync", flow_name="cnpq_sync"
+        ):
+            for i, g_info in enumerate(groups):
+                outcome = batch.outcome(i)
+                outcomes.append(outcome)
+                # quote(): Prefect would otherwise walk the ~7.6k-entry index
+                # (and the payload) on every task call.
+                res = sync_single_group(
+                    g_info,
+                    data=quote(outcome.data),
+                    researcher_index=quote(researcher_index),
+                )
+                results.append(res)
+    finally:
+        batch.close()
+
+    counters = CnpqSyncLogic.researcher_counters
+    summary_logger.info(
+        f"CNPq fetch: workers={workers} "
+        f"fetched={sum(1 for o in outcomes if o.data)} "
+        f"retries={sum(o.attempts - 1 for o in outcomes)} "
+        f"failed_after_retries={sum(1 for o in outcomes if not o.data)} "
+        f"concurrency_reductions={batch.gate.reductions} "
+        f"researcher_index_loaded={researcher_index_loaded} "
+        f"researcher_hits={counters['hits']} "
+        f"researcher_created={counters['created']}"
+    )
 
     success_count = sum(1 for r in results if r.get("success"))
     summary = build_cnpq_sync_summary(results, invalid_groups)

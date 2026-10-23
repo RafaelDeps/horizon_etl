@@ -246,3 +246,20 @@ Mapping Epics -> User Stories -> Tasks status.
   `synchronous=NORMAL` via a SQLAlchemy `connect` event. Check that the final
   database is complete for the CI artifact upload (WAL checkpoint on close) and
   that no other process reads the file mid-run. Status: Ready.
+
+## Follow-ups — origin: `specs/017-cnpq-concurrent-sync` (2026-10-22)
+
+- **TD-008 (CNPq part) and TD-014 — Fixed** by spec 017. The CNPq phase fetches
+  group pages with 4 concurrent workers (`HORIZON_CNPQ_WORKERS`) through the
+  unchanged `dgp_cnpq_lib`, and writes them from a single writer in group order.
+  The researcher register is read once per phase. ETL-level retries (3 attempts,
+  30 s and 90 s) and a failure-burst rule protect the portal. Replays (N = 4 and
+  N = 1) were identical. Full run: CNPq 54.4 → 28.3 min; total 2 h 09 → 1 h 37.
+  See `docs/reports/2026-10-22-cnpq-concurrent-validation.md`.
+  `sigpesq_excel.py` still calls `get_all()` per researcher name (the other half
+  of TD-008); it was not measured as significant.
+- **TD-019 — Members without a start date get the run's timestamp**:
+  `CnpqSyncLogic.sync_members` stamps "now" when the DGP page has no start date
+  (913 memberships in the 2026-10-22 replay). Exports therefore differ between
+  runs, even with identical inputs. Decide whether `NULL`, or a stable value,
+  would be more correct. Status: Ready (decision).

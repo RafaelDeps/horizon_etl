@@ -130,6 +130,36 @@ To check that per-CV cost stays flat (SC-003 in
 `specs/015-team-lookup-index/spec.md`), compare the mean of the first and the
 last 50 such lines of a phase. The ratio should stay at or below 1.5.
 
+### CNPq concurrency (spec 017)
+
+The CNPq phase fetches group pages concurrently and writes them one at a time.
+SQLite allows a single writer, so every database write happens on the flow
+thread, in the original group order.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HORIZON_CNPQ_WORKERS` | `4` | Maximum simultaneous page fetches. `1` fetches sequentially. Invalid values fall back to 4 with a warning. |
+
+A group whose page returns no data is retried up to 3 times, waiting about 30 s
+and then 90 s, with the wait taken outside the fetch slots. If 4 failures happen
+within 60 s, the number of simultaneous fetches is halved (never below 1). It
+climbs back one step after 120 s without failures. Those changes are logged as
+`CNPq fetch: failures clustering, concurrency 4 → 2` and
+`CNPq fetch: portal calm, concurrency 2 → 3`.
+
+At the end of the phase:
+
+```text
+CNPq fetch: workers=4 fetched=350 retries=0 failed_after_retries=0 concurrency_reductions=0 researcher_index_loaded=525 researcher_hits=3772 researcher_created=6160
+```
+
+| Counter | Meaning |
+|---|---|
+| `fetched` / `failed_after_retries` | Groups with data, and groups still without data after every attempt. The latter are reported as `cnpq_group_sync_failed`. |
+| `retries` | Extra attempts beyond the first, summed over all groups |
+| `concurrency_reductions` | How many times a failure burst halved the concurrency |
+| `researcher_index_loaded` / `researcher_hits` / `researcher_created` | Researchers loaded once for the phase, members matched to them, and researchers created during the phase |
+
 ## Fluxos legados
 
 Alguns alvos ainda existem para casos especificos:

@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from research_domain import (
@@ -12,11 +12,22 @@ from research_domain import (
 from src.core.logic.researcher_resolution import resolve_or_create_researcher
 from src.tracking.recorder import tracking_recorder
 
+# Researcher matches during one CNPq phase run (spec 017, FR-011): "hits"
+# were already in the register, "created" were added during the phase.
+_RESEARCHER_COUNTERS = {"hits": 0, "created": 0}
+
 
 class CnpqSyncLogic:
     """
     Business logic for synchronizing CNPq data with the local database.
     """
+
+    researcher_counters = _RESEARCHER_COUNTERS
+
+    @staticmethod
+    def reset_researcher_counters() -> None:
+        _RESEARCHER_COUNTERS["hits"] = 0
+        _RESEARCHER_COUNTERS["created"] = 0
 
     def __init__(self):
         self.rg_ctrl = ResearchGroupController()
@@ -240,14 +251,22 @@ class CnpqSyncLogic:
         members_data: List[Dict[str, Any]],
         *,
         source_file: str | None = None,
+        researcher_index: Optional[list] = None,
     ):
         """
         Synchronizes members of a research group.
+
+        ``researcher_index`` is the phase-wide register view (ResearcherRef
+        list, same researchers and order as get_all()), loaded once by the flow.
+        Without it, the register is read here, once per group, as before.
         """
         from sqlalchemy import text
 
-        # Fetch all once to avoid N+1 and many session calls
-        all_res = self.res_ctrl.get_all()
+        if researcher_index is not None:
+            all_res = researcher_index
+        else:
+            # Fetch all once to avoid N+1 and many session calls
+            all_res = self.res_ctrl.get_all()
 
         for m_data in members_data:
             name = m_data.get("name")
@@ -265,11 +284,15 @@ class CnpqSyncLogic:
                 # 1. Ensure Researcher exists.
                 # identification_id must stay None: it is a CPF-like identity
                 # column, and storing a name hash there poisons future matching.
+                known = len(all_res)
                 researcher = resolve_or_create_researcher(
                     self.res_ctrl,
                     all_res,
                     name=name,
                 )
+                if researcher_index is not None and researcher:
+                    key = "created" if len(all_res) > known else "hits"
+                    _RESEARCHER_COUNTERS[key] += 1
 
                 if researcher:
                     logger.debug(
