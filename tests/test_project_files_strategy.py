@@ -261,12 +261,14 @@ def test_stale_library_message_hands_over_the_fix():
     command instead.
     """
     from src.adapters.sources.sigpesq.project_files_strategy import (
-        AGENT_SIGPESQ_SHA,
+        AGENT_SIGPESQ_REF,
+        AGENT_SIGPESQ_URL,
         STALE_LIBRARY_HELP,
     )
 
     assert "--force-reinstall" in STALE_LIBRARY_HELP
-    assert AGENT_SIGPESQ_SHA in STALE_LIBRARY_HELP, "must pin the exact commit"
+    assert AGENT_SIGPESQ_REF in STALE_LIBRARY_HELP, "must pin the exact ref"
+    assert AGENT_SIGPESQ_URL in STALE_LIBRARY_HELP, "must pin the exact repo"
     assert "already satisfied" in STALE_LIBRARY_HELP, "must explain the silence"
 
 

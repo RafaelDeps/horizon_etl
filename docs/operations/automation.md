@@ -17,7 +17,8 @@ Executar semanalmente um `make weekly-flows`, garantindo:
 - extracao dos documentos de projeto SigPesq (PDF + Mistral) via `extract_project_files`
 - exportacao dos dados canonicos, marts e grafo de relacionamentos
 - escrita do relatorio `data/reports/weekly_pipeline_run.json`
-- publicacao dos artefatos gerados
+- publicacao dos artefatos gerados (artifact de 30 dias)
+- commit do entregavel curado `exports_canonical.zip` quando ele muda
 - notificacao de inicio e conclusao dos flows no grupo Telegram configurado
 - notificacao final com resumo do relatorio semanal
 
@@ -73,14 +74,30 @@ uma mensagem final com:
 
 ## Artefatos publicados
 
-- `data/`
+Artifact do GitHub Actions (retencao de 30 dias):
+
+- `data/` (exceto `data/exports/exports_canonical.zip`)
 - `db/horizon.db`
+
+Commit no repositorio (entregavel curado, quando muda):
+
+- `data/exports/exports_canonical.zip`
 
 ## Politica de versionamento dos artefatos
 
-Os artefatos gerados por `make weekly-flows` sao saida operacional da execucao.
-Na rotina semanal, eles devem ser publicados pelo GitHub Actions como artifacts,
-nao commitados automaticamente no repositorio.
+Os artefatos gerados por `make weekly-flows` sao, em geral, saida operacional da
+execucao: eles devem ser publicados pelo GitHub Actions como artifacts, nao
+commitados automaticamente no repositorio.
+
+A excecao e o entregavel curado `data/exports/exports_canonical.zip`. A workflow
+semanal o commita (autor `github-actions[bot]`) e faz push **quando o conteudo
+mudou**, de modo que git e a fonte sempre-atual do dataset. Ele nao e publicado
+como artifact. Detalhes da mudanca: `specs/003-workflow-ci-zip-exports/`.
+
+O commit so roda quando as fases semanais terminam com sucesso (`if: success()`),
+entao um arquivo parcial de run falho nunca e publicado. Para permitir o push, a
+workflow declara `permissions: contents: write`; se o branch for protegido contra
+o bot, o push e rejeitado e o run sinaliza o erro.
 
 Use commits em `data/exports/` ou `data/reports/` somente quando houver uma
 decisao explicita de versionar um snapshot curado para documentacao, auditoria

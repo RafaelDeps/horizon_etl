@@ -26,6 +26,11 @@ weekly cost. Four moves, all inside existing flow code:
    calling the paid extraction service. Miss/malformed/absent archive falls
    back to normal extraction; `force` bypasses reuse.
 
+**Delivery (2026-10-14)**: the archive is published by the weekly workflow
+(feature 003-workflow-ci-zip-exports), which commits `data/exports/exports_canonical.zip`
+to the repository when it changed. It is no longer published as a downloadable
+CI artifact, so "latest archive" is always the committed copy.
+
 ## Technical Context
 
 **Language/Version**: Python 3.12 (CI) / 3.14 (local venv) — no version-sensitive

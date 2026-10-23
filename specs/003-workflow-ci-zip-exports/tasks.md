@@ -4,7 +4,7 @@
 
 **Prerequisites**: plan.md ✅, spec.md ✅, research.md ✅
 
-**Single file change**: All tasks modify `.github/workflows/weekly-etl.yml` only.
+**Single file change**: All tasks modify `.github/workflows/weekly-etl.yml` only (plus the `.gitignore` guard in the amendment below).
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -84,18 +84,39 @@
 
 ---
 
+## Phase 7: US4 — Versioned Archive Publishing (P2)
+
+**Amendment 2026-10-14**. Story goal: the workflow commits `exports_canonical.zip` byte-for-byte as the flow generated it, when it changed, and stops publishing it as a downloadable artifact.
+
+**Independent test**: Trigger `workflow_dispatch`; verify the committed `data/exports/exports_canonical.zip` unzips to the canonical exports (no nested `exports_canonical.zip` member), that a re-run with identical content produces no commit, and that the artifact no longer contains the archive.
+
+- [X] T010 [US4] Change `permissions.contents` from `read` to `write` in `.github/workflows/weekly-etl.yml` (required to push the archive commit)
+- [X] T011 [US4] Add `! -name '*.zip'` to the `find` in the `Compress large export files` step so `exports_canonical.zip` is never re-wrapped (FR-003, SC-006)
+- [X] T012 [US4] Insert `Commit exports_canonical.zip if changed` step (with `if: success()`, bot identity, `git diff --cached --quiet` no-op guard, `git push origin HEAD:${{ github.ref_name }}`) after `Compress large export files` and before `Upload ETL artifacts` (FR-009, FR-010)
+- [X] T013 [US4] Add `!data/exports/exports_canonical.zip` to the `Upload ETL artifacts` `path:` so the archive is not downloadable (FR-011)
+- [X] T014 [US4] Add `.gitignore` guard for `data/exports/exports_canonical.zip.zip` (never version the double-wrapped archive)
+- [X] T015 [US4] Update the docs that describe the archive delivery: `specs/003-workflow-ci-zip-exports/{spec,plan,research,checklists/requirements}.md`, `specs/013-curate-export-zip/{spec,plan,research,data-model,quickstart}.md`, `docs/outputs-and-artifacts.md`, `docs/operations/automation.md`
+- [X] T016 [US4] Validate the workflow: `python -c "import yaml; yaml.safe_load(open('.github/workflows/weekly-etl.yml'))"` from repo root
+
+---
+
 ## Dependencies
 
 ```
 T001 → T002 → T003 → T004 → T005 → T006 → T007 → T008 → T009
+                                                        ↓
+                          T010 → T011 → T012 → T013 → T014 → T015 → T016
 ```
 
-All sequential (same file). No parallel opportunities — single-file YAML edit.
+All sequential (same file). No parallel opportunities — single-file YAML edit
+(T014 `.gitignore` and T015 docs are independent but trivial).
 
 ## Implementation Strategy
 
 **MVP**: T001–T003 (US1 only) — fixes the critical permission bug so artifact upload works.
 
-**Full**: T001–T009 — all stories complete.
+**Archive publishing**: T010–T016 — commit `exports_canonical.zip` when changed and stop publishing it as an artifact.
 
-**Suggested order for a single session**: Complete all tasks in order T001→T009; the file only needs to be edited once.
+**Full**: T001–T016 — all stories complete.
+
+**Suggested order for a single session**: Complete all tasks in order T001→T016; the file only needs to be edited once.
