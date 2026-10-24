@@ -5,6 +5,12 @@ __pycache__/
 .venv/
 data/*
 !data/exports/
+# Lista de currículos Lattes (ID,nome) usada pelo download quando existe; versionada
+# para o CI processar a mesma lista do local. Sem ela o CI gera a lista a partir do
+# banco. O restante de data/lattes_run/ (backups, gerados) continua fora do git.
+!data/lattes_run/
+data/lattes_run/*
+!data/lattes_run/lattes.list
 # Artefatos gerados pelos pipelines (JSON/Parquet canônicos, marts, grafos e
 # demais produtos de saída) NÃO são versionados. Só os relatórios consumíveis
 # (.html/.pdf) e os pacotes (.zip) vão para o git; ver !data/exports/**/*.html.
