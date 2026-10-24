@@ -4,6 +4,7 @@ import sys
 from dotenv import load_dotenv
 from loguru import logger
 
+from src.adapters.database.sqlite_settings import install_sqlite_connection_settings
 from src.core.logic.pii_session_hook import install_lgpd_session_hooks
 from src.flows.all import ingest_all_sources_flow
 from src.flows.cnpq.groups import sync_cnpq_groups_flow
@@ -46,6 +47,7 @@ load_dotenv()
 os.environ.setdefault("PREFECT_API_URL", "http://127.0.0.1:4200/api")
 
 install_lgpd_session_hooks()
+install_sqlite_connection_settings()
 
 
 def _report_cnpq_summary(summary) -> None:

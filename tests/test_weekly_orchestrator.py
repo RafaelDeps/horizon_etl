@@ -8,7 +8,19 @@ critical phase must still make the whole run exit non-zero.
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import src.flows.pipelines.weekly_orchestrator as wo
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sqlite_finalize():
+    """run_weekly finalizes DATABASE_URL after the phases; these tests fake the
+    phases, so keep that step away from the real db/horizon.db."""
+    with patch.object(
+        wo, "finalize_sqlite_database", return_value={"finalized": True}
+    ) as finalize:
+        yield finalize
 
 
 def test_extract_project_files_is_a_fixed_phase_before_enrich_projects():

@@ -160,6 +160,36 @@ CNPq fetch: workers=4 fetched=350 retries=0 failed_after_retries=0 concurrency_r
 | `concurrency_reductions` | How many times a failure burst halved the concurrency |
 | `researcher_index_loaded` / `researcher_hits` / `researcher_created` | Researchers loaded once for the phase, members matched to them, and researchers created during the phase |
 
+## SQLite connection settings (spec 018)
+
+`libbase` commits after every record it adds, so a Lattes phase issues
+~180 000 commits for 435 curricula. In SQLite's default rollback-journal mode
+each commit waits for the disk (~3.6 ms on NVMe). That was 63% of
+`lattes_projects` and 34% of `lattes_advisorships`.
+
+Every process started through `app.py` therefore sets, on each new SQLite
+connection, `journal_mode=WAL` and `synchronous=NORMAL`
+(`src/adapters/database/sqlite_settings.py`, installed next to the LGPD session
+hook). A commit then only appends to `db/horizon.db-wal`; the disk is forced at
+checkpoints. The listener sits on the SQLAlchemy `Engine` class, so it reaches
+the engines that `eo_lib` and `research_domain` create. It does nothing for
+PostgreSQL or in-memory databases.
+
+A power loss can roll back the last transactions; it cannot corrupt the file.
+The weekly rebuilds the database from scratch, so an interrupted run is redone
+anyway.
+
+| What you may see | Why |
+|---|---|
+| `db/horizon.db-wal` and `db/horizon.db-shm` during a run | Normal in WAL mode. The `-wal` file holds committed transactions not yet copied into `horizon.db`. |
+| `SQLite finalize: {'finalized': True, 'checkpoint': (0, …), 'journal_mode': 'delete'}` at the end of `make weekly-flows` | After the last phase, `run_weekly` copies the log into `horizon.db` and switches the file back to the rollback journal. `db/horizon.db` is then complete on its own, so the CI artifact needs no companion file. |
+| `⚠️ SQLite finalize falhou: …` in the Telegram summary | The final step failed, usually because a connection was still open. The data is still in `horizon.db-wal`; the exit code is not affected. |
+| `-wal` / `-shm` left after a standalone command (`make sync-cnpq`, `make ingest-lattes-projects`, …) | Only `make weekly-flows` runs the final step. Harmless: the next connection uses them, and `make db-clean` removes them. |
+
+`make db-clean` (and so `make db-reset` and `make weekly-flows`) removes
+`horizon.db`, `horizon.db-wal` and `horizon.db-shm` together. A stale `-wal`
+next to a new database could corrupt it.
+
 ## Fluxos legados
 
 Alguns alvos ainda existem para casos especificos:

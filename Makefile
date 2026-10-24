@@ -63,7 +63,7 @@ logs-dir:
 # --- Database ---
 
 db-clean: ## Delete the local SQLite database
-	@rm -f db/horizon.db
+	@rm -f db/horizon.db db/horizon.db-wal db/horizon.db-shm
 
 db-init: ## Initialize database schema and base data
 	@$(PYTHON) db/create_db.py

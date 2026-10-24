@@ -29,11 +29,14 @@ missing optional manual input (bolsistas, projetos, corpo docente) degrades
 gracefully without failing the weekly run.
 """
 
+import os
 import subprocess
 import sys
 from typing import Optional
 
 from loguru import logger
+
+from src.adapters.database.sqlite_settings import finalize_sqlite_database
 
 # (name, argv tail, timeout seconds, critical, mode)
 #   mode "app"    -> `python app.py <argv...>`      (DB-writing phases; LGPD hook active)
@@ -185,7 +188,7 @@ def _critical(name):
     return False
 
 
-def _notify(results, crit_failed):
+def _notify(results, crit_failed, finalize: Optional[dict] = None):
     from src.notifications.telegram import send_telegram_message
 
     head = "❌ Weekly ETL FALHOU" if crit_failed else "✅ Weekly ETL concluído"
@@ -198,6 +201,9 @@ def _notify(results, crit_failed):
         lines.append(
             "Fases críticas que falharam: " + ", ".join(r["name"] for r in crit_failed)
         )
+    if finalize and not finalize.get("finalized") and not finalize.get("skipped"):
+        lines.append("")
+        lines.append(f"⚠️ SQLite finalize falhou: {finalize.get('reason')}")
     send_telegram_message("\n".join(lines))
 
 
@@ -211,6 +217,12 @@ def run_weekly(
     for name, argv_tail, timeout, _crit, mode in _PHASES:
         results.append(_run_phase(name, argv_tail, timeout, campus, output_dir, mode))
 
+    # Every phase subprocess has exited, so no connection holds the file: move
+    # the write-ahead log into db/horizon.db so the file (and the CI artifact
+    # built from it) is complete on its own. Never changes the exit code.
+    finalize = finalize_sqlite_database(os.getenv("DATABASE_URL"))
+    logger.info("SQLite finalize: {}", finalize)
+
     failed = [r for r in results if not r["ok"]]
     crit_failed = [r for r in failed if r["critical"]]
 
@@ -221,7 +233,7 @@ def run_weekly(
         )
 
     try:
-        _notify(results, crit_failed)
+        _notify(results, crit_failed, finalize=finalize)
     except Exception as exc:  # notification must never change the run outcome
         logger.warning("Telegram summary failed: {}", exc)
 

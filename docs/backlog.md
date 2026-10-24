@@ -248,7 +248,8 @@ Mapping Epics -> User Stories -> Tasks status.
   record. Candidate ETL-side fix: `PRAGMA journal_mode=WAL` +
   `synchronous=NORMAL` via a SQLAlchemy `connect` event. Check that the final
   database is complete for the CI artifact upload (WAL checkpoint on close) and
-  that no other process reads the file mid-run. Status: Ready.
+  that no other process reads the file mid-run. Status: **Fixed** (2026-10-24) by
+  spec 018; see the follow-ups below.
 
 ## Follow-ups — origin: `specs/017-cnpq-concurrent-sync` (2026-10-22)
 
@@ -266,3 +267,35 @@ Mapping Epics -> User Stories -> Tasks status.
   (913 memberships in the 2026-10-22 replay). Exports therefore differ between
   runs, even with identical inputs. Decide whether `NULL`, or a stable value,
   would be more correct. Status: Ready (decision).
+
+## Follow-ups — origin: `specs/018-sqlite-wal-journaling` (2026-10-24)
+
+- **TD-018 — Fixed** by spec 018. Every SQLite connection opened through
+  `app.py` uses `journal_mode=WAL` and `synchronous=NORMAL`
+  (`src/adapters/database/sqlite_settings.py`), and `run_weekly` checkpoints the
+  log and returns `db/horizon.db` to the rollback journal after the last phase,
+  so the CI artifact is complete on its own. `make db-clean` also removes the
+  `-wal`/`-shm` files. Controlled replay of both Lattes phases: identical
+  databases, 46.1 → 25.1 min. Full local run: `lattes_projects` 21.1 → 7.4 min,
+  `lattes_advisorships` 24.7 → 12.4 min, total 1 h 37 → 1 h 04. See
+  `docs/reports/2026-10-24-sqlite-wal-validation.md`.
+- **TD-020 — `enrich_projects` fails with `database is locked` in the CI
+  weekly**: `ProjectEnrichmentLoader._ingest_new` checks new titles against
+  Research Project initiatives only, but `UNIQUE(initiatives.name)` spans every
+  type. In the CI inputs a new project has the title of an Advisorship
+  (initiative 435), the insert fails inside `_write_row`'s SAVEPOINT, and
+  `ROLLBACK TO SAVEPOINT` leaves the SQLite transaction and its write lock open.
+  The next `tracking_recorder` write runs on another session and fails after the
+  5 s busy timeout. Rows written before the collision are kept (pysqlite commits
+  each SAVEPOINT); the new initiatives after it are lost (17 in run
+  40002646510). Not fixed by WAL. Two fixes were tested on the CI database
+  (compare against all initiative names; end the open transaction after a failed
+  row): each completes the phase with identical results. Status: Ready (next
+  spec).
+- **TD-021 — `assign_team` loads whole object graphs to write one link row**:
+  `eo_lib`'s `InitiativeService.assign_team` calls `get_by_id` on the initiative
+  and the team, whose `lazy="joined"` relations pull teams, members, persons and
+  roles. 416 s, 24% of `lattes_advisorships` in the 2026-10-23 profile (~43 ms
+  per call). Same root cause as TD-016. An ETL-side fix would write the
+  `initiative_teams` row directly, which needs the maintainer's decision under
+  the "do not replace third-party behaviour" rule. Status: Ready (decision).
