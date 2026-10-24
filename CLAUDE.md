@@ -1,5 +1,5 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/018-sqlite-wal-journaling/plan.md
+at specs/019-enrich-lock-fix/plan.md
 <!-- SPECKIT END -->

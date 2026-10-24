@@ -502,10 +502,12 @@ class ProjectEnrichmentLoader:
         """Reads the documents once, classifies them once, then enriches matched
         initiatives (deduplicated) and, if requested, ingests unmatched rich ones.
 
-        All writes join the session's ambient transaction (opened by the index
-        SELECTs) and are committed once at the end; a failing row is skipped via
-        savepoint. On error the session is rolled back and the exception
-        propagates. ``dry_run`` writes nothing and commits nothing.
+        Each row is written through ``_write_row``. On SQLite every successful
+        row is committed as soon as its SAVEPOINT is released, and a failing row
+        is skipped and the database released, so the tracking writes are never
+        locked out. An exception that propagates out of here rolls back only
+        what is still pending: rows already written stay. ``dry_run`` writes
+        nothing and commits nothing.
         """
         self.ensure_schema()
 
@@ -543,9 +545,11 @@ class ProjectEnrichmentLoader:
         # NO explicit begin() here. The index loads above already ran SELECTs, and
         # a SQLAlchemy Session autobegins on ANY execute() -- a SELECT included --
         # so the session is always mid-transaction by this point and begin() would
-        # raise "A transaction is already begun on this Session". The writes join
-        # that ambient transaction instead: still one unit of work, and the
-        # per-row SAVEPOINTs from _write_row nest inside it as before.
+        # raise "A transaction is already begun on this Session". The per-row
+        # SAVEPOINTs from _write_row run inside that ambient transaction; with
+        # pysqlite each one commits its row when released (see _write_row), so
+        # this is NOT a single unit of work on SQLite, and the final commit()
+        # only closes whatever is still open.
         # Keep it this way: reintroducing begin() breaks the phase outright, and
         # so does moving these writes above the index loads.
         try:
@@ -632,7 +636,15 @@ class ProjectEnrichmentLoader:
         rejected_codes: Optional[set] = None,
     ) -> Dict[str, int]:
         org_id, type_id = self._lookup_org_and_type()
+        # Initiative names are unique across ALL types, so a new project cannot
+        # reuse an advisorship's title either; name_index only knows research
+        # projects. Without this the insert fails, and in CI that failure held
+        # the write lock and aborted the phase (spec 019).
         existing_names = set(name_index.keys())
+        for (name,) in self._session.execute(text("SELECT name FROM initiatives")):
+            norm = normalize_text(name)
+            if norm:
+                existing_names.add(norm)
         seen_titles: set[str] = set()
         rejected_codes = rejected_codes or set()
         stats = {
@@ -813,13 +825,32 @@ class ProjectEnrichmentLoader:
     # -------------------------------------------------------------- write helpers
     def _write_row(self, fn) -> bool:
         """Runs a single write inside a SAVEPOINT so one failing row is skipped
-        without aborting the surrounding transaction."""
+        and the others go on.
+
+        On SQLite (pysqlite) the SAVEPOINT opens the transaction and its RELEASE
+        commits it, so a successful row is committed right away. A failing row
+        is undone by ROLLBACK TO SAVEPOINT, which leaves that transaction -- and
+        its write lock -- open; the tracking recorder writes through other
+        sessions and would then fail with "database is locked". So after a
+        failure the transaction is ended here: nothing is pending in it.
+        """
         try:
             with self._session.begin_nested():
                 fn()
             return True
         except Exception as exc:
             logger.warning(f"Row write failed, skipping: {exc}")
+            try:
+                self._session.commit()
+            except Exception as release_exc:
+                logger.warning(
+                    f"Could not release the transaction after a failed row: "
+                    f"{release_exc}"
+                )
+                try:
+                    self._session.rollback()
+                except Exception:
+                    pass
             return False
 
     def _apply(

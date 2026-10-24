@@ -279,6 +279,75 @@ def test_unmatched_document_is_counted_not_written(loader, session, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Titles taken by another initiative type (spec 019)
+# --------------------------------------------------------------------------- #
+def add_advisorship(session, init_id, name):
+    session.execute(
+        text(
+            "INSERT OR IGNORE INTO initiative_types (id, name) VALUES (2, 'Advisorship')"
+        )
+    )
+    session.execute(
+        text(
+            "INSERT INTO initiatives (id, name, initiative_type_id) "
+            "VALUES (:id, :n, 2)"
+        ),
+        {"id": init_id, "n": name},
+    )
+    session.commit()
+
+
+def write_ingestable_pj(tmp_path, filename, titulo):
+    return write_pj(
+        tmp_path,
+        filename,
+        titulo=titulo,
+        descricao="Projeto sobre dados educacionais.",
+        objetivos={"geral": "Mapear indicadores.", "especificos": []},
+    )
+
+
+def test_title_of_another_initiative_type_is_a_duplicate(loader, session, tmp_path):
+    """Initiative names are unique across all types: in CI an advisorship had
+    the title of a new project document, the insert failed and locked the
+    tracking writes out. The duplicate check must see every type."""
+    add_advisorship(session, 50, "Mapeamento dos dados do ENEM")
+    write_ingestable_pj(tmp_path, "PJ_1.json", "Mapeamento dos dados do ENEM")
+    loader.dry_run = True
+
+    stats = loader.run(str(tmp_path), ingest_new=True)
+
+    assert stats["skipped_duplicate"] == 1
+    assert stats["created"] == 0
+
+
+def test_title_differing_only_by_accents_and_case_is_a_duplicate(
+    loader, session, tmp_path
+):
+    add_advisorship(session, 50, "Mapeamento dos Dados do ENEM no Espírito Santo")
+    write_ingestable_pj(
+        tmp_path, "PJ_1.json", "mapeamento dos dados do enem no espirito santo"
+    )
+    loader.dry_run = True
+
+    stats = loader.run(str(tmp_path), ingest_new=True)
+
+    assert stats["skipped_duplicate"] == 1
+    assert stats["created"] == 0
+
+
+def test_new_title_is_still_created(loader, session, tmp_path):
+    add_advisorship(session, 50, "Outra orientação")
+    write_ingestable_pj(tmp_path, "PJ_1.json", "Mapeamento dos dados do ENEM")
+    loader.dry_run = True
+
+    stats = loader.run(str(tmp_path), ingest_new=True)
+
+    assert stats["created"] == 1
+    assert stats["skipped_duplicate"] == 0
+
+
+# --------------------------------------------------------------------------- #
 # Origin & review persistence (feature 006)
 # --------------------------------------------------------------------------- #
 def test_rerun_does_not_shrink_the_review_backlog(loader, session, tmp_path):

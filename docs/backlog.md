@@ -290,8 +290,11 @@ Mapping Epics -> User Stories -> Tasks status.
   each SAVEPOINT); the new initiatives after it are lost (17 in run
   40002646510). Not fixed by WAL. Two fixes were tested on the CI database
   (compare against all initiative names; end the open transaction after a failed
-  row): each completes the phase with identical results. Status: Ready (next
-  spec).
+  row): each completes the phase with identical results. Status: **Fixed**
+  (2026-10-24) by spec 019, with both fixes. On the CI database the phase now
+  ends with exit 0: 251 enriched, 17 created, 0 errors, 1 duplicate skipped. On
+  a local database without collisions the output is identical to the old code.
+  See `docs/reports/2026-10-24-enrich-lock-validation.md`.
 - **TD-021 — `assign_team` loads whole object graphs to write one link row**:
   `eo_lib`'s `InitiativeService.assign_team` calls `get_by_id` on the initiative
   and the team, whose `lazy="joined"` relations pull teams, members, persons and
