@@ -197,3 +197,70 @@ def test_sync_members_without_index_keeps_reading_the_register_once():
     logic.sync_members(10, [_member("Ana Lima"), _member("Bruno Alves")])
 
     logic.res_ctrl.get_all.assert_called_once()
+
+
+# --- Member end dates: last period per resolved person (spec 020, FR-022) ----
+
+
+def _logic_with_member(stored_end_date):
+    """One existing member (person 5) whose stored end date is given."""
+    from sqlalchemy.sql.elements import TextClause
+
+    logic = _logic_with_mocks()
+    session = logic.rg_ctrl._service._repository._session
+    updates = []
+
+    def execute(statement, params=None):
+        sql = str(statement) if isinstance(statement, TextClause) else ""
+        result = MagicMock()
+        if sql.startswith("SELECT end_date"):
+            result.scalar.return_value = stored_end_date
+        elif sql.startswith("UPDATE team_members"):
+            updates.append(params)
+        else:
+            result.scalar.return_value = True
+        return result
+
+    session.execute.side_effect = execute
+    logic.rg_ctrl._service.get_members.return_value = [
+        SimpleNamespace(person_id=5, end_date=stored_end_date)
+    ]
+    return logic, updates
+
+
+def _period(name, start, end):
+    return {
+        "name": name,
+        "role": "Estudante (Egresso)",
+        "data_inicio": start,
+        "data_fim": end,
+    }
+
+
+def test_spellings_of_one_person_write_only_the_last_period():
+    from src.core.logic.researcher_resolution import ResearcherRef
+
+    members = [
+        _period("Ricardo Vieira da silva", "02/09/2015", "25/08/2016"),
+        _period("Ricardo Vieira da Silva", "25/08/2016", "25/08/2024"),
+    ]
+    logic, updates = _logic_with_member("2016-08-25")
+    index = [ResearcherRef(id=5, name="Ricardo Vieira da Silva")]
+    logic.sync_members(10, members, researcher_index=index)
+
+    assert [str(u["end_dt"])[:10] for u in updates] == ["2024-08-25"]
+    assert updates[0]["pid"] == 5
+
+
+def test_member_end_date_already_stored_is_not_rewritten():
+    from src.core.logic.researcher_resolution import ResearcherRef
+
+    members = [
+        _period("Ricardo Vieira da silva", "02/09/2015", "25/08/2016"),
+        _period("Ricardo Vieira da Silva", "25/08/2016", "25/08/2024"),
+    ]
+    logic, updates = _logic_with_member("2024-08-25")
+    index = [ResearcherRef(id=5, name="Ricardo Vieira da Silva")]
+    logic.sync_members(10, members, researcher_index=index)
+
+    assert updates == []

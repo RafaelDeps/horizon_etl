@@ -12,6 +12,7 @@ from research_domain import CampusController, ResearchGroupController
 from research_domain.controllers import ResearcherController
 
 from src.adapters.sources.cnpq_crawler import CnpqCrawlerAdapter, normalize_cnpq_url
+from src.core.logic.horizon_identity import cnpq_payload_key
 from src.core.logic.researcher_resolution import load_researcher_index
 from src.core.logic.strategies.cnpq_sync import CnpqSyncLogic
 from src.flows.cnpq.concurrent_fetch import fetch_all, resolve_workers
@@ -148,7 +149,8 @@ def sync_single_group(
     source_record = tracking_recorder.record_source_record(
         source_entity_type="cnpq_group_payload",
         payload=data,
-        source_record_id=str(group_id),
+        # The CNPq id from the mirror URL, not research_groups.id (spec 020).
+        source_record_id=cnpq_payload_key(url),
         source_file=url,
         source_path=url,
     )

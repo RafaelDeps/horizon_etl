@@ -75,6 +75,11 @@ _PHASES = [
     # source phases loaded and before export_canonical, so the canonical export
     # and downstream marts see exactly one record per person (contract R6-R14).
     ("consolidate_duplicates", ["consolidate_duplicates"], 900, False, "app"),
+    # assign_horizon_ids (spec 020) runs on the final, consolidated state, so
+    # every exported entity gets its permanent id; it must precede
+    # export_canonical, which publishes the ids. Non-critical: without it the
+    # export only lacks the new id files.
+    ("assign_horizon_ids", ["assign_horizon_ids"], 900, False, "app"),
     ("export_canonical", ["export_canonical"], 1800, True, "app"),
     ("knowledge_areas_mart", ["ka_mart"], 900, False, "app"),
     ("initiatives_analytics_mart", ["analytics_mart"], 900, False, "app"),
@@ -207,12 +212,37 @@ def _notify(results, crit_failed, finalize: Optional[dict] = None):
     send_telegram_message("\n".join(lines))
 
 
+def _reset_if_rule_version_changed() -> None:
+    """FR-024 (spec 020): rebuild once when the database was built under other
+    key/hash/id rules. ``make weekly-flows`` still resets the database before
+    every run, so today this only fires when the weekly is started without that
+    reset; it becomes the guard of the persistent database (spec B)."""
+    from src.adapters.database.horizon_id_store import sqlite_path_from_url
+    from src.flows.maintenance.horizon_ids import (
+        reset_database,
+        rule_version_requires_reset,
+    )
+
+    database_url = os.getenv("DATABASE_URL", "sqlite:///db/horizon.db")
+    try:
+        needs_reset = rule_version_requires_reset(sqlite_path_from_url(database_url))
+    except ValueError:  # not a SQLite file: nothing to compare
+        return
+    if needs_reset:
+        logger.warning(
+            "Database rule version differs from the code's; rebuilding it once "
+            "before the phases (FR-024)."
+        )
+        reset_database(database_url)
+
+
 def run_weekly(
     campus_name: Optional[str] = None,
     output_dir: str = "data/exports",
 ) -> int:
     """Run every weekly phase in its own subprocess. Returns a process exit code."""
     campus = (campus_name or "").strip()
+    _reset_if_rule_version_changed()
     results = []
     for name, argv_tail, timeout, _crit, mode in _PHASES:
         results.append(_run_phase(name, argv_tail, timeout, campus, output_dir, mode))

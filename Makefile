@@ -27,7 +27,7 @@ PREFECT_SERVER_SERVICE ?= server
 PREFECT_DB_SERVICE ?= database
 
 .PHONY: help setup logs-dir \
-	db-clean db-init db-reset \
+	db-clean db-init db-reset db-save-ids \
 	prefect-server prefect-stop prefect-status \
 	pipeline pipeline-log weekly-flows full-refresh \
 	ingest-sigpesq extract-project-files \
@@ -68,7 +68,10 @@ db-clean: ## Delete the local SQLite database
 db-init: ## Initialize database schema and base data
 	@$(PYTHON) db/create_db.py
 
-db-reset: db-clean db-init ## Recreate the local database from scratch
+db-save-ids: ## Save the horizon id history (db/horizon_id_history.json) before a reset
+	@$(PYTHON) src/scripts/save_horizon_id_history.py
+
+db-reset: db-save-ids db-clean db-init ## Recreate the local database from scratch (keeps the id history)
 
 # --- Prefect Server ---
 

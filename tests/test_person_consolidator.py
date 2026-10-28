@@ -658,3 +658,54 @@ def test_weekly_phase_report_artifact_records_merged_and_refused(tmp_path: Path)
     assert by_name["ISRAEL MAGALHAES CARMO"]["status"] == "merged"
     assert by_name["FULANO CICLANO"]["status"] == "refused_homonym"
     assert "cnpq_url" in by_name["FULANO CICLANO"]["reason"]
+
+
+def test_consolidate_pair_logs_the_losers_ids_before_deleting_it(tmp_path: Path):
+    """Spec 020 (research R7): the loser's candidate ids are captured."""
+    from src.core.logic.horizon_identity import hash12
+    from src.db.migrations import MIGRATIONS
+
+    db_path = tmp_path / "merge_log.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA_SQL)
+    conn.execute(dict(MIGRATIONS)["0005_horizon_merge_log"])
+    conn.execute("INSERT INTO persons (id, name) VALUES (1, 'Ana Lima')")
+    conn.execute("INSERT INTO persons (id, name) VALUES (2, 'Ana P. Lima')")
+    conn.execute(
+        "INSERT INTO researchers (id, cnpq_url) "
+        "VALUES (2, 'http://lattes.cnpq.br/1111222233334444')"
+    )
+    conn.commit()
+    conn.close()
+
+    PersonConsolidator(str(db_path)).consolidate_pair(1, 2)
+
+    check = sqlite3.connect(db_path)
+    rows = check.execute(
+        "SELECT entity_type, loser_candidate_ids, winner_entity_id, consumed_at "
+        "FROM horizon_merge_log"
+    ).fetchall()
+    check.close()
+    assert len(rows) == 1
+    entity_type, candidates, winner, consumed = rows[0]
+    assert (entity_type, winner, consumed) == ("person", 1, None)
+    assert json.loads(candidates) == [
+        "person:lattes:1111222233334444",
+        f"person:h:{hash12('Ana P. Lima')}",
+    ]
+
+
+def test_consolidate_pair_without_merge_log_table_still_merges(tmp_path: Path):
+    db_path = tmp_path / "no_log.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA_SQL)
+    conn.execute("INSERT INTO persons (id, name) VALUES (1, 'Ana Lima')")
+    conn.execute("INSERT INTO persons (id, name) VALUES (2, 'Ana P. Lima')")
+    conn.commit()
+    conn.close()
+
+    PersonConsolidator(str(db_path)).consolidate_pair(1, 2)
+
+    check = sqlite3.connect(db_path)
+    assert check.execute("SELECT id FROM persons").fetchall() == [(1,)]
+    check.close()

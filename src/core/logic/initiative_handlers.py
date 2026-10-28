@@ -122,6 +122,12 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         self.entity_manager = entity_manager
         self._fellowships_cache: Dict[str, Fellowship] = {}
         self._advisorship_roles_cache: Dict[str, Role] = {}
+        # Spec 020 (FR-022): the members of an advisorship that already exists
+        # are written once per phase, with the last value asked for, so two
+        # rows landing on the same advisorship (the same work listed twice in
+        # a CV, or in two CVs) do not delete and re-insert them in between.
+        self.defer_members = False
+        self._pending_members: Dict[tuple, tuple] = {}
         self._preload_fellowships()
 
     def _preload_fellowships(self):
@@ -439,8 +445,32 @@ class AdvisorshipHandler(BaseInitiativeHandler):
     ) -> None:
         person = self._coerce_to_person(person)
 
+        if self.defer_members and getattr(initiative, "id", None):
+            self._pending_members[(initiative.id, role_name)] = (
+                initiative,
+                person,
+                start_date,
+            )
+            return
+
         if advisorship_supports_members_api(initiative):
             members = list(getattr(initiative, "members", []) or [])
+            current = [
+                member
+                for member in members
+                if getattr(member, "role_name", None) == role_name
+            ]
+            # The same person in the same role from the same day: keep the row
+            # instead of deleting and re-inserting it (spec 020, FR-022).
+            if (
+                person
+                and len(current) == 1
+                and getattr(current[0], "person_id", None) == person.id
+                and getattr(current[0], "end_date", None) is None
+                and str(getattr(current[0], "start_date", None) or "")[:10]
+                == str(start_date or "")[:10]
+            ):
+                return
             retained_members = [
                 member
                 for member in members
@@ -468,6 +498,37 @@ class AdvisorshipHandler(BaseInitiativeHandler):
             setattr(
                 initiative, id_attr, getattr(person, "id", None) if person else None
             )
+
+    def flush_members(self) -> int:
+        """Writes the deferred members (see ``defer_members``). Returns how
+        many (advisorship, role) pairs were synced."""
+        pending, self._pending_members = self._pending_members, {}
+        deferred, self.defer_members = self.defer_members, False
+        try:
+            for key in sorted(pending, key=lambda k: (k[0], k[1])):
+                initiative, person, start_date = pending[key]
+                try:
+                    self._sync_advisorship_member(
+                        initiative,
+                        person=person,
+                        role_name=key[1],
+                        start_date=start_date,
+                    )
+                    self.adv_controller.update(initiative)
+                except Exception as e:
+                    logger.warning(
+                        f"Could not sync {key[1]} of advisorship {key[0]}: {e}"
+                    )
+                    try:
+                        session = (
+                            self.initiative_controller._service._repository._session
+                        )
+                        session.rollback()
+                    except Exception:
+                        pass
+        finally:
+            self.defer_members = deferred
+        return len(pending)
 
     def _coerce_to_person(self, person: Optional[Any]) -> Optional[Person]:
         if not person:
@@ -558,6 +619,12 @@ class AdvisorshipHandler(BaseInitiativeHandler):
             suffix_parts.append(str(project_data["identity_key"])[:24])
 
         return f"{title} | Orientacao {' | '.join(suffix_parts)}".strip()
+
+    def find_existing(self, project_data: Dict[str, Any]) -> Optional[Advisorship]:
+        """The advisorship create_or_update updates when the loader passes none
+        (looked up by the persisted, possibly disambiguated, title)."""
+        title = self._resolve_persisted_title(project_data["title"], project_data)
+        return self._find_existing_advisorship_by_title(title)
 
     def _find_existing_advisorship_by_title(self, title: str) -> Optional[Advisorship]:
         if not title:

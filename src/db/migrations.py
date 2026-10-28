@@ -21,6 +21,64 @@ MIGRATIONS: List[Tuple[str, str]] = [
         "0001_initiatives_enrichment_json",
         "ALTER TABLE initiatives ADD COLUMN enrichment_json TEXT",
     ),
+    # Spec 020: ETL-owned identity tables. They sit beside the eo_lib tables and
+    # never alter them, so consumers of the existing schema see no change.
+    (
+        "0002_horizon_ids",
+        "CREATE TABLE IF NOT EXISTS horizon_ids ("
+        " entity_type TEXT NOT NULL,"
+        " entity_id INTEGER NOT NULL,"
+        " horizon_id TEXT NOT NULL UNIQUE,"
+        " rule TEXT NOT NULL,"
+        " natural_key TEXT,"
+        " parent_horizon_id TEXT,"
+        " collision_suffix TEXT,"
+        " assigned_at TEXT NOT NULL,"
+        " UNIQUE (entity_type, entity_id))",
+    ),
+    (
+        "0003_horizon_id_candidates",
+        "CREATE TABLE IF NOT EXISTS horizon_id_candidates ("
+        " horizon_id TEXT NOT NULL,"
+        " candidate_id TEXT NOT NULL,"
+        " PRIMARY KEY (candidate_id, horizon_id))",
+    ),
+    (
+        "0004_horizon_id_aliases",
+        "CREATE TABLE IF NOT EXISTS horizon_id_aliases ("
+        " alias_horizon_id TEXT PRIMARY KEY,"
+        " horizon_id TEXT,"
+        " reason TEXT NOT NULL,"
+        " created_at TEXT NOT NULL,"
+        " updated_at TEXT NOT NULL)",
+    ),
+    (
+        "0005_horizon_merge_log",
+        "CREATE TABLE IF NOT EXISTS horizon_merge_log ("
+        " id INTEGER PRIMARY KEY,"
+        " entity_type TEXT NOT NULL,"
+        " loser_candidate_ids TEXT NOT NULL,"
+        " winner_entity_id INTEGER NOT NULL,"
+        " ingestion_run_id INTEGER,"
+        " merged_at TEXT NOT NULL,"
+        " consumed_at TEXT)",
+    ),
+    (
+        "0006_horizon_meta",
+        "CREATE TABLE IF NOT EXISTS horizon_meta ("
+        " key TEXT PRIMARY KEY,"
+        " value TEXT NOT NULL)",
+    ),
+    (
+        "0007_team_member_contributions",
+        "CREATE TABLE IF NOT EXISTS team_member_contributions ("
+        " team_id INTEGER NOT NULL,"
+        " person_id INTEGER NOT NULL,"
+        " role_id INTEGER NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " start_date TEXT,"
+        " PRIMARY KEY (team_id, person_id, role_id, document_key))",
+    ),
 ]
 
 

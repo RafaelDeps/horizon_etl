@@ -33,6 +33,15 @@ def _team_name(team: Any) -> str:
     return ""
 
 
+def _day(value: Any) -> str:
+    """A start date as ``YYYY-MM-DD`` text ('' when absent), whatever its type."""
+    if value is None:
+        return ""
+    if hasattr(value, "isoformat"):
+        value = value.isoformat()
+    return str(value)[:10]
+
+
 def _team_id(team: Any) -> Any:
     return team.get("id") if isinstance(team, dict) else getattr(team, "id", None)
 
@@ -173,7 +182,10 @@ class TeamSynchronizer:
         )
 
     def synchronize_members(
-        self, team_id: int, members_to_sync: List[Tuple[Any, str, Optional[Any]]]
+        self,
+        team_id: int,
+        members_to_sync: List[Tuple[Any, str, Optional[Any]]],
+        document_key: Optional[str] = None,
     ):
         """
         Synchronizes team members: adds new ones and removes obsolete ones.
@@ -186,7 +198,14 @@ class TeamSynchronizer:
         (Lattes runs after SigPesq in the weekly pipeline) would wipe every
         student from the project team, dropping their project memberships from
         the canonical export.
+
+        With a ``document_key`` (spec 020), membership is the union of what
+        every document says instead; see ``_sync_contributions``.
         """
+        if document_key and self._sync_contributions(
+            team_id, members_to_sync, document_key
+        ):
+            return
         current_source_memberships: Set[Tuple[int, int]] = set()
 
         for person, role_name, start_date in members_to_sync:
@@ -210,12 +229,19 @@ class TeamSynchronizer:
         self._remove_obsolete_members(team_id, current_source_memberships)
 
     def add_members(
-        self, team_id: int, members_to_add: List[Tuple[Any, str, Optional[Any]]]
+        self,
+        team_id: int,
+        members_to_add: List[Tuple[Any, str, Optional[Any]]],
+        document_key: Optional[str] = None,
     ):
         """
         Adds members to the team without removing existing ones.
         Idempotent: only adds if (person, role, start_date) is missing.
         """
+        if document_key and self._sync_contributions(
+            team_id, members_to_add, document_key
+        ):
+            return
         for person, role_name, start_date in members_to_add:
             if not person:
                 continue
@@ -229,6 +255,134 @@ class TeamSynchronizer:
             self._add_member_if_new(
                 team_id, person, role_obj, role_name, role_id, start_date
             )
+
+    def _role(self, role_name: str) -> Tuple[Any, Optional[int]]:
+        role_obj = self.roles_cache.get(role_name)
+        role_id = getattr(role_obj, "id", None) or (
+            role_obj.get("id") if isinstance(role_obj, dict) else None
+        )
+        return role_obj, role_id
+
+    def _sync_contributions(
+        self,
+        team_id: int,
+        members: List[Tuple[Any, str, Optional[Any]]],
+        document_key: str,
+    ) -> bool:
+        """Membership as the union of the documents' contributions (spec 020,
+        research R9.2/R9.3).
+
+        Each call replaces what ``document_key`` says about the team in
+        ``team_member_contributions``. A ``team_members`` row (person, role,
+        start date) is added when some document contributes it and removed
+        only when no document does any more. Several CVs listing the same
+        project, or two projects sharing a team by name, therefore no longer
+        overwrite each other, and a rerun over the same input writes nothing.
+        Returns False (caller falls back to the old behaviour) without a SQL
+        session.
+        """
+        session = self._session()
+        if session is None:
+            return False
+
+        new: Dict[Tuple[int, int, str], Tuple[Any, Any, str, Optional[Any]]] = {}
+        for person, role_name, start_date in members:
+            role_obj, role_id = self._role(role_name)
+            if not person or not role_id:
+                continue
+            key = (person.id, role_id, _day(start_date))
+            new.setdefault(key, (person, role_obj, role_name, start_date))
+
+        old = {
+            (row[0], row[1], row[2] or "")
+            for row in session.execute(
+                text(
+                    "SELECT person_id, role_id, start_date FROM "
+                    "team_member_contributions WHERE team_id = :t AND document_key = :d"
+                ),
+                {"t": team_id, "d": document_key},
+            )
+        }
+        dropped = old - set(new)
+        for person_id, role_id, start in dropped:
+            session.execute(
+                text(
+                    "DELETE FROM team_member_contributions WHERE team_id = :t "
+                    "AND document_key = :d AND person_id = :p AND role_id = :r "
+                    "AND COALESCE(start_date, '') = :s"
+                ),
+                {
+                    "t": team_id,
+                    "d": document_key,
+                    "p": person_id,
+                    "r": role_id,
+                    "s": start,
+                },
+            )
+        for person_id, role_id, start in set(new) - old:
+            session.execute(
+                text(
+                    "INSERT OR IGNORE INTO team_member_contributions (team_id, "
+                    "person_id, role_id, document_key, start_date) "
+                    "VALUES (:t, :p, :r, :d, :s)"
+                ),
+                {
+                    "t": team_id,
+                    "p": person_id,
+                    "r": role_id,
+                    "d": document_key,
+                    "s": start,
+                },
+            )
+        still_contributed = {
+            (row[0], row[1], row[2] or "")
+            for row in session.execute(
+                text(
+                    "SELECT DISTINCT person_id, role_id, start_date FROM "
+                    "team_member_contributions WHERE team_id = :t"
+                ),
+                {"t": team_id},
+            )
+        }
+        session.commit()
+
+        try:
+            current = self.team_controller.get_members(team_id)
+        except Exception as e:
+            logger.warning(f"Failed to read members of team {team_id}: {e}")
+            return True
+        present = {
+            (
+                getattr(m, "person_id", None),
+                getattr(m, "role_id", None),
+                _day(getattr(m, "start_date", None)),
+            )
+            for m in current
+        }
+        for key, (person, role_obj, role_name, start_date) in new.items():
+            if key in present:
+                continue
+            try:
+                self.team_controller.add_member(
+                    team_id=team_id,
+                    person_id=person.id,
+                    role=role_obj or role_name,
+                    start_date=start_date,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to add {role_name} '{person.name}': {e}")
+        for m in current:
+            key = (
+                getattr(m, "person_id", None),
+                getattr(m, "role_id", None),
+                _day(getattr(m, "start_date", None)),
+            )
+            if key in dropped and key not in still_contributed:
+                try:
+                    self.team_controller.remove_member(m.id)
+                except Exception as e:
+                    logger.warning(f"Failed to remove obsolete member: {e}")
+        return True
 
     def _add_member_if_new(
         self, team_id, person, role_obj, role_name, role_id, start_date

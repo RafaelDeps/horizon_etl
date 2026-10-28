@@ -18,6 +18,11 @@ from research_domain.domain.entities import Advisorship
 from sqlalchemy import text
 
 from src.core.logic.entity_manager import EntityManager
+from src.core.logic.horizon_identity import (
+    canonical,
+    lattes_advisorship_key,
+    lattes_initiative_key,
+)
 from src.core.logic.initiative_handlers import (
     AdvisorshipHandler,
     StandardProjectHandler,
@@ -73,6 +78,8 @@ class ProjectLoader:
                 self.controller, self.person_matcher, self.entity_manager
             ),
         }
+        # Written by flush_change_log, at the end of each batch or phase.
+        self.handlers[Advisorship].defer_members = True
 
         # Ensure base environment
         self.initiative_type = self.entity_manager.ensure_initiative_type(
@@ -90,6 +97,16 @@ class ProjectLoader:
         self._existing_by_name = None
         self._existing_by_norm_name = None
         self._existing_by_identity = None
+
+        # Net change log (spec 020, FR-022). The same initiative is written by
+        # each CV that lists it, and each CV may carry another description: the
+        # end state is the same every run, but logging every write would record
+        # the same two "changes" forever. The state at first touch is kept and
+        # the log is written once, from the difference between that state and
+        # the final one. Callers that reuse one loader across many files set
+        # ``defer_change_log`` and call ``flush_change_log()`` at the end.
+        self.defer_change_log = False
+        self._pending_changes: Dict[tuple, Dict[str, Any]] = {}
 
     def _ensure_existing_initiatives(self) -> None:
         if self._existing_by_name is not None:
@@ -141,6 +158,108 @@ class ProjectLoader:
 
         records = df.to_dict("records")
         self.process_records(records, source_file=file_path)
+
+    def _tracking_key(self, identity_key, title, row_dict, model_class, source_file):
+        """source_record_id of a row (spec 020). A Lattes row carries the CV
+        it came from, because the same project or advisorship appears in each
+        participant's CV with different details; SigPesq rows keep their
+        codes."""
+        key = identity_key or title or self._row_label(row_dict)
+        if not (identity_key or "").startswith("lattes "):
+            return key
+        if model_class is Advisorship:
+            return lattes_advisorship_key(source_file, identity_key, row_dict)
+        return lattes_initiative_key(source_file, identity_key)
+
+    _STATE_FIELDS = (
+        "name",
+        "status",
+        "description",
+        "start_date",
+        "end_date",
+        "parent_id",
+    )
+    defer_change_log = False
+
+    @property
+    def _pending(self) -> Dict[tuple, Dict[str, Any]]:
+        # Tests build loaders with __new__; the pending map is created lazily.
+        return self.__dict__.setdefault("_pending_changes", {})
+
+    def _initiative_states(self, ids) -> Dict[int, Dict[str, Any]]:
+        """Stored values of the logged initiative columns, read with SQL so the
+        before and after snapshots have the same types."""
+        from sqlalchemy import text
+
+        ids = [int(i) for i in ids if i is not None]
+        states: Dict[int, Dict[str, Any]] = {}
+        session = self.controller._service._repository._session
+        cols = ", ".join(self._STATE_FIELDS)
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            marks = ", ".join(f":i{n}" for n in range(len(chunk)))
+            rows = session.execute(
+                text(f"SELECT id, {cols} FROM initiatives WHERE id IN ({marks})"),
+                {f"i{n}": v for n, v in enumerate(chunk)},
+            )
+            for row in rows:
+                states[row[0]] = dict(zip(self._STATE_FIELDS, row[1:]))
+        return states
+
+    def flush_change_log(self) -> int:
+        """Writes the net change log of everything touched since the last
+        flush. Returns the number of change log rows written."""
+        advisorship_handler = getattr(self, "handlers", {}).get(Advisorship)
+        if advisorship_handler is not None and hasattr(
+            advisorship_handler, "flush_members"
+        ):
+            advisorship_handler.flush_members()
+        pending = self._pending
+        self._pending_changes = {}
+        if not pending:
+            return 0
+        current = self._initiative_states(
+            entry["initiative_id"] for entry in pending.values()
+        )
+        written = 0
+        for (entity_type, initiative_id), entry in pending.items():
+            after_state = current.get(initiative_id, {})
+            if entry["before"] is None:
+                tracking_recorder.record_change(
+                    source_record_id=entry["source_record_id"],
+                    canonical_entity_type=entity_type,
+                    canonical_entity_id=initiative_id,
+                    operation="create",
+                    changed_fields=[
+                        key
+                        for key, value in entry["tracked"].items()
+                        if value not in (None, [], "")
+                    ],
+                    after={"initiative_id": initiative_id, **entry["tracked"]},
+                    reason=entry["reason"],
+                )
+                written += 1
+                continue
+            changed = [
+                field
+                for field in self._STATE_FIELDS
+                if canonical(entry["before"].get(field))
+                != canonical(after_state.get(field))
+            ]
+            if not changed:
+                continue
+            tracking_recorder.record_change(
+                source_record_id=entry["source_record_id"],
+                canonical_entity_type=entity_type,
+                canonical_entity_id=initiative_id,
+                operation="update",
+                changed_fields=changed,
+                before={f: entry["before"].get(f) for f in changed},
+                after={f: after_state.get(f) for f in changed},
+                reason=entry["reason"],
+            )
+            written += 1
+        return written
 
     def process_records(
         self, records: list[Dict[str, Any]], source_file: Optional[str] = None
@@ -212,6 +331,8 @@ class ProjectLoader:
                 f"{source_file or 'origem desconhecida'} — veja os warnings acima"
             )
         self.last_stats = dict(stats)
+        if not self.defer_change_log:
+            self.flush_change_log()
 
     def recalculate_all_parent_statuses(self) -> None:
         """
@@ -369,12 +490,17 @@ class ProjectLoader:
         # registro que permite auditar depois o que ficou de fora — e é dele
         # que o enriquecimento por documento descobre quais códigos a diretoria
         # recusou, para não recriá-los pela porta dos fundos.
+        tracking_key = self._tracking_key(
+            identity_key, title, row_dict, model_class, source_file
+        )
+        # The document this row came from, for team membership (spec 020).
+        project_data["_document_key"] = tracking_key
         source_record = tracking_recorder.record_source_record(
             source_entity_type=(
                 "advisorship" if model_class is Advisorship else "initiative"
             ),
             payload=row_dict,
-            source_record_id=identity_key or title or self._row_label(row_dict),
+            source_record_id=tracking_key,
             source_file=source_file,
             source_path=source_file,
         )
@@ -472,6 +598,22 @@ class ProjectLoader:
                     title = nome_persistido
                     project_data["title"] = nome_persistido
 
+        # The row the handler will update: the advisorship handler may still
+        # find one by its disambiguated title when the loader found none, and
+        # its state must be taken now, or the update is logged as a create.
+        updated = existing
+        if updated is None and hasattr(handler, "find_existing"):
+            updated = handler.find_existing(project_data)
+        change_key = (
+            "advisorship" if model_class is Advisorship else "initiative",
+            getattr(updated, "id", None),
+        )
+        if updated is not None and change_key not in self._pending:
+            self._pending[change_key] = {
+                "before": self._initiative_states([updated.id]).get(updated.id, {}),
+                "initiative_id": updated.id,
+            }
+
         initiative = handler.create_or_update(
             project_data=project_data,
             existing_initiative=existing,
@@ -550,24 +692,13 @@ class ProjectLoader:
                 selected_attributes=tracked_attrs,
                 selection_reason="loader_selected_values",
             )
-            tracking_recorder.record_change(
-                source_record_id=getattr(source_record, "id", None),
-                canonical_entity_type=canonical_entity_type,
-                canonical_entity_id=initiative.id,
-                operation="create" if not existing else "update",
-                changed_fields=[
-                    key
-                    for key, value in tracked_attrs.items()
-                    if value not in (None, [], "")
-                ],
-                before=(
-                    {"existing_initiative_id": getattr(existing, "id", None)}
-                    if existing
-                    else None
-                ),
-                after={"initiative_id": initiative.id, **tracked_attrs},
-                reason=f"{self.mapping_strategy.__class__.__name__} applied",
+            entry = self._pending.setdefault(
+                (canonical_entity_type, initiative.id),
+                {"before": None, "initiative_id": initiative.id},
             )
+            entry["source_record_id"] = getattr(source_record, "id", None)
+            entry["tracked"] = tracked_attrs
+            entry["reason"] = f"{self.mapping_strategy.__class__.__name__} applied"
 
         # 3.5 Link Advisorship members to Parent Project
         if parent_id and parent_initiative:

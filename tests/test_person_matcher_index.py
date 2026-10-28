@@ -346,5 +346,6 @@ def test_log_match_summary_reports_counters():
 
     assert lines == [
         "Person matching [x]: email=0 canonical=1 exact=0 normalised=0 "
-        "invariant=0 fuzzy=1 strict_rejected=0 created=1 create_failed=0"
+        "invariant=0 fuzzy=1 strict_rejected=0 created=1 create_failed=0 "
+        "fuzzy_ties=0"
     ]

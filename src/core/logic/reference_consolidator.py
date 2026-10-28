@@ -4,6 +4,8 @@ from typing import Iterable
 
 from loguru import logger
 
+from src.adapters.database.horizon_id_store import record_merge
+from src.core.logic.horizon_identity import merge_candidates
 from src.core.logic.initiative_identity import normalize_text
 
 
@@ -117,6 +119,9 @@ class ReferenceConsolidator:
             loser_id,
             winner_id,
         )
+        self._record_merge(
+            conn, "knowledge_area", "knowledge_areas", winner_id, loser_id
+        )
         self._merge_link_table(
             conn,
             table="group_knowledge_areas",
@@ -145,6 +150,7 @@ class ReferenceConsolidator:
 
     def _merge_team(self, conn: sqlite3.Connection, winner_id: int, loser_id: int) -> None:
         logger.info("Consolidating team {} into {}.", loser_id, winner_id)
+        self._record_merge(conn, "team", "teams", winner_id, loser_id)
         conn.execute(
             """
             UPDATE teams
@@ -166,6 +172,26 @@ class ReferenceConsolidator:
         )
         self._merge_team_members(conn, winner_id, loser_id)
         conn.execute("DELETE FROM teams WHERE id = ?", (loser_id,))
+
+    def _record_merge(
+        self,
+        conn: sqlite3.Connection,
+        entity_type: str,
+        table: str,
+        winner_id: int,
+        loser_id: int,
+    ) -> None:
+        """Spec 020 (research R7): the loser's ids, before the row is gone."""
+        row = conn.execute(
+            f"SELECT id, name FROM {table} WHERE id = ?", (loser_id,)
+        ).fetchone()
+        if row is not None:
+            record_merge(
+                conn,
+                entity_type,
+                merge_candidates(entity_type, {"id": row[0], "name": row[1]}),
+                winner_id,
+            )
 
     def _merge_link_table(
         self,

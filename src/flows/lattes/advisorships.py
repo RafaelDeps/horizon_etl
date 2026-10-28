@@ -11,6 +11,7 @@ from prefect.utilities.annotations import quote
 from research_domain.controllers import ResearcherController
 
 from src.adapters.sources.lattes_parser import LattesParser
+from src.core.logic.horizon_identity import dedupe_same_document, join_normalized
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
     ResearcherRef,
@@ -85,10 +86,23 @@ def ingest_advisorships_file_task(
 
     # 2. Parse Advisorships
     parser = LattesParser()
-    advisorships = parser.parse_advisorships(data)
+    # An advisorship entered twice in the same CV is processed once, always
+    # the same version (spec 020, FR-020).
+    advisorships, dropped = dedupe_same_document(
+        parser.parse_advisorships(data),
+        lambda row: join_normalized(
+            row.get("title"),
+            row.get("student_name"),
+            row.get("start_year") or row.get("end_year") or row.get("year"),
+            row.get("type"),
+            row.get("institution"),
+        ),
+    )
 
     if not advisorships:
         return
+    if dropped:
+        logger.info(f"Dropped {dropped} duplicate advisorships for {lattes_id}")
 
     logger.info(f"Processing {len(advisorships)} advisorships for {json_name}...")
 
@@ -111,7 +125,9 @@ def ingest_lattes_advisorships_flow():
     if not os.path.isabs(base_dir):
         base_dir = os.path.join(os.getcwd(), base_dir)
 
-    json_files = glob.glob(os.path.join(base_dir, "*.json"))
+    # Sorted: person resolution depends on who already exists, so the order
+    # must not depend on the filesystem (spec 020, FR-002).
+    json_files = sorted(glob.glob(os.path.join(base_dir, "*.json")))
 
     logger = get_run_logger()
     if not json_files:
@@ -130,6 +146,9 @@ def ingest_lattes_advisorships_flow():
     # Um loader por fase: montá-lo por currículo recarregava todas as
     # iniciativas e pessoas a cada um dos ~435 CVs (spec 015).
     project_loader = ProjectLoader(mapping_strategy=None)
+    # One net change log for the whole phase (spec 020): an advisorship listed
+    # in several CVs is logged once, by its real difference.
+    project_loader.defer_change_log = True
 
     with tracking_recorder.run_context(
         source_system="lattes_advisorships", flow_name="lattes_advisorships"
@@ -142,6 +161,7 @@ def ingest_lattes_advisorships_flow():
             log_cv_duration(
                 "lattes_advisorships", position, len(json_files), json_file, started
             )
+        project_loader.flush_change_log()
     project_loader.team_synchronizer.log_lookup_summary("lattes_advisorships")
     project_loader.person_matcher.log_match_summary("lattes_advisorships")
     log_researcher_resolution_summary("lattes_advisorships")

@@ -203,3 +203,109 @@ def test_ensure_team_reads_the_register_once():
         synchronizer.ensure_team(f"Equipe {i % 40}", "desc")
 
     assert controller.get_all_calls == 1
+
+
+# ------------------------------------------------- spec 020: contributions
+import pytest  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import text as sql_text  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
+
+
+class _SessionTeamController(FakeTeamController):
+    """Fake controller whose repository exposes a real SQL session, so the
+    contribution path (which needs SQL) runs."""
+
+    def __init__(self, members, session):
+        super().__init__(members)
+        self._service = type(
+            "S", (), {"_repository": type("R", (), {"_session": session})()}
+        )()
+
+
+@pytest.fixture
+def contrib_session(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'c.db'}")
+    session = Session(engine)
+    session.execute(
+        sql_text(
+            "CREATE TABLE team_member_contributions (team_id INTEGER, person_id "
+            "INTEGER, role_id INTEGER, document_key TEXT, start_date TEXT, "
+            "PRIMARY KEY (team_id, person_id, role_id, document_key))"
+        )
+    )
+    session.commit()
+    yield session
+    session.close()
+    engine.dispose()
+
+
+def _members_snapshot(controller):
+    return sorted(
+        (m.person_id, m.role_id, str(m.start_date)[:10] if m.start_date else "")
+        for m in controller.members
+    )
+
+
+def _sync_both(sync, a, b, order):
+    for key, roster in (
+        (("cv_a", a), ("cv_b", b)) if order == "ab" else (("cv_b", b), ("cv_a", a))
+    ):
+        sync.synchronize_members(1, roster, document_key=key)
+
+
+@pytest.mark.parametrize("order", ["ab", "ba"])
+def test_two_documents_give_the_union_whatever_the_order(contrib_session, order):
+    roles = {"Researcher": MockRole(2), "Coordinator": MockRole(3)}
+    controller = _SessionTeamController([], contrib_session)
+    sync = TeamSynchronizer(controller, roles_cache=roles)
+    a = [
+        (MockPerson(10), "Coordinator", "2020-01-01"),
+        (MockPerson(11), "Researcher", "2020-01-01"),
+    ]
+    b = [
+        (MockPerson(10), "Coordinator", "2020-01-01"),
+        (MockPerson(12), "Researcher", "2021-01-01"),
+    ]
+    _sync_both(sync, a, b, order)
+    assert _members_snapshot(controller) == [
+        (10, 3, "2020-01-01"),
+        (11, 2, "2020-01-01"),
+        (12, 2, "2021-01-01"),
+    ]
+
+
+def test_rerun_of_the_same_documents_writes_nothing(contrib_session):
+    roles = {"Researcher": MockRole(2), "Coordinator": MockRole(3)}
+    controller = _SessionTeamController([], contrib_session)
+    sync = TeamSynchronizer(controller, roles_cache=roles)
+    a = [(MockPerson(10), "Coordinator", "2020-01-01")]
+    b = [(MockPerson(11), "Researcher", "2021-01-01")]
+    _sync_both(sync, a, b, "ab")
+    ids_before = sorted(m.id for m in controller.members)
+    _sync_both(sync, a, b, "ab")
+    _sync_both(sync, a, b, "ba")
+    assert sorted(m.id for m in controller.members) == ids_before
+    assert controller.removed_ids == []
+
+
+def test_member_leaves_only_when_no_document_lists_it(contrib_session):
+    roles = {"Researcher": MockRole(2)}
+    controller = _SessionTeamController([], contrib_session)
+    sync = TeamSynchronizer(controller, roles_cache=roles)
+    shared = (MockPerson(11), "Researcher", "2020-01-01")
+    sync.synchronize_members(1, [shared], document_key="cv_a")
+    sync.synchronize_members(1, [shared], document_key="cv_b")
+    sync.synchronize_members(1, [], document_key="cv_a")  # cv_a dropped it
+    assert _members_snapshot(controller) == [(11, 2, "2020-01-01")]
+    sync.synchronize_members(1, [], document_key="cv_b")  # nobody lists it
+    assert _members_snapshot(controller) == []
+
+
+def test_without_document_key_the_old_behaviour_is_kept(contrib_session):
+    roles = {"Researcher": MockRole(2)}
+    controller = _SessionTeamController([MockMember(1, 99, 2)], contrib_session)
+    sync = TeamSynchronizer(controller, roles_cache=roles)
+    sync.synchronize_members(1, [(MockPerson(11), "Researcher", None)])
+    # replace semantics for the managed role: person 99 is removed
+    assert [m.person_id for m in controller.members] == [11]

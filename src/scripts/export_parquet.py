@@ -32,7 +32,19 @@ COMPRESSION = "zstd"
 NESTED_TYPES = (dict, list)
 
 
+# Spec 020: object-wrapped tables (file -> key of the row list) converted like
+# the canonical arrays; the other keys go to ``<name>.meta.json``.
+WRAPPED_TABLES = {
+    "horizon_ids_canonical.json": "ids",
+    "horizon_id_aliases_canonical.json": "aliases",
+}
+
+
 def _is_id_column(name: str) -> bool:
+    # Horizon ids are text (``person:lattes:...``), never an integer column,
+    # even when a column is all nulls (FR-017).
+    if name.endswith("horizon_id"):
+        return False
     return name == "id" or name.endswith("_id")
 
 
@@ -87,6 +99,16 @@ def convert_file(path: str, dst_dir: str) -> str:
 
     if isinstance(data, list) and data and isinstance(data[0], dict):
         _write_table(data, os.path.join(dst_dir, f"{stem}.parquet"))
+        return "table"
+
+    rows_key = WRAPPED_TABLES.get(name)
+    if rows_key and isinstance(data, dict) and data.get(rows_key):
+        _write_table(data[rows_key], os.path.join(dst_dir, f"{stem}.parquet"))
+        meta = {k: v for k, v in data.items() if k != rows_key}
+        with open(
+            os.path.join(dst_dir, f"{stem}.meta.json"), "w", encoding="utf-8"
+        ) as fh:
+            json.dump(meta, fh, ensure_ascii=False)
         return "table"
 
     if _is_graph(data):

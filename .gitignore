@@ -45,6 +45,7 @@ logs/
 venv/
 db/*.db
 db/*.db-*
+db/horizon_id_history.json
 cache/
 lattes.config
 lattes_effective.list

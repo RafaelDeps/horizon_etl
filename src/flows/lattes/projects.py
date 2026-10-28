@@ -28,6 +28,13 @@ from sqlalchemy.engine import Engine
 
 from src.adapters.sources.lattes_parser import LattesParser
 from src.core.logic.entity_manager import EntityManager
+from src.core.logic.horizon_identity import (
+    canonical,
+    dedupe_same_document,
+    lattes_article_key,
+    lattes_education_key,
+)
+from src.core.logic.initiative_identity import normalize_text
 from src.core.logic.pii_anonymizer import scrub_pii_deep
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
@@ -182,24 +189,28 @@ def _ingest_researcher_file(
             personal_info["cnpq_url"] = f"http://lattes.cnpq.br/{lattes_id}"
 
         # 1. Update Personal Info
-        needs_update = False
-        if personal_info.get("citation_names"):
-            target_researcher.citation_names = personal_info["citation_names"]
-            needs_update = True
-        if personal_info.get("cnpq_url"):
-            target_researcher.cnpq_url = personal_info["cnpq_url"]
-            needs_update = True
         if personal_info.get("resume"):
             # LGPD: the resume is free text that can embed personal e-mails
             # and phone numbers. Scrub it before persisting, so the column,
             # the tracking payloads and the change log never carry raw PII.
             personal_info["resume"] = scrub_pii_deep(personal_info["resume"])
-            target_researcher.resume = personal_info["resume"]
-            needs_update = True
+        profile_fields = ("citation_names", "cnpq_url", "resume")
+        # Only the fields whose stored value really differs are written and
+        # logged (spec 020, FR-022): a rerun over the same CV changes nothing.
+        before = {f: getattr(target_researcher, f, None) for f in profile_fields}
+        changed = [
+            f
+            for f in profile_fields
+            if personal_info.get(f)
+            and canonical(personal_info[f]) != canonical(before[f])
+        ]
 
-        if needs_update:
+        if any(personal_info.get(f) for f in profile_fields):
             try:
-                researcher_ctrl.update(target_researcher)
+                for field in changed:
+                    setattr(target_researcher, field, personal_info[field])
+                if changed:
+                    researcher_ctrl.update(target_researcher)
                 source_record = tracking_recorder.record_source_record(
                     source_entity_type="researcher_profile",
                     payload=personal_info,
@@ -225,23 +236,17 @@ def _ingest_researcher_file(
                     },
                     selection_reason="lattes_personal_info_selected_values",
                 )
-                tracking_recorder.record_change(
-                    source_record_id=getattr(source_record, "id", None),
-                    canonical_entity_type="researcher",
-                    canonical_entity_id=target_researcher.id,
-                    operation="update",
-                    changed_fields=[
-                        key
-                        for key in ("citation_names", "cnpq_url", "resume")
-                        if personal_info.get(key)
-                    ],
-                    after={
-                        "citation_names": personal_info.get("citation_names"),
-                        "cnpq_url": personal_info.get("cnpq_url"),
-                        "resume": personal_info.get("resume"),
-                    },
-                    reason="Updated from Lattes personal info",
-                )
+                if changed:
+                    tracking_recorder.record_change(
+                        source_record_id=getattr(source_record, "id", None),
+                        canonical_entity_type="researcher",
+                        canonical_entity_id=target_researcher.id,
+                        operation="update",
+                        changed_fields=changed,
+                        before={f: before[f] for f in changed},
+                        after={f: personal_info.get(f) for f in changed},
+                        reason="Updated from Lattes personal info",
+                    )
             except Exception as e:
                 logger.warning(f"Failed to update researcher data for {lattes_id}: {e}")
 
@@ -259,15 +264,17 @@ def _ingest_researcher_file(
         projects.extend(parser.parse_extension_projects(data))
         projects.extend(parser.parse_development_projects(data))
 
-        # Deduplicate projects by name
-        seen_names = set()
-        unique_projects = []
+        # Deduplicate projects by normalized name. A project entered twice in
+        # the same CV is processed once, always the same version (spec 020,
+        # FR-020): the one with the smallest canonical hash.
         for p in projects:
-            p_name = (p.get("name") or "").strip()
-            if p_name and p_name not in seen_names:
-                p["name"] = p_name
-                unique_projects.append(p)
-                seen_names.add(p_name)
+            p["name"] = (p.get("name") or "").strip()
+        unique_projects, dropped = dedupe_same_document(
+            [p for p in projects if p["name"]],
+            lambda p: normalize_text(p["name"]),
+        )
+        if dropped:
+            logger.info(f"Dropped {dropped} duplicate projects in {filename}")
 
         if unique_projects:
             logger.info(
@@ -287,13 +294,23 @@ def _ingest_researcher_file(
         articles = []
         articles.extend(parser.parse_articles(data))
         articles.extend(parser.parse_conference_papers(data))
+        articles, dropped = dedupe_same_document(
+            articles, lambda art: lattes_article_key(file_path, art)
+        )
+        if dropped:
+            logger.info(f"Dropped {dropped} duplicate articles in {filename}")
         if articles:
             ingest_articles_task(
                 articles, target_researcher, all_researchers, parser, file_path
             )
 
         # 4. Handle Academic Education
-        education_list = parser.parse_academic_education(data)
+        education_list, dropped = dedupe_same_document(
+            parser.parse_academic_education(data),
+            lambda edu: lattes_education_key(file_path, edu),
+        )
+        if dropped:
+            logger.info(f"Dropped {dropped} duplicate educations in {filename}")
         if education_list:
             ingest_education_task(
                 education_list,
@@ -372,6 +389,53 @@ def ingest_file_task(file_path: str, entity_manager: EntityManager):
     )
 
 
+# Filled on an existing article when it has no value and a CV gives one.
+_ARTICLE_FILL_FIELDS = ("doi", "journal_conference", "volume", "pages")
+
+
+def _fill_missing_article_fields(session, paper_id, art, source_record_id) -> None:
+    """The same work listed in several CVs: an empty field of the stored
+    article takes the value of a later CV, never overwriting one. Without it
+    the result depended on which CV came first (spec 020: the DOI of 8
+    articles was lost when the CVs were processed in a fixed order)."""
+    row = session.execute(
+        text(
+            "SELECT doi, journal_conference, volume, pages FROM articles "
+            "WHERE id = :id"
+        ),
+        {"id": paper_id},
+    ).fetchone()
+    if row is None:
+        return
+    current = dict(zip(_ARTICLE_FILL_FIELDS, row))
+    filled = {
+        field: art.get(field)
+        for field in _ARTICLE_FILL_FIELDS
+        if canonical(current[field]) is None and canonical(art.get(field)) is not None
+    }
+    if not filled:
+        return
+    session.execute(
+        text(
+            "UPDATE articles SET "
+            + ", ".join(f"{field} = :{field}" for field in filled)
+            + " WHERE id = :id"
+        ),
+        {**filled, "id": paper_id},
+    )
+    session.commit()
+    tracking_recorder.record_change(
+        source_record_id=source_record_id,
+        canonical_entity_type="article",
+        canonical_entity_id=paper_id,
+        operation="update",
+        changed_fields=sorted(filled),
+        before={field: current[field] for field in filled},
+        after=filled,
+        reason="Filled missing article fields from Lattes",
+    )
+
+
 def ingest_articles_task(
     articles: List[Dict],
     target_researcher: Researcher,
@@ -391,7 +455,9 @@ def ingest_articles_task(
             source_record = tracking_recorder.record_source_record(
                 source_entity_type="article",
                 payload=art,
-                source_record_id=(doi or f"{parser.normalize_title(title)}|{year}"),
+                # Source-native key (spec 020): the CV it came from plus the
+                # fields that tell two works apart.
+                source_record_id=lattes_article_key(source_file, art),
                 source_file=source_file,
                 source_path=source_file,
             )
@@ -450,6 +516,10 @@ def ingest_articles_task(
                         "pages": art.get("pages"),
                     },
                     reason="Created article from Lattes",
+                )
+            else:
+                _fill_missing_article_fields(
+                    session, paper_id, art, getattr(source_record, "id", None)
                 )
 
             tracking_recorder.record_entity_match(
@@ -521,14 +591,9 @@ def ingest_education_task(
             source_record = tracking_recorder.record_source_record(
                 source_entity_type="academic_education",
                 payload=edu_data,
-                source_record_id="|".join(
-                    [
-                        str(target_researcher.id),
-                        str(edu_data.get("course_name") or ""),
-                        str(edu_data.get("degree") or ""),
-                        str(edu_data.get("start_year") or ""),
-                    ]
-                ),
+                # The CV's lattes_id, never researchers.id: a person merge
+                # must not make the same education look new (spec 020).
+                source_record_id=lattes_education_key(source_file, edu_data),
                 source_file=source_file,
                 source_path=source_file,
             )
@@ -900,7 +965,9 @@ def ingest_lattes_projects_flow():
     if not os.path.isabs(base_dir):
         base_dir = os.path.join(os.getcwd(), base_dir)
 
-    json_files = glob.glob(os.path.join(base_dir, "*.json"))
+    # Sorted: name matching depends on who already exists, so the order must
+    # not depend on the filesystem (spec 020, FR-002).
+    json_files = sorted(glob.glob(os.path.join(base_dir, "*.json")))
     logger.info(f"Found {len(json_files)} files in {base_dir}")
 
     if not json_files:
@@ -936,6 +1003,9 @@ def ingest_lattes_projects_flow():
     from src.core.logic.project_loader import ProjectLoader
 
     project_loader = ProjectLoader(mapping_strategy=None)
+    # One net change log for the whole phase (spec 020): a project listed in
+    # several CVs is logged once, by its real difference.
+    project_loader.defer_change_log = True
 
     with tracking_recorder.run_context(
         source_system="lattes_projects", flow_name="lattes_projects"
@@ -962,6 +1032,7 @@ def ingest_lattes_projects_flow():
             log_cv_duration(
                 "lattes_projects", position, len(json_files), json_file, started
             )
+        project_loader.flush_change_log()
     project_loader.team_synchronizer.log_lookup_summary("lattes_projects")
     project_loader.person_matcher.log_match_summary("lattes_projects")
     log_researcher_resolution_summary("lattes_projects")

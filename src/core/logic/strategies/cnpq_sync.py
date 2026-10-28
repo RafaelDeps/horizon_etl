@@ -9,6 +9,7 @@ from research_domain import (
     RoleController,
 )
 
+from src.core.logic.horizon_identity import cnpq_line_key, cnpq_member_key
 from src.core.logic.researcher_resolution import resolve_or_create_researcher
 from src.tracking.recorder import tracking_recorder
 
@@ -215,11 +216,19 @@ class CnpqSyncLogic:
                 else:
                     start_date = self._parse_date(str(ano_formacao))
 
+                current_start_date = None
                 if start_date:
                     current_start_date = session.execute(
                         text("SELECT start_date FROM research_groups WHERE id = :gid"),
                         {"gid": group_id},
                     ).scalar()
+                # Same date already stored: nothing to write or log (spec 020,
+                # FR-022). SQLite returns it as text, so compare the day only.
+                if start_date and str(current_start_date or "")[:10] == (
+                    start_date.isoformat()[:10]
+                ):
+                    start_date = None
+                if start_date:
                     logger.info(f"Updating group {group_id} start_date: {start_date}")
                     upd_rg = text(
                         "UPDATE research_groups SET start_date = :sd WHERE id = :gid"
@@ -268,6 +277,12 @@ class CnpqSyncLogic:
             # Fetch all once to avoid N+1 and many session calls
             all_res = self.res_ctrl.get_all()
 
+        # A person listed with several periods in the same group (sometimes
+        # under spellings that resolve to the same researcher): the last listed
+        # period that has an end date wins. The end dates are collected per
+        # resolved person and written once after the loop, so the periods do
+        # not overwrite each other on every run (spec 020, FR-022).
+        pending_end_dates = {}
         for m_data in members_data:
             name = m_data.get("name")
             if not name:
@@ -275,7 +290,9 @@ class CnpqSyncLogic:
             source_record = tracking_recorder.record_source_record(
                 source_entity_type="cnpq_group_member",
                 payload=m_data,
-                source_record_id=f"{group_id}|{name}|{m_data.get('role')}",
+                # Source-native key (spec 020): the CNPq group id from the
+                # URL and the membership dates, never research_groups.id.
+                source_record_id=cnpq_member_key(source_file, m_data),
                 source_file=source_file,
                 source_path=source_file,
             )
@@ -420,59 +437,14 @@ class CnpqSyncLogic:
                                 None,
                             )
 
-                            if target_member:
-                                current_end_date = target_member.end_date
-                                # Check if end_date provided by CNPq is 'new' (we have it, DB doesn't)
-                                # or different (CNPq has date, DB has different date)
-
-                                should_update = False
-                                if end_date and current_end_date != end_date:
-                                    should_update = True
-
-                                if should_update:
-                                    before_end_date = current_end_date
-                                    logger.info(
-                                        f"Updating member {name} dates: End {current_end_date} -> {end_date}"
-                                    )
-
-                                    # Use direct SQL update for safety and to avoid ORM complexity with composite keys/relationships
-                                    upd_query = text(
-                                        """
-                                        UPDATE team_members 
-                                        SET end_date = :end_dt 
-                                        WHERE team_id = :gid AND person_id = :pid
-                                    """
-                                    )
-                                    session = self.rg_ctrl._service._repository._session
-                                    session.execute(
-                                        upd_query,
-                                        {
-                                            "end_dt": end_date,
-                                            "gid": group_id,
-                                            "pid": researcher.id,
-                                        },
-                                    )
-                                    session.commit()
-                                    tracking_recorder.record_change(
-                                        source_record_id=getattr(
-                                            source_record, "id", None
-                                        ),
-                                        canonical_entity_type="research_group",
-                                        canonical_entity_id=group_id,
-                                        operation="update",
-                                        changed_fields=["member_end_date"],
-                                        before={
-                                            "person_id": researcher.id,
-                                            "end_date": before_end_date,
-                                        },
-                                        after={
-                                            "person_id": researcher.id,
-                                            "end_date": end_date,
-                                        },
-                                        reason="Updated group member end_date from CNPq sync",
-                                    )
-                                else:
-                                    logger.debug(f"Member {name} up to date.")
+                            if target_member and end_date:
+                                # A later period of the same person replaces
+                                # an earlier one; written after the loop.
+                                pending_end_dates[researcher.id] = (
+                                    name,
+                                    end_date,
+                                    getattr(source_record, "id", None),
+                                )
 
                         except Exception as inner_e:
                             logger.warning(f"Failed to update member {name}: {inner_e}")
@@ -492,11 +464,63 @@ class CnpqSyncLogic:
                 except Exception:
                     pass
 
+        self._apply_member_end_dates(group_id, pending_end_dates)
+
         # Final commit for the whole group batch to be extra sure
         try:
             self.rg_ctrl._service._repository._session.commit()
         except Exception:
             pass
+
+    def _apply_member_end_dates(self, group_id: Any, pending_end_dates: dict) -> None:
+        """Write the end date chosen for each member, only when the stored
+        day differs (read from the table, not from cached member objects)."""
+        from sqlalchemy import text
+
+        session = self.rg_ctrl._service._repository._session
+        for person_id, (name, end_date, source_record_id) in sorted(
+            pending_end_dates.items()
+        ):
+            try:
+                current_end_date = session.execute(
+                    text(
+                        "SELECT end_date FROM team_members "
+                        "WHERE team_id = :gid AND person_id = :pid"
+                    ),
+                    {"gid": group_id, "pid": person_id},
+                ).scalar()
+                # Compare the day as text: the stored value and the parsed one
+                # have different types.
+                if str(current_end_date or "")[:10] == str(end_date)[:10]:
+                    logger.debug(f"Member {name} up to date.")
+                    continue
+                logger.info(
+                    f"Updating member {name} dates: End {current_end_date} -> {end_date}"
+                )
+                session.execute(
+                    text(
+                        "UPDATE team_members SET end_date = :end_dt "
+                        "WHERE team_id = :gid AND person_id = :pid"
+                    ),
+                    {"end_dt": end_date, "gid": group_id, "pid": person_id},
+                )
+                session.commit()
+                tracking_recorder.record_change(
+                    source_record_id=source_record_id,
+                    canonical_entity_type="research_group",
+                    canonical_entity_id=group_id,
+                    operation="update",
+                    changed_fields=["member_end_date"],
+                    before={"person_id": person_id, "end_date": current_end_date},
+                    after={"person_id": person_id, "end_date": end_date},
+                    reason="Updated group member end_date from CNPq sync",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update member {name}: {e}")
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
 
     def sync_knowledge_areas(
         self,
@@ -540,7 +564,7 @@ class CnpqSyncLogic:
                 source_record = tracking_recorder.record_source_record(
                     source_entity_type="cnpq_research_line",
                     payload=line,
-                    source_record_id=f"{group_id}|{norm_name}",
+                    source_record_id=cnpq_line_key(source_file, norm_name),
                     source_file=source_file,
                     source_path=source_file,
                 )

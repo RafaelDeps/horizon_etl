@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from src.adapters.database.horizon_id_store import record_merge
+from src.core.logic.horizon_identity import merge_candidates
 from src.core.logic.person_identity import is_junk_name
 from src.core.logic.person_matcher import PersonMatcher
 
@@ -244,6 +246,7 @@ class PersonConsolidator:
             )
 
             with conn:
+                self._record_merge(conn, winner_id, loser_id)
                 self._merge_person_record(conn, winner_id, loser_id)
                 self._merge_researcher_record(conn, winner_id, loser_id)
                 self._merge_person_emails(conn, winner_id, loser_id)
@@ -284,6 +287,19 @@ class PersonConsolidator:
                     target_column="researcher_id",
                 )
                 self._merge_team_members(conn, winner_id, loser_id)
+                if self._table_exists(conn, "team_member_contributions"):
+                    # Spec 020: what each document said about the loser now
+                    # belongs to the winner; a row the winner already has from
+                    # the same document is kept once.
+                    conn.execute(
+                        "UPDATE OR IGNORE team_member_contributions "
+                        "SET person_id = ? WHERE person_id = ?",
+                        (winner_id, loser_id),
+                    )
+                    conn.execute(
+                        "DELETE FROM team_member_contributions WHERE person_id = ?",
+                        (loser_id,),
+                    )
                 if self._table_exists(conn, "advisorship_members"):
                     self._merge_advisorship_members(conn, winner_id, loser_id)
                 else:
@@ -329,6 +345,23 @@ class PersonConsolidator:
                 self._remap_lineage(conn, winner_id, loser_id)
                 conn.execute("DELETE FROM researchers WHERE id = ?", (loser_id,))
                 conn.execute("DELETE FROM persons WHERE id = ?", (loser_id,))
+
+    def _record_merge(
+        self, conn: sqlite3.Connection, winner_id: int, loser_id: int
+    ) -> None:
+        """Spec 020 (research R7): the ids the loser was known by, captured
+        before its rows are gone, so they become aliases of the winner."""
+        row = conn.execute(
+            "SELECT p.id, p.name, r.cnpq_url FROM persons p "
+            "LEFT JOIN researchers r ON r.id = p.id WHERE p.id = ?",
+            (loser_id,),
+        ).fetchone()
+        record_merge(
+            conn,
+            "person",
+            merge_candidates("person", dict(row)),
+            winner_id,
+        )
 
     def _merge_person_record(
         self, conn: sqlite3.Connection, winner_id: int, loser_id: int

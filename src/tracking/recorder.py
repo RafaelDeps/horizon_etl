@@ -6,6 +6,7 @@ from typing import Any, Iterable, Optional
 
 from sqlalchemy.exc import IntegrityError
 
+from src.core.logic.horizon_identity import canonical
 from src.core.logic.pii_anonymizer import scrub_source_record_payload
 from src.tracking.context import current_ingestion_run_id, current_source_system
 from src.tracking.controllers import (
@@ -34,8 +35,10 @@ def _json_safe(value: Any) -> Any:
 
 
 def stable_hash(value: Any) -> str:
+    # Hash the canonical form (spec 020): the same information always gives the
+    # same hash, whatever the source's types (600 / 600.0 / "600", NaN / "").
     payload = json.dumps(
-        value, sort_keys=True, ensure_ascii=False, default=_json_default
+        canonical(value), sort_keys=True, ensure_ascii=False, default=_json_default
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

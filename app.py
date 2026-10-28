@@ -305,6 +305,12 @@ def main():
                 report["report_path"],
             )
 
+        if flow_to_run == "assign_horizon_ids":
+            from src.flows.maintenance.horizon_ids import assign_horizon_ids_flow
+
+            logger.info("Executing Flow: Assign Horizon Ids")
+            assign_horizon_ids_flow()
+
         if flow_to_run == "enrich_projects":
             from src.flows.sigpesq.enrich_projects import enrich_projects_flow
 

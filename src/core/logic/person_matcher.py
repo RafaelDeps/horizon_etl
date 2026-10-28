@@ -6,6 +6,7 @@ from rapidfuzz import fuzz as rapid_fuzz
 from rapidfuzz import process as rapid_process
 from thefuzz import utils as fuzz_utils
 
+from src.core.logic.horizon_identity import FUZZY_MATCH_THRESHOLD, hash12
 from src.core.logic.person_identity import normalize_participant_name
 from src.core.logic.pii_anonymizer import anonymize_email, is_anonymized_email
 
@@ -48,6 +49,7 @@ class PersonMatcher:
             "strict_rejected": 0,
             "created": 0,
             "create_failed": 0,
+            "fuzzy_ties": 0,
         }
 
     def _reset_name_index(self) -> None:
@@ -84,7 +86,8 @@ class PersonMatcher:
             f"canonical={s['canonical']} exact={s['exact']} "
             f"normalised={s['normalised']} invariant={s['invariant']} "
             f"fuzzy={s['fuzzy']} strict_rejected={s['strict_rejected']} "
-            f"created={s['created']} create_failed={s['create_failed']}"
+            f"created={s['created']} create_failed={s['create_failed']} "
+            f"fuzzy_ties={s['fuzzy_ties']}"
         )
 
     def preload_cache(self):
@@ -205,6 +208,30 @@ class PersonMatcher:
                 score += 10
         return score
 
+    def _break_fuzzy_tie(self, found, normalized_input: str):
+        """Picks one of the candidates sharing the best fuzzy score by a fixed
+        rule, not by cache order (spec 020, FR-023a): the richer record first
+        (as the canonical step does), then the exact normalized name, then the
+        smallest name hash. Counts the ties."""
+        if not found:
+            return None
+        top = max(raw for _, raw, _ in found)
+        tied = [item for item in found if item[1] == top]
+        if len(tied) == 1:
+            return tied[0]
+        self._stats["fuzzy_ties"] += 1
+
+        def rank(item):
+            key = self._fuzzy_keys[item[2]]
+            person = self._persons_cache[self._last_by_norm[key]]
+            return (
+                -self._person_quality_score(person),
+                0 if key == normalized_input else 1,
+                hash12(key),
+            )
+
+        return min(tied, key=rank)
+
     def match_or_create(
         self, name: str, email: Optional[str] = None, strict_match: bool = False
     ) -> Optional[Person]:
@@ -288,20 +315,22 @@ class PersonMatcher:
                 fuzz_utils.full_process(normalized_input), force_ascii=True
             )
             if query:
-                best = rapid_process.extractOne(
+                found = rapid_process.extract(
                     query,
                     self._fuzzy_processed,
                     scorer=rapid_fuzz.token_sort_ratio,
                     processor=None,
-                    score_cutoff=89.5,
+                    score_cutoff=FUZZY_MATCH_THRESHOLD - 0.5,
+                    limit=None,
                 )
+                best = self._break_fuzzy_tie(found, normalized_input)
         if best is not None:
             _, raw_score, index = best
             best_norm_match = self._fuzzy_keys[index]
             score = int(round(raw_score))
 
             # Threshold of 90%
-            if score >= 90:
+            if score >= FUZZY_MATCH_THRESHOLD:
                 # If strict match is enabled, we only accept 100% score (same tokens)
                 if strict_match and score < 100:
                     logger.debug(

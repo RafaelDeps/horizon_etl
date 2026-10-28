@@ -424,3 +424,79 @@ def test_advisorship_handler_sets_cancelled_on_created_advisorship(
     assert created.cancelled is True
     assert created.cancellation_date is None
     MockAdvisorshipController.return_value.create.assert_called_once_with(created)
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_unchanged_advisorship_member_is_kept_not_reinserted(
+    _MockAdvisorshipController,
+    MockFellowshipController,
+):
+    """Spec 020 (FR-022): the same person, role and day keeps its row."""
+    from datetime import date
+
+    from research_domain.domain.entities.advisorship import AdvisorshipMember
+
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    person = MagicMock(id=42)
+    advisorship = Advisorship(name="Orientacao")
+    kept = AdvisorshipMember(
+        person_id=42, role_name="Student", start_date=date(2019, 1, 1)
+    )
+    advisorship.members = [kept]
+
+    with patch.object(handler, "_coerce_to_person", return_value=person):
+        handler._sync_advisorship_member(
+            advisorship,
+            person=person,
+            role_name="Student",
+            start_date=datetime(2019, 1, 1),
+        )
+        assert advisorship.members == [kept]
+
+        # A different start day still replaces the member.
+        handler._sync_advisorship_member(
+            advisorship,
+            person=person,
+            role_name="Student",
+            start_date=datetime(2020, 1, 1),
+        )
+    assert kept not in advisorship.members
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_deferred_members_are_written_once_with_the_last_value(
+    MockAdvisorshipController,
+    MockFellowshipController,
+):
+    """Spec 020 (FR-022): two rows on one existing advisorship in a phase."""
+    from datetime import date
+
+    from research_domain.domain.entities.advisorship import AdvisorshipMember
+
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    handler.defer_members = True
+    person = MagicMock(id=42)
+    advisorship = Advisorship(name="Orientacao")
+    advisorship.id = 136
+    kept = AdvisorshipMember(
+        person_id=42, role_name="Student", start_date=date(2015, 1, 1)
+    )
+    advisorship.members = [kept]
+
+    with patch.object(handler, "_coerce_to_person", return_value=person):
+        for year in (2017, 2015):  # the same work listed twice in one CV
+            handler._sync_advisorship_member(
+                advisorship,
+                person=person,
+                role_name="Student",
+                start_date=datetime(year, 1, 1),
+            )
+        assert advisorship.members == [kept]  # nothing written yet
+        assert handler.flush_members() == 1
+
+    assert advisorship.members == [kept]  # the last value equals the stored one
+    assert handler.defer_members is True

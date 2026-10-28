@@ -6,8 +6,13 @@ from typing import Optional
 from loguru import logger
 from prefect import flow, task
 
+from src.adapters.database.horizon_id_store import (
+    SqliteHorizonIdStore,
+    sqlite_path_from_url,
+)
 from src.adapters.sinks.json_sink import JsonSink
 from src.core.logic.canonical_exporter import CanonicalDataExporter
+from src.core.logic.horizon_id_assigner import write_alias_file, write_id_file
 from src.core.logic.pii_anonymizer import scrub_pii_deep
 from src.core.logic.research_group_exporter import ResearchGroupExporter
 from src.flows.exports.null_researchers_collaboration_graph import (
@@ -258,6 +263,21 @@ def export_advisorship_analytics_task(output_dir: str):
     exporter.generate_advisorship_mart(input_path, output_path)
 
 
+@task(name="export_horizon_ids_task")
+def export_horizon_ids_task(output_dir: str):
+    """Spec 020: publishes the permanent ids and their aliases in two new
+    files next to the existing exports, which keep their format. A database
+    without ids (the assign_horizon_ids phase did not run) only logs a
+    warning."""
+    logger.info("Starting Horizon ids export...")
+    try:
+        store = SqliteHorizonIdStore(sqlite_path_from_url(os.getenv("DATABASE_URL")))
+        write_id_file(store, output_dir)
+        write_alias_file(store, output_dir)
+    except Exception as exc:  # the new files must never sink the export
+        logger.warning("Horizon ids export skipped: {}", exc)
+
+
 # Directories that live under the export folder but are NOT deliverables.
 #
 # * project_sigpesq_files_json -- INPUT: regenerable by
@@ -398,6 +418,7 @@ def export_canonical_data_flow(
     export_outside_ifes_collaboration_graph_flow(output_dir=output_dir)
     export_null_researchers_collaboration_graph_flow(output_dir=output_dir)
     export_research_group_membership_graphs_manifest_flow(output_dir=output_dir)
+    export_horizon_ids_task(output_dir)
     zip_exports_task(output_dir)
 
 

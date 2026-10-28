@@ -302,3 +302,46 @@ Mapping Epics -> User Stories -> Tasks status.
   per call). Same root cause as TD-016. An ETL-side fix would write the
   `initiative_teams` row directly, which needs the maintainer's decision under
   the "do not replace third-party behaviour" rule. Status: Ready (decision).
+
+## Follow-ups — origin: `specs/020-horizon-id-idempotent-hash` (2026-10-27)
+
+- **TD-022 — 27 Lattes CVs collapse into one "[Nome-nao-identificado]"
+  person**: for 27 of the 435 CVs in `data/lattes_json/`, scriptLattes could not
+  read the name and writes `[Nome-nao-identificado]` (files
+  `NNN_Nome-nao-identificado_<lattes_id>.json`). The content is real (resume,
+  education, projects). The Lattes phases resolve all 27 to the same person
+  (id 7185 in the 2026-10-24 database), so their projects, articles and
+  educations hang on one fake person. Its `cnpq_url` and resume are overwritten
+  by each CV in turn, so the data never settles between runs, and the spec 020
+  fixpoint check excludes these CVs. Every one of the 27 `lattes_id` values is in
+  the versioned `data/lattes_run/lattes.list` with the real name (for example
+  0418477486525610 Felipe Sellin, 4528503986063803 Tessa Chimalli,
+  3943417292642301 Anderson Mathias Holtz). Proposed fix: when a CV's name is
+  the placeholder, take the name from `lattes.list` for its `lattes_id`, in
+  `src/flows/lattes/projects.py` and `src/flows/lattes/advisorships.py`. Expected
+  effect: 27 distinct persons with `person:lattes:<id>` ids instead of one.
+  Agreed with the maintainer on 2026-10-27 as a future spec, kept out of spec 020
+  for size. Status: Ready.
+- **TD-023 — 149 groups of duplicate rows found by the horizon_id rules**: when
+  two rows of the same type derive the same `horizon_id`, the assigner adds a
+  collision suffix (`~<hex6>` of the source file name, then `~2`, `~3`). On the
+  2026-10-24 database this happens in 149 groups: articles 73, professional
+  activities 53, productions 8, knowledge areas 7, fellowships 4, research
+  groups 2, academic educations 2. All are the same item stored twice in the
+  database, differing only by case or accent of a name or title (examples in
+  `specs/020-horizon-id-idempotent-hash/research.md`, R2). The ids are stable,
+  but each pair is one real item with two ids. Candidate for a deduplication
+  spec, which would turn the extra id of each pair into a `merge` alias.
+  Status: Ready.
+- **TD-024 — Person resolution in a fresh run depends on the order persons are
+  created**: `PersonMatcher` compares a name only with the persons that exist
+  at that point of the run. Example (spec 020, research R9.3): one CV resolved
+  "Ciro Alexandre Torres Alves" to person 7710 because the researcher "Ciro
+  Alexandre Alves Torres" (11030) was created later in the run; on a populated
+  database the same CV resolves to 11030. Spec 020 made the order fixed (CVs
+  sorted, deterministic fuzzy tie-break), so two rebuilds agree and reruns reach
+  a fixpoint, but a rebuild and an incremental database can still attach a few
+  rows to a different person, and the name spelling kept for a person can change
+  (695 → 714 rows in `null_researchers_canonical.json` between the old and new
+  code). A fix would resolve names against the full set of known names before
+  writing (two passes). Status: Ready (design).
