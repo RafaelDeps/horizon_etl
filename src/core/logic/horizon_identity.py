@@ -182,12 +182,20 @@ def _content_hash(row: dict) -> str:
     )
 
 
+def _document(path: Any) -> str:
+    """A source document by what identifies it in the source: a Lattes CV by
+    its Lattes id, since its file name starts with the CV's position in the
+    Lattes list; any other file by its name, since the stored path is
+    absolute and depends on the checkout (local, GitHub Actions)."""
+    lattes = lattes_id_from_cv_path(path)
+    if lattes:
+        return f"lattes:{lattes}"
+    return os.path.basename(str(path or ""))
+
+
 def _origin(source_keys: Optional[list]) -> str:
-    """The first source document of an entity, by file name only: the stored
-    path is absolute and depends on the checkout (local, GitHub Actions)."""
-    files = sorted(
-        os.path.basename(k.get("source_file") or "") for k in source_keys or []
-    )
+    """The first source document of an entity (see ``_document``)."""
+    files = sorted(_document(k.get("source_file")) for k in source_keys or [])
     return files[0] if files else ""
 
 

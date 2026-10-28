@@ -61,8 +61,10 @@ character replaced by a space, lowercase, whitespace collapsed.
 ## Collisions (FR-008)
 
 When two rows derive the same id, each gets `~<hex6>` from the hash of the
-file name of its source document of origin (never the path, which depends on
-the checkout). If they still collide, rows ordered by the
+name of its source document of origin. A Lattes CV is named
+`lattes:<lattes_id>`, never its file name, which starts with the CV's
+position in the Lattes list. Any other document is named by its file name,
+never its path, which depends on the checkout. If they still collide, rows ordered by the
 canonical hash of their content get `~2`, `~3`, …, and the first keeps the
 step-1 id. On the 2026-10-24 database this happens in 149 groups, all rows
 duplicated in the database by case or accent (research R2).

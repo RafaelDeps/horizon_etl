@@ -26,8 +26,10 @@ Date: 2026-10-27 · Spec: `specs/020-horizon-id-idempotent-hash/` · Branch:
   - false "create" change logs;
   - collision suffixes that depended on the checkout path;
   - 8 articles that lost their DOI with the new CV order.
-- **Pending**: the GitHub Actions comparison (SC-006, T061). It needs a
-  manual dispatch on the fork, after the maintainer's go-ahead.
+- **GitHub Actions** (SC-006): a fork run gives the same id as the local run
+  for every item both runs have. The comparison found one defect, now fixed:
+  the collision suffix depended on the CV's position in the Lattes list
+  (section 11).
 
 ## 2. Success criteria
 
@@ -38,7 +40,7 @@ Date: 2026-10-27 · Spec: `specs/020-horizon-id-idempotent-hash/` · Branch:
 | SC-003 unique ids | 0 shared, 100% assigned, homonyms distinct and stable | 0 shared ids; every row of every entity table has one; homonym test passes across two rebuilds; 149 collision groups get stable suffixes | Met |
 | SC-004 tracking keys | 0 database ids in keys; 0 keys with more than one hash | 0 keys built from database ids (every CNPq/Lattes key starts with `cnpq:` or `lattes:`); keys with more than one hash 1,005 → 1 (one SigPesq research group listed twice in the report) | Met for database ids; 1 source duplicate left |
 | SC-005 compatibility | schemas and export fields unchanged | Schema test: every pre-existing table identical, 6 new tables. Export test and real exports: the 26 existing files keep their record fields; 2 new files | Met |
-| SC-006 local vs CI | identical id files | Not run (needs the maintainer's go-ahead for a fork dispatch) | Pending |
+| SC-006 local vs CI | identical id files | Fork run 40664390765 vs the local weekly of 2026-10-27: 40,529 shared items, all with the same base id. The 37 that differ differ only in the collision suffix, because the two runs read different CVs (section 11) | Met |
 | SC-007 old ids resolve | 100% after merge and rebuild | Unit scenarios (merge, equal-priority merge, upgraded key, rebuild from zip, snapshot, key corrected, rule change, chains, reappearing id) pass. Real rebuild: every id of the previous new-code run is current or an alias | Met |
 | SC-008 old vs new replay | only the listed differences | All differences classified in section 6; one defect (DOI) found and fixed | Met after the fix |
 
@@ -153,7 +155,7 @@ same people with another spelling kept, the same cause as TD-024.
 | `black --check src tests` | 47 files would be reformatted | the same 47 files |
 | `isort --check src tests` | 37 errors | the same 37 |
 | `flake8 src tests` | 574 | 574 (−2 W291 in `cnpq_sync.py`, +2 E402 for new imports in the existing late-import block of `projects.py`) |
-| `pytest` | 6 failed (pre-existing) | 579 passed, the same 6 failed |
+| `pytest` | 6 failed (pre-existing) | 580 passed, the same 6 failed |
 
 The constitution's quality gate also lists mypy, which `make ci-check` does not
 run; it was not run here.
@@ -167,4 +169,50 @@ run; it was not run here.
   affect the fixpoint.
 - **TD-023**: the 149 duplicate groups (section 5).
 - **TD-024**: person resolution in a fresh run depends on creation order.
-- **SC-006 / T061**: compare the id file of a fork CI run with the local one.
+
+## 11. GitHub Actions run (SC-006)
+
+Run [40664390765](https://github.com/RafaelDeps/horizon_etl/actions/runs/40664390765)
+on the fork, branch `023-horizon-id-idempotent-hash`, 2026-10-28. All 21 phases
+exit 0, in 1 h 36 min. The id file comes from the zip of the bot commit
+`b404122`.
+
+The local weekly is the 2026-10-27 run of section 8. Both runs download their
+inputs, so they do not read exactly the same data.
+
+- **Ids**: the CI run has 51,231 ids, all distinct; the local run has 62,228.
+  Keyed by (`entity_type`, `parent_horizon_id`, `natural_key`), 40,529 items
+  are in both runs. 40,492 of them have the same id. The other 37 have the
+  same base id with another collision suffix (`~` part). In each of these
+  groups one run read a CV that the other could not read, so the group has
+  other members, or no collision at all. No id depends on the environment
+  (`HORIZON_PII_HMAC_KEY`, paths, Python version).
+- **Fewer entities in CI**: the Lattes portal returned an unreadable CV
+  ("[Nome-nao-identificado]") for 119 of the 435 curricula. The local run had
+  27 and the CI run of 2026-10-24 had 23. The download code did not change
+  in this spec, and the log shows no error. The cause is on the portal side
+  for that run. As a result the CI run has 15,076 persons against 17,125
+  locally, and 9,390 initiatives against 11,725.
+- **Aliases**: none, as expected. The branch's previous zip came from before
+  this spec, so there was no id history to read.
+
+**Defect found and fixed**: the collision suffix hashed the CV file name, for
+example `229_Leandro-Colombi-Resendo_8108487234297364.json`. The leading number
+is the CV's position in `data/lattes_run/lattes.list`. Adding or removing one
+curriculum shifts the position of every later CV, and so changes the suffix of
+their colliding items. Those old ids could not be matched to the new ones, so
+they would be retired, not aliased.
+
+Fixed: a Lattes CV now counts as `lattes:<lattes_id>` for the suffix
+(`_document` in `src/core/logic/horizon_identity.py`). A unit test moves two
+CVs in the list and checks that the ids stay the same.
+
+Checked on a copy of the final replay database (section 8) by re-running
+`assign_horizon_ids` with the fix:
+- the same 62,227 entities, all ids distinct, 302 with a collision suffix;
+- 150 ids change, all articles, all with the same base id and only another
+  suffix;
+- the 150 old ids become retired aliases.
+
+The old ids only exist in the fork's CI zip (`b404122`), never upstream, so
+the rule version stays 1.

@@ -118,12 +118,18 @@ full 64-character hashes (no gain, harder to read).
 **Decision**: After deriving all ids of a type, group the rows that share an
 id. For each group:
 1. Append `~` plus the first 6 hex characters of the hash of the row's source
-   document of origin: the file name (`basename`) of the `source_file` of its
-   first `entity_matches` → `source_records` row, ordered by that name. For
-   Lattes items this is the CV, for CNPq the group id, for SigPesq the report.
-   Only the name: `source_file` is stored as an absolute path, which differs
-   between checkouts (found by the 2026-10-27 rebuild check, where two rebuilds
-   in different directories gave 150 articles different suffixes).
+   document of origin. This is the first `entity_matches` → `source_records`
+   row of the entity, ordered by a document name. A Lattes CV is named
+   `lattes:<lattes_id>`; any other file is named by its file name
+   (`basename`), for example the SigPesq report.
+   - Only the name, because `source_file` is stored as an absolute path,
+     which differs between checkouts. The 2026-10-27 rebuild check found
+     this: two rebuilds in different directories gave 150 articles different
+     suffixes.
+   - Not the CV file name, because it starts with the CV's position in
+     `data/lattes_run/lattes.list` (`229_<name>_<lattes_id>.json`), which
+     moves when a curriculum is added or removed. Found by the 2026-10-28
+     GitHub Actions comparison.
 2. If rows still share an id (same document, or no source record at all),
    order them by the canonical hash of their own row content (all columns
    except the numeric id) and append `~2`, `~3`, …; the first keeps the

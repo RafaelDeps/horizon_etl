@@ -363,3 +363,24 @@ def test_collision_suffix_does_not_depend_on_the_checkout_path():
         return sorted([a.horizon_id, b.horizon_id])
 
     assert pair("/home/x/data/lattes_json") == pair("/runner/work/data/lattes_json")
+
+
+def test_collision_suffix_does_not_depend_on_the_lattes_list_position():
+    """A CV file name starts with its position in the Lattes list, which moves
+    when a curriculum is added or removed; the suffix must not."""
+    from src.core.logic.horizon_identity import article_decision, resolve_collisions
+
+    row = {"id": 1, "title": "T", "year": "2020", "type": "J", "doi": ""}
+
+    def pair(pos_a, pos_b):
+        a = article_decision(
+            row, [{"source_file": f"/d/{pos_a}_A_1111222233334444.json"}]
+        )
+        b = article_decision(
+            dict(row, id=2), [{"source_file": f"/d/{pos_b}_B_5555666677778888.json"}]
+        )
+        resolve_collisions([a, b])
+        return a.horizon_id, b.horizon_id
+
+    assert pair(219, 220) == pair(1, 435)
+    assert pair(219, 220)[0] != pair(219, 220)[1]
