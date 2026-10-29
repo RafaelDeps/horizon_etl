@@ -207,6 +207,17 @@ def _identity_part(source_record_id: str) -> str:
     return source_record_id
 
 
+def person_reference_key(name: Any) -> str:
+    """Stable key of a person as a resolution target (spec 021, research R3):
+    the same name hash ``person_decision`` uses, never a database id."""
+    return f"person:h:{hash12(name)}"
+
+
+def initiative_reference_key(name: Any) -> str:
+    """Stable key of an initiative as a resolution target (spec 021)."""
+    return f"initiative:h:{hash12(name)}"
+
+
 def _name_key(*parts: Any) -> str:
     return "|".join(normalize_text(p) for p in parts)
 

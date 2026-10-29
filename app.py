@@ -305,6 +305,14 @@ def main():
                 report["report_path"],
             )
 
+        if flow_to_run == "recalculate_parent_projects":
+            from src.flows.maintenance.parent_projects import (
+                recalculate_parent_projects_flow,
+            )
+
+            logger.info("Executing Flow: Recalculate Parent Projects")
+            recalculate_parent_projects_flow()
+
         if flow_to_run == "assign_horizon_ids":
             from src.flows.maintenance.horizon_ids import assign_horizon_ids_flow
 

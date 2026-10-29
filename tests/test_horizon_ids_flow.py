@@ -39,3 +39,32 @@ def test_flow_assigns_ids_and_writes_the_report(tmp_path, monkeypatch):
     report = json.loads((report_dir / "horizon_ids_report.json").read_text())
     assert report["counts"]["person"] == {"lattes_id": 1, "name": 3}
     assert report["rule_version"] == 1
+
+
+def test_a_second_assignment_on_unchanged_data_writes_nothing(tmp_path, monkeypatch):
+    """Spec 021 (SC-001): ids, candidates and their dates stay as they were."""
+    for var in (
+        "HORIZON_TELEGRAM_BOT_TOKEN",
+        "HORIZON_TELEGRAM_CHAT_ID",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+    ):
+        monkeypatch.setenv(var, "")
+    monkeypatch.chdir(tmp_path)
+    db = tmp_path / "flow.db"
+    _build(db, order_seed=3)
+    url = f"sqlite:///{db}"
+
+    def snapshot():
+        con = sqlite3.connect(db)
+        out = {
+            t: sorted(con.execute(f"SELECT * FROM {t}"))
+            for t in ("horizon_ids", "horizon_id_candidates", "horizon_meta")
+        }
+        con.close()
+        return out
+
+    assign_horizon_ids_flow(database_url=url, report_dir=str(tmp_path / "r1"))
+    first = snapshot()
+    assign_horizon_ids_flow(database_url=url, report_dir=str(tmp_path / "r2"))
+    assert snapshot() == first

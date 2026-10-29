@@ -187,6 +187,83 @@ def test_horizon_ids_export_without_ids_writes_nothing(tmp_path, monkeypatch):
     assert not (tmp_path / "horizon_id_aliases_canonical.json").exists()
 
 
+def test_document_states_file_follows_the_contract(tmp_path, monkeypatch):
+    """Spec 021: source_document_states_canonical.json lists keys, statuses
+    and dates only, sorted, with a null processed_at for a document never
+    processed (contracts/source-document-states-export.md)."""
+    import sqlite3
+
+    from src.db.migrations import MIGRATIONS
+    from src.flows.exports.canonical_data import export_horizon_ids_task
+
+    db = tmp_path / "states.db"
+    con = sqlite3.connect(db)
+    con.execute(dict(MIGRATIONS)["0008_source_document_states"])
+    con.executemany(
+        "INSERT INTO source_document_states (source_system, document_key, "
+        "content_hash, rule_version, last_seen_at, processed_at, status, "
+        "last_failure) VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
+        [
+            (
+                "lattes_projects",
+                "9860697624155451",
+                "h1",
+                "2026-10-24T02:58:11Z",
+                "2026-10-24T02:58:11Z",
+                "inactive",
+                None,
+            ),
+            (
+                "cnpq_group",
+                "4439471564090237",
+                "h2",
+                "2026-11-07T03:10:44Z",
+                "2026-10-31T03:12:02Z",
+                "active",
+                None,
+            ),
+            (
+                "lattes_projects",
+                "1191009329970047",
+                None,
+                "2026-11-07T03:10:44Z",
+                None,
+                "active",
+                "unidentified",
+            ),
+        ],
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db}")
+    out = tmp_path / "exports"
+    out.mkdir()
+
+    export_horizon_ids_task.fn(str(out))
+    payload = json.loads((out / "source_document_states_canonical.json").read_text())
+
+    assert set(payload) == {"rule_version", "generated_at", "documents"}
+    docs = payload["documents"]
+    assert [(d["source_system"], d["document_key"]) for d in docs] == [
+        ("cnpq_group", "4439471564090237"),
+        ("lattes_projects", "1191009329970047"),
+        ("lattes_projects", "9860697624155451"),
+    ]
+    for doc in docs:
+        assert set(doc) == {
+            "source_system",
+            "document_key",
+            "status",
+            "last_seen_at",
+            "processed_at",
+        }
+    assert docs[1]["processed_at"] is None
+    assert docs[2]["status"] == "inactive"
+    # Keys, statuses and dates only: no failure details, no hashes.
+    text_out = json.dumps(payload)
+    assert "unidentified" not in text_out and "h1" not in text_out
+
+
 def _key_sets(value, prefix=""):
     """Every key path of a JSON document: the record fields, nested ones too."""
     out = set()

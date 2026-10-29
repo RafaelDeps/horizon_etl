@@ -20,6 +20,7 @@ from sqlalchemy import text
 from src.core.logic.entity_manager import EntityManager
 from src.core.logic.horizon_identity import (
     canonical,
+    initiative_reference_key,
     lattes_advisorship_key,
     lattes_initiative_key,
 )
@@ -138,6 +139,18 @@ class ProjectLoader:
         self._existing_by_norm_name = existing_by_norm_name
         self._existing_by_identity = existing_by_identity
 
+    def reset_caches(self) -> None:
+        """After a rolled-back document (spec 021) the in-memory indexes may
+        point at rows that no longer exist; they are rebuilt on next use."""
+        self._existing_initiatives = None
+        self._existing_by_name = None
+        self._existing_by_norm_name = None
+        self._existing_by_identity = None
+        self.person_matcher.reset_cache()
+        self.team_synchronizer.reset_lookup()
+        self.team_synchronizer.roles_cache.clear()
+        self.team_synchronizer.roles_cache.update(self.entity_manager.ensure_roles())
+
     def _ensure_person_cache(self) -> None:
         if self.person_matcher._persons_cache:
             return
@@ -154,6 +167,8 @@ class ProjectLoader:
             df = df.fillna("")
         except Exception as e:
             logger.error(f"Failed to read Excel file {file_path}: {e}")
+            # The report is then not a complete listing (spec 021, R8).
+            self.read_failures = getattr(self, "read_failures", 0) + 1
             return
 
         records = df.to_dict("records")
@@ -180,6 +195,19 @@ class ProjectLoader:
         "parent_id",
     )
     defer_change_log = False
+    # Spec 021: set by the SigPesq flows, where each report row is one source
+    # document. The Lattes flows leave it None: their document is the CV.
+    document_skip = None
+
+    def _row_document_key(self, row_dict, source_file) -> str:
+        project_data = self.mapping_strategy.map_row(row_dict)
+        return self._tracking_key(
+            project_data.get("identity_key"),
+            project_data.get("title"),
+            row_dict,
+            project_data.get("model_class", Initiative),
+            source_file,
+        )
 
     @property
     def _pending(self) -> Dict[tuple, Dict[str, Any]]:
@@ -290,23 +318,37 @@ class ProjectLoader:
         }
 
         for row_dict in records:
-            try:
-                self._process_row(
+            skip = self.document_skip
+            if skip is None:
+                self._process_row_safely(
                     row_dict,
                     existing_by_name,
                     existing_by_identity,
                     stats,
-                    source_file=source_file,
-                    existing_by_norm_name=existing_by_norm_name,
+                    source_file,
+                    existing_by_norm_name,
                 )
-            except Exception as e:
-                logger.warning(
-                    f"PERDIDO por erro: {self._row_label(row_dict)}"
-                    + (f" [{source_file}]" if source_file else "")
-                    + f" — {type(e).__name__}: {e}"
-                )
-                stats["failed"] += 1
-                self._rollback_session()
+                continue
+            with skip.document(self._row_document_key(row_dict, source_file)) as doc:
+                if doc.unchanged(row_dict):
+                    stats["skipped_unchanged"] = stats.get("skipped_unchanged", 0) + 1
+                    continue
+                doc.begin()
+                if not self._process_row_safely(
+                    row_dict,
+                    existing_by_name,
+                    existing_by_identity,
+                    stats,
+                    source_file,
+                    existing_by_norm_name,
+                ):
+                    doc.mark_partial("row failed")
+            if self._existing_by_name is None:
+                # The row was rolled back and reset_caches dropped the indexes.
+                self._ensure_existing_initiatives()
+                existing_by_name = self._existing_by_name
+                existing_by_norm_name = self._existing_by_norm_name
+                existing_by_identity = self._existing_by_identity
 
         new_persons_count = (
             len(self.person_matcher._persons_cache) - initial_persons_count
@@ -464,6 +506,40 @@ class ProjectLoader:
         logger.info(
             f"Recalculation complete. Processed {processed_count} parents, updated {updated_count}."
         )
+
+    def _process_row_safely(
+        self,
+        row_dict,
+        existing_by_name,
+        existing_by_identity,
+        stats,
+        source_file,
+        existing_by_norm_name,
+    ) -> bool:
+        try:
+            self._process_row(
+                row_dict,
+                existing_by_name,
+                existing_by_identity,
+                stats,
+                source_file=source_file,
+                existing_by_norm_name=existing_by_norm_name,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"PERDIDO por erro: {self._row_label(row_dict)}"
+                + (f" [{source_file}]" if source_file else "")
+                + f" — {type(e).__name__}: {e}"
+            )
+            stats["failed"] += 1
+            self._rollback_session()
+            # Inside a document (a Lattes CV) the lost row fails it: committed,
+            # the row's items would look removed (spec 021, research R4).
+            from src.core.logic.document_skip import mark_partial
+
+            mark_partial(f"row: {type(e).__name__}: {e}")
+            return False
 
     def _process_row(
         self,
@@ -726,7 +802,25 @@ class ProjectLoader:
                 initiative, project_data, rg_name
             )
 
-    def _resolve_existing_initiative(
+    def _resolve_existing_initiative(self, **kwargs) -> Optional[Any]:
+        """Resolves an initiative (see ``_lookup_existing_initiative``) and,
+        inside a source document (spec 021), records the resolution."""
+        found = self._lookup_existing_initiative(**kwargs)
+        from src.core.logic.document_skip import document_reference
+
+        document_reference(
+            "initiative",
+            f"{kwargs.get('identity_key') or ''}|title:"
+            f"{normalize_text(kwargs.get('title') or '')}",
+            (
+                initiative_reference_key(getattr(found, "name", None))
+                if found is not None
+                else "not_found"
+            ),
+        )
+        return found
+
+    def _lookup_existing_initiative(
         self,
         *,
         existing_by_name: Dict[str, Any],

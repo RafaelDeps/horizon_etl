@@ -53,9 +53,20 @@ def _dump(db):
         for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
         if r[0] not in SKIP_TABLES
     ]
-    out = {t: sorted(map(repr, con.execute(f'SELECT * FROM "{t}"'))) for t in tables}
+    out = {t: sorted(map(repr, con.execute(_select(con, t)))) for t in tables}
     con.close()
     return out
+
+
+def _select(con, table):
+    # Spec 021: last_seen_at is the listing date, set by every run that sees
+    # a document; it is not data written by processing.
+    columns = [
+        f'"{r[1]}"'
+        for r in con.execute(f'PRAGMA table_info("{table}")')
+        if not (table == "source_document_states" and r[1] == "last_seen_at")
+    ]
+    return f'SELECT {", ".join(columns)} FROM "{table}"'
 
 
 def test_second_and_third_passes_are_identical(tmp_path):

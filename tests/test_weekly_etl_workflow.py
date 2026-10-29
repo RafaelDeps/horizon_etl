@@ -27,7 +27,9 @@ def test_makefile_weekly_flows_runs_weekly_pipeline_entrypoint():
     end = rest.index("\n\n") if "\n\n" in rest else len(rest)
     target = rest[:end]
 
-    assert "weekly-flows: db-reset prefect-server" in target
+    # Spec 021: the weekly keeps the persistent database (db-ensure creates a
+    # missing one); a rebuild is make full-refresh or db-reset.
+    assert "weekly-flows: db-ensure prefect-server" in target
     assert 'app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"' in target
     assert "app.py all_sources" not in target
     assert "app.py export_canonical" not in target

@@ -11,7 +11,12 @@ from prefect.utilities.annotations import quote
 from research_domain.controllers import ResearcherController
 
 from src.adapters.sources.lattes_parser import LattesParser
-from src.core.logic.horizon_identity import dedupe_same_document, join_normalized
+from src.core.logic.horizon_identity import (
+    dedupe_same_document,
+    join_normalized,
+    lattes_id_from_cv_path,
+)
+from src.core.logic.document_skip import carry
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
     ResearcherRef,
@@ -22,6 +27,8 @@ from src.core.logic.researcher_resolution import (
 from src.core.logic.strategies.lattes_advisorships import (
     LattesAdvisorshipMappingStrategy,
 )
+from src.flows.document_phase import document_phase
+from src.flows.lattes.cv_document import finish_lattes_listing, read_cv
 from src.flows.lattes.cv_timing import log_cv_duration
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
@@ -32,6 +39,7 @@ def ingest_advisorships_file_task(
     file_path: str,
     researcher_index: List[ResearcherRef],
     project_loader: Optional[ProjectLoader] = None,
+    data: Optional[dict] = None,
 ):
     try:
         logger = get_run_logger()
@@ -44,12 +52,13 @@ def ingest_advisorships_file_task(
     if not lattes_id or not lattes_id.isdigit():
         return
 
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load JSON {file_path}: {e}")
-        return
+    if data is None:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load JSON {file_path}: {e}")
+            return
 
     # 1. Identify Supervisor (Owner of CV)
     # O índice de correspondência chega pronto do flow: montá-lo aqui custaria
@@ -83,6 +92,8 @@ def ingest_advisorships_file_task(
         return
 
     json_name = getattr(supervisor, "name", "Unknown")
+    # The CV's own subject (spec 021): left out of the total-loss count.
+    carry("researcher", supervisor.id, is_subject=True)
 
     # 2. Parse Advisorships
     parser = LattesParser()
@@ -134,6 +145,13 @@ def ingest_lattes_advisorships_flow():
         logger.warning(f"No JSON files found in {base_dir}")
         return
 
+    # Opened before any controller: their sessions must bind to the shared
+    # connection of the document transactions (spec 021).
+    with document_phase("lattes_advisorships") as skip:
+        _ingest_lattes_advisorships(json_files, skip, logger)
+
+
+def _ingest_lattes_advisorships(json_files: List[str], skip, logger) -> None:
     # Uma leitura do cadastro por execução da fase, não por currículo.
     session = None
     try:
@@ -150,18 +168,35 @@ def ingest_lattes_advisorships_flow():
     # in several CVs is logged once, by its real difference.
     project_loader.defer_change_log = True
 
+    def reload_caches():
+        # A rolled-back CV may have created rows the indexes still point at.
+        researcher_index[:] = load_researcher_index(session)
+        project_loader.reset_caches()
+
+    skip.on_rollback = reload_caches
+
     with tracking_recorder.run_context(
         source_system="lattes_advisorships", flow_name="lattes_advisorships"
     ):
         for position, json_file in enumerate(json_files, start=1):
             started = time.perf_counter()
-            ingest_advisorships_file_task(
-                json_file, quote(researcher_index), quote(project_loader)
-            )
+            key = lattes_id_from_cv_path(json_file) or os.path.basename(json_file)
+            with skip.document(key) as doc:
+                data = read_cv(json_file)
+                if doc.unchanged(data):
+                    continue
+                doc.begin()
+                ingest_advisorships_file_task(
+                    json_file,
+                    quote(researcher_index),
+                    quote(project_loader),
+                    quote(data),
+                )
             log_cv_duration(
                 "lattes_advisorships", position, len(json_files), json_file, started
             )
         project_loader.flush_change_log()
+        finish_lattes_listing(skip, json_files)
     project_loader.team_synchronizer.log_lookup_summary("lattes_advisorships")
     project_loader.person_matcher.log_match_summary("lattes_advisorships")
     log_researcher_resolution_summary("lattes_advisorships")

@@ -9,6 +9,7 @@ from research_domain import (
     RoleController,
 )
 
+from src.core.logic.document_skip import mark_partial
 from src.core.logic.horizon_identity import cnpq_line_key, cnpq_member_key
 from src.core.logic.researcher_resolution import resolve_or_create_researcher
 from src.tracking.recorder import tracking_recorder
@@ -248,6 +249,7 @@ class CnpqSyncLogic:
 
         except Exception as e:
             logger.error(f"Failed to sync group {group_id}: {e}")
+            mark_partial(f"group: {e}")
             try:
                 if hasattr(self, "rg_ctrl"):
                     self.rg_ctrl._service._repository._session.rollback()
@@ -360,6 +362,7 @@ class CnpqSyncLogic:
                         session.commit()
                 except Exception as e:
                     logger.warning(f"Failed to fix researchers table for {name}: {e}")
+                    mark_partial(f"researcher row: {e}")
                     # Don't block flow
                     pass
 
@@ -448,9 +451,11 @@ class CnpqSyncLogic:
 
                         except Exception as inner_e:
                             logger.warning(f"Failed to update member {name}: {inner_e}")
+                            mark_partial(f"member: {inner_e}")
 
                 except Exception as e:
                     logger.warning(f"Could not associate member {name}: {e}")
+                    mark_partial(f"member: {e}")
                     # Rollback for this specific association failure
                     try:
                         self.rg_ctrl._service._repository._session.rollback()
@@ -459,6 +464,7 @@ class CnpqSyncLogic:
 
             except Exception as e:
                 logger.error(f"Error syncing member {name}: {e}")
+                mark_partial(f"member: {e}")
                 try:
                     self.rg_ctrl._service._repository._session.rollback()
                 except Exception:
@@ -517,6 +523,7 @@ class CnpqSyncLogic:
                 )
             except Exception as e:
                 logger.warning(f"Failed to update member {name}: {e}")
+                mark_partial(f"member end date: {e}")
                 try:
                     session.rollback()
                 except Exception:
@@ -587,6 +594,7 @@ class CnpqSyncLogic:
                         )
                     except Exception as e:
                         logger.error(f"Failed to create KA {norm_name}: {e}")
+                        mark_partial(f"knowledge area: {e}")
                         continue
                 else:
                     logger.debug(f"Using existing KA: {ka.name}")
@@ -633,6 +641,7 @@ class CnpqSyncLogic:
                     logger.error(
                         f"Failed to associate KA {ka.id} to Group {group_id}: {e}"
                     )
+                    mark_partial(f"knowledge area link: {e}")
                     # Don't rollback whole transaction, just skip this association?
                     # Actually, if auto-commit isn't on, we might need to rollback sub-transaction if using Postgres
                     # But here likely wrapping inside outer transaction or session management.
@@ -683,6 +692,7 @@ class CnpqSyncLogic:
 
         except Exception as e:
             logger.error(f"Failed to sync knowledge areas for {group_id}: {e}")
+            mark_partial(f"knowledge areas: {e}")
             try:
                 self.rg_ctrl._service._repository._session.rollback()
             except:

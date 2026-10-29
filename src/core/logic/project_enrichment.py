@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from rapidfuzz import fuzz, process
 from sqlalchemy import text
 
+from src.core.logic.horizon_identity import canonical
 from src.core.logic.initiative_identity import normalize_text
 from src.db.migrations import run_migrations
 from src.tracking.recorder import tracking_recorder
@@ -615,6 +616,10 @@ class ProjectEnrichmentLoader:
                     desc_written=new_desc if write_desc else None,
                     path=cand.path,
                     pj=cand.pj,
+                    # Spec 021: a run over unchanged documents logs no change.
+                    changed=bool(write_desc and new_desc != current)
+                    or canonical(enrichment)
+                    != canonical(current_enrichment.get(init_id)),
                 )
 
             stats["enriched"] += 1
@@ -881,6 +886,7 @@ class ProjectEnrichmentLoader:
         desc_written: Optional[str],
         path: str,
         pj: Dict[str, Any],
+        changed: bool = True,
     ) -> None:
         if not tracking_recorder.has_active_run():
             return
@@ -909,6 +915,8 @@ class ProjectEnrichmentLoader:
             selected_attributes=selected,
             selection_reason="sigpesq_project_file_enrichment",
         )
+        if not changed:
+            return
         tracking_recorder.record_change(
             source_record_id=sr_id,
             canonical_entity_type="initiative",

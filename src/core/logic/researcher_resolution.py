@@ -5,6 +5,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from src.adapters.sources.lattes_parser import LattesParser
+from src.core.logic.horizon_identity import person_reference_key
 from src.core.logic.person_identity import normalize_participant_name
 from src.core.logic.researcher_creation import create_researcher_with_resume_fallback
 from src.research_domain_compat import AdvisorshipRole
@@ -161,6 +162,10 @@ def resolve_researcher_from_lattes(
             best = researcher
             best_score = score
 
+    _record_reference(
+        f"{normalize_participant_name(json_name or '')}|lattes:{lattes_id or ''}",
+        best if best_score > 0 else None,
+    )
     if best_score <= 0:
         return None
 
@@ -258,7 +263,22 @@ def resolve_researcher_by_name(
 
     result = best if best_score > 0 else None
     _count_resolution(result, name, identification_id)
+    _record_reference(target_norm, result)
     return result
+
+
+def _record_reference(lookup_key: str, researcher: Any) -> None:
+    """Spec 021, research R3: the resolution a document made, by stable key."""
+    from src.core.logic.document_skip import carry, document_reference
+
+    outcome = (
+        person_reference_key(getattr(researcher, "name", None))
+        if researcher is not None
+        else "not_found"
+    )
+    document_reference("researcher_owner", lookup_key, outcome)
+    if researcher is not None and getattr(researcher, "id", None) is not None:
+        carry("researcher", researcher.id)
 
 
 def resolve_or_create_researcher(
@@ -286,6 +306,7 @@ def resolve_or_create_researcher(
         identification_id=identification_id,
         emails=emails,
     )
+    _record_reference(normalize_participant_name(name), researcher)
     if researcher:
         # O índice de correspondência recebe um registro leve; listas de
         # entidades ORM (cnpq_sync, sigpesq_excel) continuam recebendo a

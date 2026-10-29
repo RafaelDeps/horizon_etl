@@ -276,6 +276,15 @@ def export_horizon_ids_task(output_dir: str):
         write_alias_file(store, output_dir)
     except Exception as exc:  # the new files must never sink the export
         logger.warning("Horizon ids export skipped: {}", exc)
+    # Spec 021: status and dates of every source document, in a new file.
+    try:
+        from src.adapters.database.document_state_store import read_document_states
+        from src.core.logic.document_skip import write_states_file
+
+        db_path = sqlite_path_from_url(os.getenv("DATABASE_URL"))
+        write_states_file(read_document_states(db_path), output_dir)
+    except Exception as exc:
+        logger.warning("Document states export skipped: {}", exc)
 
 
 # Directories that live under the export folder but are NOT deliverables.

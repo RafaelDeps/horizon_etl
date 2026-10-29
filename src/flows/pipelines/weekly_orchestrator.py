@@ -32,6 +32,7 @@ gracefully without failing the weekly run.
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger
@@ -71,6 +72,16 @@ _PHASES = [
         "app",
     ),
     ("enrich_projects", ["enrich_projects"], 900, False, "app"),
+    # After every source phase (spec 021): parent projects span all their
+    # advisorships, SigPesq and Lattes, so a rebuild and an incremental run of
+    # the same inputs give the same parents.
+    (
+        "recalculate_parent_projects",
+        ["recalculate_parent_projects"],
+        900,
+        False,
+        "app",
+    ),
     # consolidate_duplicates merges the observed same-person pairs after all
     # source phases loaded and before export_canonical, so the canonical export
     # and downstream marts see exactly one record per person (contract R6-R14).
@@ -214,9 +225,10 @@ def _notify(results, crit_failed, finalize: Optional[dict] = None):
 
 def _reset_if_rule_version_changed() -> None:
     """FR-024 (spec 020): rebuild once when the database was built under other
-    key/hash/id rules. ``make weekly-flows`` still resets the database before
-    every run, so today this only fires when the weekly is started without that
-    reset; it becomes the guard of the persistent database (spec B)."""
+    key/hash/id rules. Since spec 021 ``make weekly-flows`` keeps the database
+    (``make db-ensure`` only creates a missing one), so this is the guard of
+    the persistent database: bumping ``HORIZON_RULE_VERSION`` makes the next
+    weekly start from scratch, keeping the id history."""
     from src.adapters.database.horizon_id_store import sqlite_path_from_url
     from src.flows.maintenance.horizon_ids import (
         reset_database,
@@ -236,12 +248,34 @@ def _reset_if_rule_version_changed() -> None:
         reset_database(database_url)
 
 
+def _run_pending_migrations() -> None:
+    """Spec 021: the database persists between runs, so tables added by a new
+    version of the ETL must reach an existing file before the phases use them
+    (until now the migrations ran lazily inside two phases)."""
+    from src.adapters.database.horizon_id_store import sqlite_path_from_url
+    from src.flows.maintenance.horizon_ids import _run_migrations
+
+    database_url = os.getenv("DATABASE_URL", "sqlite:///db/horizon.db")
+    try:
+        exists = os.path.exists(sqlite_path_from_url(database_url))
+    except ValueError:  # not a SQLite file
+        exists = True
+    if exists:
+        _run_migrations(database_url)
+
+
 def run_weekly(
     campus_name: Optional[str] = None,
     output_dir: str = "data/exports",
 ) -> int:
     """Run every weekly phase in its own subprocess. Returns a process exit code."""
     campus = (campus_name or "").strip()
+    # Spec 021 (R8): the phases tell this weekly's listings from older ones by
+    # this start time (inherited by every phase subprocess).
+    os.environ["HORIZON_WEEKLY_STARTED_AT"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    _run_pending_migrations()
     _reset_if_rule_version_changed()
     results = []
     for name, argv_tail, timeout, _crit, mode in _PHASES:

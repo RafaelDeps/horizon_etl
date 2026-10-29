@@ -360,14 +360,20 @@ class HorizonIdAssigner:
         decisions, report = self.derive(history.get("merges"))
         aliases, report["aliases"] = self.reconcile(decisions, history)
         candidates = [(d.horizon_id, c) for d in decisions for c in d.candidates]
-        self.store.replace_current([d.as_row() for d in decisions], candidates)
+        written = self.store.replace_current(
+            [d.as_row() for d in decisions], candidates
+        )
         self.store.upsert_aliases(aliases, {d.horizon_id for d in decisions})
         self.store.mark_merges_consumed(
             [m["id"] for m in history.get("merges", []) if not m.get("consumed_at")]
         )
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        self.store.set_meta("rule_version", str(HORIZON_RULE_VERSION))
-        self.store.set_meta("last_assigned_at", now)
+        if self.store.get_meta("rule_version") != str(HORIZON_RULE_VERSION):
+            self.store.set_meta("rule_version", str(HORIZON_RULE_VERSION))
+        # Only a run that changed an id moves the date (spec 021: a run over
+        # unchanged inputs writes nothing).
+        if written or self.store.get_meta("last_assigned_at") is None:
+            self.store.set_meta("last_assigned_at", now)
         report["assigned_at"] = now
         logger.info(
             "Horizon ids: {} entities, {} collision groups, rule version {}; "

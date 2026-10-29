@@ -79,6 +79,54 @@ MIGRATIONS: List[Tuple[str, str]] = [
         " start_date TEXT,"
         " PRIMARY KEY (team_id, person_id, role_id, document_key))",
     ),
+    # Spec 021: what the ETL knows about each source document (a CV, a CNPq
+    # group page, a SigPesq row, a PJ file), so an unchanged one is skipped.
+    # ETL-owned, beside the eo_lib tables; keys are source-native, never ids.
+    (
+        "0008_source_document_states",
+        "CREATE TABLE IF NOT EXISTS source_document_states ("
+        " source_system TEXT NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " content_hash TEXT,"
+        " dependency_fingerprint TEXT,"
+        " rule_version INTEGER NOT NULL,"
+        " max_person_id INTEGER,"
+        " max_initiative_id INTEGER,"
+        " item_count INTEGER NOT NULL DEFAULT 0,"
+        " last_ingestion_run_id INTEGER,"
+        " processed_at TEXT,"
+        " last_seen_at TEXT NOT NULL,"
+        " status TEXT NOT NULL,"
+        " last_failure TEXT,"
+        " last_failure_at TEXT,"
+        " PRIMARY KEY (source_system, document_key))",
+    ),
+    (
+        "0009_source_document_items",
+        "CREATE TABLE IF NOT EXISTS source_document_items ("
+        " source_system TEXT NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " item_type TEXT NOT NULL,"
+        " item_ref TEXT NOT NULL,"
+        " is_subject INTEGER NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (source_system, document_key, item_type, item_ref))",
+    ),
+    (
+        "0010_source_document_items_index",
+        "CREATE INDEX IF NOT EXISTS ix_source_document_items_item"
+        " ON source_document_items (item_type, item_ref)",
+    ),
+    (
+        "0011_source_document_references",
+        "CREATE TABLE IF NOT EXISTS source_document_references ("
+        " source_system TEXT NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " kind TEXT NOT NULL,"
+        " lookup_key TEXT NOT NULL,"
+        " outcome TEXT NOT NULL,"
+        " score REAL,"
+        " PRIMARY KEY (source_system, document_key, kind, lookup_key))",
+    ),
 ]
 
 

@@ -58,8 +58,10 @@ class IHorizonIdStore(ABC):
     @abstractmethod
     def replace_current(
         self, ids: List[Dict[str, Any]], candidates: List[tuple]
-    ) -> None:
-        """Replaces ``horizon_ids`` and ``horizon_id_candidates`` atomically."""
+    ) -> int:
+        """Makes ``horizon_ids`` and ``horizon_id_candidates`` equal to the given
+        rows atomically, writing only the differences; returns how many rows
+        were written or removed (0 on unchanged inputs)."""
 
     @abstractmethod
     def upsert_aliases(self, aliases: List[Dict[str, Any]], current: set) -> None:

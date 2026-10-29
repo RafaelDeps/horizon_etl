@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import pandas as pd
 from loguru import logger
 from research_domain import (
@@ -8,6 +10,8 @@ from research_domain import (
     RoleController,
     UniversityController,
 )
+
+from src.core.logic.document_skip import mark_partial
 from src.core.logic.initiative_identity import normalize_text
 from src.core.logic.pii_anonymizer import anonymize_person_data
 from src.tracking.recorder import tracking_recorder
@@ -52,6 +56,10 @@ class ResearchGroupLoader:
         self._area_cache = {}
         self._role_cache = {}
         self._researcher_cache = {}
+        # Spec 021: when set (SigPesq flow), each report row is one source
+        # document, skipped when unchanged and written in one transaction.
+        self.document_skip = None
+        self._existing_groups_map = {}
 
     def ensure_organization(self):
         """Ensures organization exists using strategy."""
@@ -71,6 +79,37 @@ class ResearchGroupLoader:
         if campus_id:
             self._campus_cache[campus_key] = campus_id
         return campus_id
+
+    def reset_caches(self) -> None:
+        """After a rolled-back row (spec 021): the caches may hold rows that no
+        longer exist; reload the group index, drop the rest."""
+        self._org_id = None
+        self._campus_cache.clear()
+        self._area_cache.clear()
+        self._role_cache.clear()
+        self._researcher_cache.clear()
+        self._load_existing_groups()
+
+    def _load_existing_groups(self) -> None:
+        self._existing_groups_map.clear()
+        try:
+            for g in self.rg_ctrl.get_all():
+                if g.name:
+                    self._existing_groups_map[normalize_text(g.name)] = g
+            logger.info(
+                f"Pre-fetched {len(self._existing_groups_map)} existing groups."
+            )
+        except Exception as e:
+            logger.warning(f"Could not pre-fetch groups: {e}")
+
+    def _row_document(self, row: dict):
+        """The row as a source document, keyed by the normalized group name,
+        or a null context when no DocumentSkip is attached."""
+        if self.document_skip is None:
+            return nullcontext(None)
+        name = self.mapping_strategy.map_row(dict(row)).get("name")
+        key = normalize_text(name) if isinstance(name, str) else str(name)
+        return self.document_skip.document(key)
 
     def _try_rollback(self, controller):
         """Attempts to rollback session via private attributes."""
@@ -128,189 +167,215 @@ class ResearchGroupLoader:
             df = pd.read_excel(file_path)
         except Exception as e:
             logger.error(f"Failed to read Excel: {e}")
+            # The report is then not a complete listing (spec 021, R8).
+            self.read_failures = getattr(self, "read_failures", 0) + 1
             return
 
         self.ensure_leader_role()
         org_id = self.ensure_organization()
         if not org_id:
             logger.error("Organization ID not available. Aborting.")
+            self.read_failures = getattr(self, "read_failures", 0) + 1
             return
 
-        existing_groups_map = {}
-        try:
-            all_groups = self.rg_ctrl.get_all()
-            for g in all_groups:
-                if g.name:
-                    existing_groups_map[normalize_text(g.name)] = g
-            logger.info(f"Pre-fetched {len(existing_groups_map)} existing groups.")
-        except Exception as e:
-            logger.warning(f"Could not pre-fetch groups: {e}")
+        self._load_existing_groups()
+        existing_groups_map = self._existing_groups_map
 
         count = 0
         updated = 0
         skipped = 0
         for _, row_raw in df.iterrows():
-            try:
-                # Delegate mapping to strategy
-                data = self.mapping_strategy.map_row(row_raw.to_dict())
+            row = row_raw.to_dict()
+            if self.document_skip is not None and pd.isna(
+                self.mapping_strategy.map_row(dict(row)).get("name")
+            ):
+                continue
+            with self._row_document(row) as doc:
+                if doc is not None:
+                    if doc.unchanged(row):
+                        continue
+                    doc.begin()
+                try:
+                    # Delegate mapping to strategy
+                    data = self.mapping_strategy.map_row(row_raw.to_dict())
 
-                name = data.get("name")
-                sigla = data.get("short_name")
-                unidade = data.get("campus_name")
-                area_name = data.get("area_name")
-                site_url = data.get("site_url")
-                leaders_raw = data.get("leaders_raw")
+                    name = data.get("name")
+                    sigla = data.get("short_name")
+                    unidade = data.get("campus_name")
+                    area_name = data.get("area_name")
+                    site_url = data.get("site_url")
+                    leaders_raw = data.get("leaders_raw")
 
-                if pd.isna(name):
-                    continue
-                name_key = normalize_text(name)
-                source_record = tracking_recorder.record_source_record(
-                    source_entity_type="research_group",
-                    payload=row_raw.to_dict(),
-                    source_record_id=name_key or str(name),
-                    source_file=file_path,
-                    source_path=file_path,
-                )
+                    if pd.isna(name):
+                        continue
+                    name_key = normalize_text(name)
+                    source_record = tracking_recorder.record_source_record(
+                        source_entity_type="research_group",
+                        payload=row_raw.to_dict(),
+                        source_record_id=name_key or str(name),
+                        source_file=file_path,
+                        source_path=file_path,
+                    )
 
-                area_ids = []
-                if pd.notna(area_name):
-                    aid = self.ensure_knowledge_area(str(area_name).strip())
-                    if aid:
-                        area_ids.append(aid)
+                    area_ids = []
+                    if pd.notna(area_name):
+                        aid = self.ensure_knowledge_area(str(area_name).strip())
+                        if aid:
+                            area_ids.append(aid)
 
-                # Delegate parsing to strategy
-                leaders_data = self.mapping_strategy.parse_leaders(leaders_raw)
+                    # Delegate parsing to strategy
+                    leaders_data = self.mapping_strategy.parse_leaders(leaders_raw)
 
-                group = None
-                group_already_existed = name_key in existing_groups_map
-                if group_already_existed:
-                    group = existing_groups_map[name_key]
-                    if (
-                        pd.notna(site_url)
-                        and getattr(group, "cnpq_url", None) != site_url
-                    ):
-                        group.cnpq_url = site_url
+                    group = None
+                    group_already_existed = name_key in existing_groups_map
+                    if group_already_existed:
+                        group = existing_groups_map[name_key]
+                        if (
+                            pd.notna(site_url)
+                            and getattr(group, "cnpq_url", None) != site_url
+                        ):
+                            group.cnpq_url = site_url
+                            try:
+                                self.rg_ctrl.update(group)
+                                updated += 1
+                                tracking_recorder.record_change(
+                                    source_record_id=getattr(source_record, "id", None),
+                                    canonical_entity_type="research_group",
+                                    canonical_entity_id=group.id,
+                                    operation="update",
+                                    changed_fields=["cnpq_url"],
+                                    before={
+                                        "cnpq_url": getattr(group, "cnpq_url", None)
+                                    },
+                                    after={"cnpq_url": site_url},
+                                    reason="Updated CNPq URL from source file",
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to update group {name}: {e}")
+                                mark_partial(f"update of group {name} failed")
+                        skipped += 1
+                    else:
+                        campus_name = (
+                            unidade if pd.notna(unidade) else "Campus Desconhecido"
+                        )
+                        campus_id = self.ensure_campus(campus_name, org_id)
+
+                        if not campus_id:
+                            continue
+
                         try:
-                            self.rg_ctrl.update(group)
-                            updated += 1
+                            group = self.rg_ctrl.create_research_group(
+                                name=name,
+                                campus_id=campus_id,
+                                organization_id=org_id,
+                                short_name=sigla if pd.notna(sigla) else None,
+                                cnpq_url=site_url if pd.notna(site_url) else None,
+                                knowledge_area_ids=area_ids if area_ids else None,
+                            )
+                            existing_groups_map[name_key] = group
+                            count += 1
+                            tracking_recorder.record_entity_match(
+                                source_record_id=getattr(source_record, "id", None),
+                                canonical_entity_type="research_group",
+                                canonical_entity_id=group.id,
+                                match_strategy="canonical_name",
+                                match_confidence=1.0,
+                            )
+                            tracking_recorder.record_attribute_assertions(
+                                source_record_id=getattr(source_record, "id", None),
+                                canonical_entity_type="research_group",
+                                canonical_entity_id=group.id,
+                                selected_attributes={
+                                    "name": name,
+                                    "short_name": sigla if pd.notna(sigla) else None,
+                                    "campus_name": campus_name,
+                                    "site_url": (
+                                        site_url if pd.notna(site_url) else None
+                                    ),
+                                    "area_name": (
+                                        area_name if pd.notna(area_name) else None
+                                    ),
+                                },
+                                selection_reason="research_group_loader_selected_values",
+                            )
                             tracking_recorder.record_change(
                                 source_record_id=getattr(source_record, "id", None),
                                 canonical_entity_type="research_group",
                                 canonical_entity_id=group.id,
-                                operation="update",
-                                changed_fields=["cnpq_url"],
-                                before={"cnpq_url": getattr(group, "cnpq_url", None)},
-                                after={"cnpq_url": site_url},
-                                reason="Updated CNPq URL from source file",
+                                operation="create",
+                                changed_fields=[
+                                    "name",
+                                    "short_name",
+                                    "campus_name",
+                                    "site_url",
+                                    "area_name",
+                                ],
+                                after={
+                                    "name": name,
+                                    "short_name": sigla if pd.notna(sigla) else None,
+                                    "campus_name": campus_name,
+                                    "site_url": (
+                                        site_url if pd.notna(site_url) else None
+                                    ),
+                                    "area_name": (
+                                        area_name if pd.notna(area_name) else None
+                                    ),
+                                },
+                                reason=f"{self.mapping_strategy.__class__.__name__} applied",
                             )
                         except Exception as e:
-                            logger.warning(f"Failed to update group {name}: {e}")
-                    skipped += 1
-                else:
-                    campus_name = (
-                        unidade if pd.notna(unidade) else "Campus Desconhecido"
-                    )
-                    campus_id = self.ensure_campus(campus_name, org_id)
+                            logger.error(f"Failed to create group {name}: {e}")
+                            mark_partial(f"creation of group {name} failed")
+                            self._try_rollback(self.rg_ctrl)
+                            continue
 
-                    if not campus_id:
-                        continue
-
-                    try:
-                        group = self.rg_ctrl.create_research_group(
-                            name=name,
-                            campus_id=campus_id,
-                            organization_id=org_id,
-                            short_name=sigla if pd.notna(sigla) else None,
-                            cnpq_url=site_url if pd.notna(site_url) else None,
-                            knowledge_area_ids=area_ids if area_ids else None,
+                    # Rule: "If research group exist do nothing" (except cnpq_url update)
+                    # We only process leaders for NEW groups or if we want to ensure leader existence idempotently
+                    # Based on ADR 001, we follow "Do Nothing" for existing entities.
+                    if group_already_existed:
+                        logger.debug(
+                            f"Skipping leader association for existing group: {name}"
                         )
-                        existing_groups_map[name_key] = group
-                        count += 1
-                        tracking_recorder.record_entity_match(
-                            source_record_id=getattr(source_record, "id", None),
-                            canonical_entity_type="research_group",
-                            canonical_entity_id=group.id,
-                            match_strategy="canonical_name",
-                            match_confidence=1.0,
-                        )
-                        tracking_recorder.record_attribute_assertions(
-                            source_record_id=getattr(source_record, "id", None),
-                            canonical_entity_type="research_group",
-                            canonical_entity_id=group.id,
-                            selected_attributes={
-                                "name": name,
-                                "short_name": sigla if pd.notna(sigla) else None,
-                                "campus_name": campus_name,
-                                "site_url": site_url if pd.notna(site_url) else None,
-                                "area_name": area_name if pd.notna(area_name) else None,
-                            },
-                            selection_reason="research_group_loader_selected_values",
-                        )
-                        tracking_recorder.record_change(
-                            source_record_id=getattr(source_record, "id", None),
-                            canonical_entity_type="research_group",
-                            canonical_entity_id=group.id,
-                            operation="create",
-                            changed_fields=["name", "short_name", "campus_name", "site_url", "area_name"],
-                            after={
-                                "name": name,
-                                "short_name": sigla if pd.notna(sigla) else None,
-                                "campus_name": campus_name,
-                                "site_url": site_url if pd.notna(site_url) else None,
-                                "area_name": area_name if pd.notna(area_name) else None,
-                            },
-                            reason=f"{self.mapping_strategy.__class__.__name__} applied",
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to create group {name}: {e}")
-                        self._try_rollback(self.rg_ctrl)
-                        continue
+                    elif group and leaders_data:
+                        from datetime import date
 
-                # Rule: "If research group exist do nothing" (except cnpq_url update)
-                # We only process leaders for NEW groups or if we want to ensure leader existence idempotently
-                # Based on ADR 001, we follow "Do Nothing" for existing entities.
-                if group_already_existed:
-                    logger.debug(
-                        f"Skipping leader association for existing group: {name}"
-                    )
-                elif group and leaders_data:
-                    from datetime import date
+                        # Try to get existing members if possible, to avoid duplicates
+                        existing_member_ids = []
+                        try:
+                            members = self.rg_ctrl._service.get_members(group.id)
+                            existing_member_ids = [m.person_id for m in members]
+                        except:
+                            pass
 
-                    # Try to get existing members if possible, to avoid duplicates
-                    existing_member_ids = []
-                    try:
-                        members = self.rg_ctrl._service.get_members(group.id)
-                        existing_member_ids = [m.person_id for m in members]
-                    except:
-                        pass
+                        for l_name, l_email in leaders_data:
+                            researcher = self.ensure_researcher(l_name, l_email)
+                            if researcher:
+                                if researcher.id in existing_member_ids:
+                                    logger.debug(
+                                        f"Leader {l_name} already associated to group {name}. Skipping."
+                                    )
+                                    continue
 
-                    for l_name, l_email in leaders_data:
-                        researcher = self.ensure_researcher(l_name, l_email)
-                        if researcher:
-                            if researcher.id in existing_member_ids:
-                                logger.debug(
-                                    f"Leader {l_name} already associated to group {name}. Skipping."
-                                )
-                                continue
+                                try:
+                                    self.rg_ctrl.add_leader(
+                                        team_id=group.id,
+                                        person_id=researcher.id,
+                                        start_date=date.today(),
+                                    )
+                                    logger.debug(
+                                        f"Leader {l_name} associated to group {name}"
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to associate leader {l_name} to unit {name}: {e}"
+                                    )
+                                    mark_partial(f"leader {l_name} of {name} failed")
+                                    self._try_rollback(self.rg_ctrl)
 
-                            try:
-                                self.rg_ctrl.add_leader(
-                                    team_id=group.id,
-                                    person_id=researcher.id,
-                                    start_date=date.today(),
-                                )
-                                logger.debug(
-                                    f"Leader {l_name} associated to group {name}"
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to associate leader {l_name} to unit {name}: {e}"
-                                )
-                                self._try_rollback(self.rg_ctrl)
-
-            except Exception as e:
-                logger.error(f"Error processing row: {e}")
-                self._try_rollback(self.rg_ctrl)
+                except Exception as e:
+                    logger.error(f"Error processing row: {e}")
+                    mark_partial(f"row failed: {e}")
+                    self._try_rollback(self.rg_ctrl)
 
         logger.info(
             f"Loaded {count} New Research Groups. Skipped {skipped} existing (Updated {updated})."

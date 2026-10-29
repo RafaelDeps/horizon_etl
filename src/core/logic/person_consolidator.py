@@ -1,6 +1,6 @@
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -29,9 +29,17 @@ class PersonConsolidator:
     homonyms and junk names are refused and reported, never merged.
     """
 
-    def __init__(self, db_path: str = "db/horizon.db"):
+    def __init__(
+        self,
+        db_path: str = "db/horizon.db",
+        merge_hooks: Optional[List[Callable[[Any, int, int], None]]] = None,
+    ):
         self.db_path = db_path
         self._matcher = PersonMatcher(person_controller=None)
+        # Called as hook(conn, winner_id, loser_id) inside each merge's
+        # transaction, for ETL tables this class does not own (spec 021: the
+        # source document item links).
+        self.merge_hooks = list(merge_hooks or [])
 
     def _load_people(self) -> List[Dict[str, Any]]:
         with sqlite3.connect(self.db_path) as conn:
@@ -300,6 +308,8 @@ class PersonConsolidator:
                         "DELETE FROM team_member_contributions WHERE person_id = ?",
                         (loser_id,),
                     )
+                for hook in self.merge_hooks:
+                    hook(conn, winner_id, loser_id)
                 if self._table_exists(conn, "advisorship_members"):
                     self._merge_advisorship_members(conn, winner_id, loser_id)
                 else:

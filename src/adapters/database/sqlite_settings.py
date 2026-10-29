@@ -8,12 +8,21 @@ In write-ahead-log mode with ``synchronous=NORMAL`` a commit only appends to
 disk: both Lattes phases went from 46.2 to 23.3 min with identical data.
 
 The trade-off is that a power loss can roll back the last transactions; it
-cannot corrupt the database. The weekly rebuilds the database from scratch
-(``make db-reset``), so an interrupted run is redone anyway.
+cannot corrupt the database. Since spec 021 the database persists between
+runs and each source document is committed in one transaction, so a lost
+transaction is a whole document that has no processing state yet: the next
+run processes it again.
 
 The libraries create every engine (no ``create_engine`` in this repository), so
 the settings are applied by a listener on the SQLAlchemy ``Engine`` class, which
 reaches engines created before and after it is installed.
+
+Savepoints (spec 021, research R5) are the exception: they need pysqlite's own
+``BEGIN``/``COMMIT`` handling turned off, and that is done per engine, only for
+the dedicated engine of the one-transaction-per-document connection. Turned on
+for every engine, every read would open a snapshot transaction, and a later
+write from that connection could fail with ``database is locked`` when another
+connection wrote in between.
 """
 
 import os
@@ -60,6 +69,25 @@ def install_sqlite_connection_settings() -> None:
         return
     event.listen(Engine, "connect", _apply_sqlite_settings)
     _installed = True
+
+
+def _disable_pysqlite_transactions(dbapi_connection, connection_record) -> None:
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        dbapi_connection.isolation_level = None
+
+
+def _emit_begin(connection) -> None:
+    connection.exec_driver_sql("BEGIN")
+
+
+def install_savepoint_support(engine: Engine) -> None:
+    """Lets SAVEPOINT work on this SQLite engine (SQLAlchemy's documented pysqlite
+    recipe): the driver stops issuing its own BEGIN/COMMIT, and SQLAlchemy emits
+    BEGIN when a transaction starts. Other engines are not touched."""
+    if engine.dialect.name != "sqlite":
+        return
+    event.listen(engine, "connect", _disable_pysqlite_transactions)
+    event.listen(engine, "begin", _emit_begin)
 
 
 def finalize_sqlite_database(database_url: Optional[str]) -> dict:

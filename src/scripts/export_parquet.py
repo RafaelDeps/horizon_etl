@@ -37,6 +37,8 @@ NESTED_TYPES = (dict, list)
 WRAPPED_TABLES = {
     "horizon_ids_canonical.json": "ids",
     "horizon_id_aliases_canonical.json": "aliases",
+    # Spec 021: document_key is a source key (text), never an integer id.
+    "source_document_states_canonical.json": "documents",
 }
 
 

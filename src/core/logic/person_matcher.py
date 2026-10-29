@@ -6,7 +6,11 @@ from rapidfuzz import fuzz as rapid_fuzz
 from rapidfuzz import process as rapid_process
 from thefuzz import utils as fuzz_utils
 
-from src.core.logic.horizon_identity import FUZZY_MATCH_THRESHOLD, hash12
+from src.core.logic.horizon_identity import (
+    FUZZY_MATCH_THRESHOLD,
+    hash12,
+    person_reference_key,
+)
 from src.core.logic.person_identity import normalize_participant_name
 from src.core.logic.pii_anonymizer import anonymize_email, is_anonymized_email
 
@@ -57,6 +61,15 @@ class PersonMatcher:
         self._last_by_norm = {}
         self._fuzzy_keys = []
         self._fuzzy_processed = []
+
+    def reset_cache(self) -> None:
+        """Drops every cached person (spec 021): after a rolled-back document
+        some of them no longer exist; the next lookup reloads the cache."""
+        self._persons_cache.clear()
+        self._emails_cache.clear()
+        self._canonical_cache.clear()
+        self._invariant_cache.clear()
+        self._reset_name_index()
 
     def _cache_name(self, raw: str, person: Person) -> None:
         """The only writer of _persons_cache.
@@ -233,6 +246,25 @@ class PersonMatcher:
         return min(tied, key=rank)
 
     def match_or_create(
+        self, name: str, email: Optional[str] = None, strict_match: bool = False
+    ) -> Optional[Person]:
+        """Resolves a person (see ``_match_or_create``) and, inside a source
+        document (spec 021), records the resolution and the person it carries."""
+        person = self._match_or_create(name, email=email, strict_match=strict_match)
+        from src.core.logic.document_skip import carry, current, document_reference
+
+        if current() is None:  # outside a document: nothing to record
+            return person
+        document_reference(
+            "person_name",
+            self.normalize_name(name or ""),
+            person_reference_key(person.name) if person is not None else "not_found",
+        )
+        if person is not None and getattr(person, "id", None) is not None:
+            carry("person", person.id)
+        return person
+
+    def _match_or_create(
         self, name: str, email: Optional[str] = None, strict_match: bool = False
     ) -> Optional[Person]:
         """

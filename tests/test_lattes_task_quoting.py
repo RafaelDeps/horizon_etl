@@ -55,8 +55,10 @@ def test_projects_flow_quotes_large_task_parameters(tmp_path, monkeypatch):
 
     assert task.call_count == 2
     for call in task.call_args_list:
-        json_file, entity_manager, parser, researcher_index, loader = call.args
+        json_file, entity_manager, parser, researcher_index, loader, data = call.args
         assert json_file.endswith(".json")
+        # The CV is read once by the flow (spec 021) and passed quoted.
+        assert isinstance(data, quote) and data.unquote()["nome"].startswith("Pessoa")
         _assert_quoted(entity_manager, MockEM.return_value)
         _assert_quoted(parser, MockParser.return_value)
         _assert_quoted(researcher_index, index)
@@ -86,8 +88,9 @@ def test_advisorships_flow_quotes_large_task_parameters(tmp_path, monkeypatch):
 
     assert task.call_count == 2
     for call in task.call_args_list:
-        json_file, researcher_index, loader = call.args
+        json_file, researcher_index, loader, data = call.args
         assert json_file.endswith(".json")
+        assert isinstance(data, quote) and data.unquote()["nome"].startswith("Pessoa")
         _assert_quoted(researcher_index, index)
         _assert_quoted(loader, MockLoader.return_value)
     MockLoader.return_value.person_matcher.log_match_summary.assert_called_once_with(

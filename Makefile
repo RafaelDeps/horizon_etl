@@ -27,7 +27,7 @@ PREFECT_SERVER_SERVICE ?= server
 PREFECT_DB_SERVICE ?= database
 
 .PHONY: help setup logs-dir \
-	db-clean db-init db-reset db-save-ids \
+	db-clean db-init db-ensure db-reset db-save-ids \
 	prefect-server prefect-stop prefect-status \
 	pipeline pipeline-log weekly-flows full-refresh \
 	ingest-sigpesq extract-project-files \
@@ -72,6 +72,9 @@ db-save-ids: ## Save the horizon id history (db/horizon_id_history.json) before 
 	@$(PYTHON) src/scripts/save_horizon_id_history.py
 
 db-reset: db-save-ids db-clean db-init ## Recreate the local database from scratch (keeps the id history)
+
+db-ensure: ## Create the local database only if it does not exist (keeps a persistent database)
+	@$(PYTHON) db/ensure_db.py
 
 # --- Prefect Server ---
 
@@ -119,7 +122,7 @@ pipeline-log: prefect-server logs-dir ## Run the unified pipeline and tee output
 full-refresh: db-reset prefect-server ## Reset DB and run full pipeline for all campuses
 	@$(FLOW_PYTHON) app.py full_pipeline "" "$(OUTPUT_DIR)"
 
-weekly-flows: db-reset prefect-server ## Reset DB and run weekly source flows plus exports (incl. SigPesq document extraction)
+weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; incl. SigPesq document extraction)
 	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" $(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
 
 # --- Ingestion ---

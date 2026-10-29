@@ -2,6 +2,7 @@ from eo_lib.infrastructure.database.postgres_client import PostgresClient
 from libbase.infrastructure.sql_repository import GenericSqlRepository
 from sqlalchemy.orm import sessionmaker
 
+from src.adapters.database.document_transaction import tracking_session
 from src.tracking.entities import (
     AttributeAssertion,
     EntityChangeLog,
@@ -21,6 +22,12 @@ from src.tracking.services import (
 class TrackingServiceFactory:
     @staticmethod
     def _session():
+        # Inside a phase that processes one document per transaction (spec 021),
+        # tracking writes join that transaction: SQLite has one write lock, and
+        # a session of its own would wait on it.
+        shared = tracking_session()
+        if shared is not None:
+            return shared
         client = PostgresClient()
         return sessionmaker(
             autocommit=False,

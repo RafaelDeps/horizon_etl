@@ -9,6 +9,7 @@ from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.strategies.sigpesq_advisorships import (
     SigPesqAdvisorshipMappingStrategy,
 )
+from src.flows.document_phase import document_phase, finish_report_listing
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
@@ -39,48 +40,55 @@ def persist_advisorships():
     # Sort by mtime (optional, but good for logs)
     files.sort(key=os.path.getmtime)
 
-    loader = ProjectLoader(mapping_strategy=SigPesqAdvisorshipMappingStrategy())
+    # Each report row is one source document (spec 021); the phase is opened
+    # before the loader so its controllers bind to the shared connection.
+    with document_phase("sigpesq_advisorship") as skip:
+        loader = ProjectLoader(mapping_strategy=SigPesqAdvisorshipMappingStrategy())
+        loader.document_skip = skip
+        skip.on_rollback = loader.reset_caches
 
-    # Ensure "Advisorship" initiative type exists once
-    existing_types = loader.controller.list_initiative_types()
-    raw_type = next(
-        (
-            t
-            for t in existing_types
-            if (t.get("name") if isinstance(t, dict) else getattr(t, "name", ""))
-            == "Advisorship"
-        ),
-        None,
-    )
-
-    if not raw_type:
-        logger.info("Creating 'Advisorship' initiative type...")
-        raw_type = loader.controller.create_initiative_type(
-            name="Advisorship", description="Bolsas e Orientações importadas do SigPesq"
+        # Ensure "Advisorship" initiative type exists once
+        existing_types = loader.controller.list_initiative_types()
+        raw_type = next(
+            (
+                t
+                for t in existing_types
+                if (t.get("name") if isinstance(t, dict) else getattr(t, "name", ""))
+                == "Advisorship"
+            ),
+            None,
         )
 
-    # Wrap in object if it's a dict (ProjectLoader expects .id)
-    if isinstance(raw_type, dict):
+        if not raw_type:
+            logger.info("Creating 'Advisorship' initiative type...")
+            raw_type = loader.controller.create_initiative_type(
+                name="Advisorship",
+                description="Bolsas e Orientações importadas do SigPesq",
+            )
 
-        class Obj:
-            pass
+        # Wrap in object if it's a dict (ProjectLoader expects .id)
+        if isinstance(raw_type, dict):
 
-        loader.initiative_type = Obj()
-        loader.initiative_type.id = raw_type.get("id")
-        loader.initiative_type.name = raw_type.get("name")
-    else:
-        loader.initiative_type = raw_type
+            class Obj:
+                pass
 
-    with tracking_recorder.run_context(
-        source_system="sigpesq_advisorships",
-        flow_name="sigpesq_advisorships",
-    ):
-        for file_path in files:
-            logger.info(f"Loading Advisorships from {file_path}")
-            loader.process_file(file_path)
+            loader.initiative_type = Obj()
+            loader.initiative_type.id = raw_type.get("id")
+            loader.initiative_type.name = raw_type.get("name")
+        else:
+            loader.initiative_type = raw_type
 
-        # Final pass: Recalculate parent project dates and status from DB
-        loader.recalculate_all_parent_statuses()
+        with tracking_recorder.run_context(
+            source_system="sigpesq_advisorships",
+            flow_name="sigpesq_advisorships",
+        ):
+            for file_path in files:
+                logger.info(f"Loading Advisorships from {file_path}")
+                loader.process_file(file_path)
+            finish_report_listing(skip, loader)
+    # The parent projects' dates and status are recalculated once after every
+    # source phase (recalculate_parent_projects, spec 021), not here: here they
+    # would see only the SigPesq advisorships of a rebuild.
     loader.team_synchronizer.log_lookup_summary("sigpesq_advisorships")
     loader.person_matcher.log_match_summary("sigpesq_advisorships")
 

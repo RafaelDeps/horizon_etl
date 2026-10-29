@@ -117,6 +117,13 @@ class TeamSynchronizer:
         self._stats["loaded"] = self._merge(rows)
         self._loaded = True
 
+    def reset_lookup(self) -> None:
+        """Forgets the team lookup (spec 021): after a rolled-back document it
+        may hold teams that no longer exist; it is rebuilt on next use."""
+        self._by_key = {}
+        self._max_id = 0
+        self._loaded = False
+
     def _refresh(self) -> int:
         """Merges teams created since the last read (by any code in this process)."""
         if self._mode != "sql":
@@ -284,6 +291,11 @@ class TeamSynchronizer:
         session = self._session()
         if session is None:
             return False
+        # Spec 021: what this row says about the team is an item of the source
+        # document being processed (a CV or a report row).
+        from src.core.logic.document_skip import carry
+
+        carry("team_contribution", f"{team_id}|{document_key}")
 
         new: Dict[Tuple[int, int, str], Tuple[Any, Any, str, Optional[Any]]] = {}
         for person, role_name, start_date in members:

@@ -384,35 +384,68 @@ class SqliteHorizonIdStore(IHorizonIdStore):
     # ---------------------------------------------------------------- writes
     def replace_current(
         self, ids: List[Dict[str, Any]], candidates: List[tuple]
-    ) -> None:
+    ) -> int:
+        """Makes ``horizon_ids`` and ``horizon_id_candidates`` equal to the given
+        rows, writing only the differences (spec 021: a run over unchanged
+        inputs rewrites nothing; an unchanged id keeps its ``assigned_at``).
+        Returns the number of rows written or removed."""
         now = _now()
         con = self._connect()
         try:
             with con:
-                con.execute("DELETE FROM horizon_ids")
-                con.execute("DELETE FROM horizon_id_candidates")
+                current = {
+                    (r[0], r[1]): tuple(r)[2:]
+                    for r in con.execute(
+                        "SELECT entity_type, entity_id, horizon_id, rule, "
+                        "natural_key, parent_horizon_id, collision_suffix "
+                        "FROM horizon_ids"
+                    )
+                }
+                wanted = {
+                    (row["entity_type"], row["entity_id"]): (
+                        row["horizon_id"],
+                        row["rule"],
+                        row.get("natural_key"),
+                        row.get("parent_horizon_id"),
+                        row.get("collision_suffix"),
+                    )
+                    for row in ids
+                }
+                stale = [k for k, v in current.items() if wanted.get(k) != v]
+                fresh = [k for k, v in wanted.items() if current.get(k) != v]
+                # Removed first: a changed row may take an id another row frees.
+                con.executemany(
+                    "DELETE FROM horizon_ids WHERE entity_type = ? AND entity_id = ?",
+                    stale,
+                )
                 con.executemany(
                     "INSERT INTO horizon_ids (entity_type, entity_id, horizon_id, "
                     "rule, natural_key, parent_horizon_id, collision_suffix, "
                     "assigned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        (
-                            row["entity_type"],
-                            row["entity_id"],
-                            row["horizon_id"],
-                            row["rule"],
-                            row.get("natural_key"),
-                            row.get("parent_horizon_id"),
-                            row.get("collision_suffix"),
-                            now,
-                        )
-                        for row in ids
-                    ],
+                    [(k[0], k[1], *wanted[k], now) for k in fresh],
+                )
+                old_pairs = {
+                    tuple(r)
+                    for r in con.execute(
+                        "SELECT horizon_id, candidate_id FROM horizon_id_candidates"
+                    )
+                }
+                new_pairs = set(map(tuple, candidates))
+                con.executemany(
+                    "DELETE FROM horizon_id_candidates "
+                    "WHERE horizon_id = ? AND candidate_id = ?",
+                    sorted(old_pairs - new_pairs),
                 )
                 con.executemany(
                     "INSERT OR IGNORE INTO horizon_id_candidates "
                     "(horizon_id, candidate_id) VALUES (?, ?)",
-                    candidates,
+                    sorted(new_pairs - old_pairs),
+                )
+                return (
+                    len(stale)
+                    + len(fresh)
+                    + len(old_pairs - new_pairs)
+                    + len(new_pairs - old_pairs)
                 )
         finally:
             con.close()

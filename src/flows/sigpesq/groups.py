@@ -13,6 +13,7 @@ from src.core.logic.strategies.sigpesq_excel import (
     SigPesqResearcherStrategy,
     SigPesqRoleStrategy,
 )
+from src.flows.document_phase import document_phase, finish_report_listing
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
@@ -38,23 +39,29 @@ def persist_research_groups():
     latest_file = max(files, key=os.path.getmtime)
     logger.info(f"Loading Research Groups from {latest_file}")
 
-    loader = ResearchGroupLoader(
-        mapping_strategy=SigPesqExcelMappingStrategy(),
-        org_strategy=SigPesqOrganizationStrategy(),
-        campus_strategy=SigPesqCampusStrategy(),
-        area_strategy=SigPesqKnowledgeAreaStrategy(),
-        researcher_strategy=SigPesqResearcherStrategy(),
-        role_strategy=SigPesqRoleStrategy(),
-    )
-    # A trilha de auditoria mora aqui, e não no orquestrador: assim ela vale
-    # igual no `make weekly-flows` (subprocessos), no `make pipeline` e numa
-    # execução isolada da fase. O envelope é reentrante, então conviver com o
-    # ETLFlowReporter do pipeline unificado não cria run duplicada.
-    with tracking_recorder.run_context(
-        source_system="sigpesq_research_group",
-        flow_name="sigpesq_research_groups",
-    ):
-        loader.process_file(latest_file)
+    # Each report row is one source document (spec 021); the phase is opened
+    # before the loader so its controllers bind to the shared connection.
+    with document_phase("sigpesq_group") as skip:
+        loader = ResearchGroupLoader(
+            mapping_strategy=SigPesqExcelMappingStrategy(),
+            org_strategy=SigPesqOrganizationStrategy(),
+            campus_strategy=SigPesqCampusStrategy(),
+            area_strategy=SigPesqKnowledgeAreaStrategy(),
+            researcher_strategy=SigPesqResearcherStrategy(),
+            role_strategy=SigPesqRoleStrategy(),
+        )
+        loader.document_skip = skip
+        skip.on_rollback = loader.reset_caches
+        # A trilha de auditoria mora aqui, e não no orquestrador: assim ela vale
+        # igual no `make weekly-flows` (subprocessos), no `make pipeline` e numa
+        # execução isolada da fase. O envelope é reentrante, então conviver com o
+        # ETLFlowReporter do pipeline unificado não cria run duplicada.
+        with tracking_recorder.run_context(
+            source_system="sigpesq_research_group",
+            flow_name="sigpesq_research_groups",
+        ):
+            loader.process_file(latest_file)
+            finish_report_listing(skip, loader)
 
 
 @flow(name="Ingest SigPesq Research Groups", **telegram_flow_state_handlers())

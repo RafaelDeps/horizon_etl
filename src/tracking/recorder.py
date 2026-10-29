@@ -43,6 +43,10 @@ def stable_hash(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+# Item types of spec 021 for the tracked entity types that differ.
+_CARRIED_TYPES = {"advisorship": "initiative"}
+
+
 class TrackingRecorder:
     def __init__(self):
         self._ingestion_run_controller_cls = IngestionRunController
@@ -206,6 +210,14 @@ class TrackingRecorder:
         match_strategy: str,
         match_confidence: Optional[float] = None,
     ):
+        # Spec 021: inside a source document, the matched entity is an item the
+        # document carries (an advisorship is an initiative row).
+        from src.core.logic.document_skip import carry
+
+        carry(
+            _CARRIED_TYPES.get(canonical_entity_type, canonical_entity_type),
+            canonical_entity_id,
+        )
         if not source_record_id:
             return None
 
