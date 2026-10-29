@@ -183,15 +183,15 @@ scratchpad (never the repository, never `db/horizon.db`).
   - how to read the summary and `data/reports/restore_outcome.json`;
   - that a new branch starts with a rebuild.
 - [X] T026 [P] Format and lint the new and changed files (`black`, `flake8`), run the full suite and compare with `$R/c_fail_base.txt`: no new failure.
-- [ ] T027 First dispatch on the fork (quickstart §3), after the maintainer's go-ahead to push:
+- [X] T027 First dispatch on the fork (quickstart §3), after the maintainer's go-ahead to push:
   - push `025-ci-persistent-database` to `origin` (the RafaelDeps fork) and dispatch `weekly-etl.yml` on it;
   - expected summary: "Rebuilt from scratch: no successful run";
   - record the run id, duration and per-phase document counts.
-- [ ] T028 Second dispatch on the same branch after T027 succeeded:
+- [X] T028 Second dispatch on the same branch after T027 succeeded:
   - expected summary: "Restored from run <T027 id>", the Lattes phases skipping at least 95% of the CVs (SC-002), and a duration of at most about 60% of T027's (SC-001, a reference target);
   - compare its `exports_canonical.zip` with T027's: same files and fields (SC-006).
 - [ ] T029 Optional third dispatch with `fresh_database: true`: summary "restore disabled", a rebuild (US2 on CI).
-- [ ] T030 Write `docs/reports/2026-XX-XX-ci-persistent-database-validation.md`:
+- [X] T030 Write `docs/reports/2026-XX-XX-ci-persistent-database-validation.md`:
   - results per success criterion SC-001 to SC-007;
   - the local simulation (T013, T017);
   - the dispatches (T027–T029) with durations and summaries;
