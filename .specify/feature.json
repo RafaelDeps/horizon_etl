@@ -1,1 +1,3 @@
-{"feature_directory":"specs/021-skip-unchanged-documents"}
+{
+  "feature_directory": "specs/022-ci-persistent-database"
+}
