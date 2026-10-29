@@ -20,18 +20,23 @@ Date: 2026-10-29 · Spec: `specs/022-ci-persistent-database/` · Branch:
 - **Exports**: both runs give the same 37 files with the same fields, and the
   counts match. The restored run has one researcher fewer, which matches
   `deleted_items=1` in its Lattes phases.
-- **Not yet measured on CI**: the steady state, a third run where the Lattes
-  phases skip at least 95% of the CVs (SC-002). The second run is the one-time
-  convergence after a rebuild described in the spec 021 report (section 4):
-  74 of 399 CVs were processed again, as locally (78). A forced rebuild
-  (`fresh_database`) was not dispatched either.
+- **Steady state on CI** (third dispatch): 39 min 20 s (37% of a rebuild).
+  - **Lattes:** every CV skipped; `lattes_projects` took 11 s and
+    `lattes_advisorships` 6 s.
+  - **CNPq:** 1 page processed.
+  - **SigPesq:** only the duplicated group row processed.
+  - The second run was the one-time convergence after a rebuild described in
+    the spec 021 report (section 4): 74 of 399 CVs were processed again, as
+    locally (78).
+  - A forced rebuild (`fresh_database`) was not dispatched; it is covered by
+    the tests and the local simulation.
 
 ## 2. Success criteria
 
 | Criterion | Target | Result | Status |
 |---|---|---|---|
 | SC-001 time | restored run ≤ 60% of a rebuild | 47 min 49 s vs 1 h 46 min 9 s (45%) | Met |
-| SC-002 Lattes skips | ≥ 95% of the CVs skipped | Second run: 325 of 399 (81%), the one-time convergence after a rebuild; locally the next run skips 100% (spec 021 report, section 9) | Not yet measured on CI (needs a third run) |
+| SC-002 Lattes skips | ≥ 95% of the CVs skipped | Third run: 399 of 399 (100%) in both Lattes phases. Second run: 325 of 399 (81%), the one-time convergence after a rebuild | Met |
 | SC-003 no artifact | rebuild, no failure | First dispatch: `rebuilt — no successful run`, all phases exit 0. Locally: missing, truncated and disabled cases all rebuild | Met |
 | SC-004 same files | restored files identical | Local simulation: the database restored from the 2026-10-29 artifact passes `quick_check` and matches the artifact byte for byte; tests check sha256 of database, raw files and cache. CI: sizes match what the first run left (333 MB database) | Met locally; sizes on CI |
 | SC-005 summary | 100% of runs state the source | Both runs logged and summarized the outcome (`rebuilt — no successful run`; `restored ... from run 40882304674 (2026-10-29, 997fa47)`) | Met |
@@ -45,20 +50,21 @@ Date: 2026-10-29 · Spec: `specs/022-ci-persistent-database/` · Branch:
 | [40856179199](https://github.com/RafaelDeps/horizon_etl/actions/runs/40856179199) | spec 021, before this spec | (no restore step) | 1 h 38 min |
 | [40882304674](https://github.com/RafaelDeps/horizon_etl/actions/runs/40882304674) | first dispatch | `rebuilt — no successful run` | 1 h 46 min |
 | [40899987152](https://github.com/RafaelDeps/horizon_etl/actions/runs/40899987152) | second dispatch | `restored db/horizon.db (333 MB), data/raw (221 MB), cache (64 MB) from run 40882304674 (2026-10-29, 997fa47)` | 47 min 49 s |
+| [40914744437](https://github.com/RafaelDeps/horizon_etl/actions/runs/40914744437) | third dispatch | `restored db/horizon.db (334 MB), data/raw (221 MB), cache (64 MB) from run 40899987152 (2026-10-29, 2f90a27)` | 39 min 20 s |
 
 Per phase (minutes, from the orchestrator's phase start times):
 
-| Phase | Rebuild (40882304674) | Restored (40899987152) |
-|---|---:|---:|
-| restore step | — | 0.3 |
-| sigpesq | 1.2 | 1.7 |
-| cnpq | 21.0 | 16.2 |
-| lattes_download | 30.2 | 1.7 |
-| lattes_projects | 5.4 | 2.6 |
-| lattes_advisorships | 10.5 | 3.5 |
-| extract_project_files | 22.3 | 5.6 |
-| consolidate_duplicates | 2.9 | 2.7 |
-| export_canonical | 4.6 | 4.6 |
+| Phase | Rebuild (40882304674) | Restored (40899987152) | Steady state (40914744437) |
+|---|---:|---:|---:|
+| restore step | — | 0.3 | 0.3 |
+| sigpesq | 1.2 | 1.7 | 0.6 |
+| cnpq | 21.0 | 16.2 | 15.6 |
+| lattes_download | 30.2 | 1.7 | 1.6 |
+| lattes_projects | 5.4 | 2.6 | 0.2 |
+| lattes_advisorships | 10.5 | 3.5 | 0.1 |
+| extract_project_files | 22.3 | 5.6 | 5.5 |
+| consolidate_duplicates | 2.9 | 2.7 | 2.9 |
+| export_canonical | 4.6 | 4.6 | 4.6 |
 
 Documents processed (rebuild → restored):
 
@@ -101,5 +107,6 @@ pages between runs and downloading only a rotating share is spec D.
 - The database path appears masked (`***`) in the CI log, because it comes
   from the `DATABASE_URL` secret.
 - The artifact grew from 366 MB to 378 MB with `cache/`.
-- Pending: a third dispatch to measure the steady state on CI (SC-002) and,
-  optionally, a dispatch with `fresh_database: true` (T029).
+- In the steady state the CNPq phase is 40% of the run (15.6 of 39 min): it
+  still downloads every page to compare it. That is spec D's subject.
+- Not dispatched: a run with `fresh_database: true` (T029, optional).
