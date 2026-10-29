@@ -10,6 +10,17 @@ from src.flows.lattes.download import rotate_lattes_downloads
 IDS = [f"{i:016d}" for i in range(1, 9)]
 
 
+def _page(lattes_id, version):
+    """A curriculum page as the portal serves it (its title names the owner)."""
+    return (
+        "<html><head><title>Currículo do Sistema de Currículos Lattes "
+        f"(Pessoa {lattes_id})</title></head><body>{version}</body></html>"
+    )
+
+
+CAPTCHA = "<html><head><script src='recaptcha__en.js'></script></head></html>"
+
+
 class FakeDownloader:
     """Writes ``<dir>/<id>`` with a version mark, or fails for some ids."""
 
@@ -25,14 +36,14 @@ class FakeDownloader:
         if lattes_id in self.failing:
             raise RuntimeError("portal timeout")
         with open(os.path.join(directory, lattes_id), "w") as f:
-            f.write(f"{lattes_id} {self.version}")
+            f.write(_page(lattes_id, self.version))
 
 
 def _setup(tmp_path, cached):
     cache = tmp_path / "cache"
     cache.mkdir()
     for lattes_id in cached:
-        (cache / lattes_id).write_text(f"{lattes_id} v1")
+        (cache / lattes_id).write_text(_page(lattes_id, "v1"))
     manifest_path = tmp_path / "raw" / "lattes" / "download_manifest.json"
     return cache, manifest_path
 
@@ -51,9 +62,9 @@ def test_missing_ids_plus_the_oldest_quarter_are_downloaded(tmp_path):
     assert sorted(downloader.calls) == sorted(IDS[6:] + IDS[:2])
     assert counts["new"] == 2 and counts["refreshed"] == 2 and counts["reused"] == 4
     for lattes_id in IDS[6:] + IDS[:2]:
-        assert (cache / lattes_id).read_text() == f"{lattes_id} v2"
+        assert (cache / lattes_id).read_text() == _page(lattes_id, "v2")
     for lattes_id in IDS[2:6]:
-        assert (cache / lattes_id).read_text() == f"{lattes_id} v1"
+        assert (cache / lattes_id).read_text() == _page(lattes_id, "v1")
     dates = _manifest(cache, path).dates()
     assert all(dates[i] for i in IDS[6:] + IDS[:2])
     assert all(dates[i] is None for i in IDS[2:6])
@@ -71,8 +82,8 @@ def test_a_failed_refresh_keeps_the_cached_copy_and_its_date(tmp_path):
     )
     # Undated 0, 2 and 3 are the oldest; ceil(0.5 * 4) = 2 -> 0 and 2.
     assert sorted(downloader.calls) == [IDS[0], IDS[2]]
-    assert (cache / IDS[0]).read_text() == f"{IDS[0]} v1"
-    assert (cache / IDS[2]).read_text() == f"{IDS[2]} v2"
+    assert (cache / IDS[0]).read_text() == _page(IDS[0], "v1")
+    assert (cache / IDS[2]).read_text() == _page(IDS[2], "v2")
     assert counts["failed"] == 1 and counts["reused_after_failure"] == 1
     dates = _manifest(cache, path).dates()
     assert dates[IDS[0]] is None and dates[IDS[1]] == "2026-10-01T00:00:00Z"
@@ -134,3 +145,33 @@ def test_an_unidentified_curriculum_is_retried_on_the_next_run(tmp_path):
     assert dates[IDS[5]] is None and dates[IDS[6]] == "2026-11-05T02:00:00Z"
     # The next rotation takes it first.
     assert plan_downloads(IDS, dates, share=0.125).refresh == [IDS[5]]
+
+
+class CaptchaDownloader(FakeDownloader):
+    """The portal's access check page instead of the curriculum."""
+
+    def __call__(self, lattes_id, directory):
+        self.calls.append(lattes_id)
+        with open(os.path.join(directory, lattes_id), "w") as f:
+            f.write(CAPTCHA)
+
+
+def test_an_access_check_page_never_replaces_or_becomes_a_cached_curriculum(
+    tmp_path,
+):
+    cache, path = _setup(tmp_path, IDS[:2])
+    counts = rotate_lattes_downloads(
+        IDS[:3],
+        str(cache),
+        _manifest(cache, path),
+        1.0,
+        False,
+        downloader=CaptchaDownloader(),
+    )
+    # The two cached curricula keep their good copy; the new one is not kept.
+    assert (cache / IDS[0]).read_text() == _page(IDS[0], "v1")
+    assert (cache / IDS[1]).read_text() == _page(IDS[1], "v1")
+    assert not (cache / IDS[2]).exists()
+    assert counts["failed"] == 3 and counts["reused_after_failure"] == 2
+    dates = _manifest(cache, path).dates()
+    assert dates == {IDS[0]: None, IDS[1]: None}  # retried first next time

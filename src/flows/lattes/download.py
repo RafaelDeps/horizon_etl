@@ -280,6 +280,24 @@ def _script_lattes_downloader(lattes_id: str, cache_dir: str) -> None:
     baixa_lattes.baixaCVLattes(lattes_id, cache_dir)
 
 
+# A curriculum page names its owner in the title. When the portal limits
+# access it serves its reCAPTCHA page instead (about 18 KB, no such title);
+# scriptLattes then builds a "Nome-nao-identificado" CV with no items. Such a
+# page is a failed download, never a cached curriculum (spec 023).
+_CURRICULUM_TITLE = re.compile(
+    rb"<title>\s*Curr\S*culo do Sistema de Curr\S*culos Lattes \("
+)
+
+
+def is_curriculum_page(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+    except OSError:
+        return False
+    return bool(_CURRICULUM_TITLE.search(head))
+
+
 def _download_lattes_to_cache(
     lattes_id: str, cache_dir: str, downloader: LattesDownloader
 ) -> None:
@@ -289,6 +307,12 @@ def _download_lattes_to_cache(
     if not cached_file.exists():
         raise ScriptLattesRuntimeError(
             f"scriptLattes did not create the cache file for Lattes ID {lattes_id}"
+        )
+    if not is_curriculum_page(cached_file):
+        cached_file.unlink()  # tried again on the next run (spec 023)
+        raise ScriptLattesRuntimeError(
+            f"The portal served no curriculum for Lattes ID {lattes_id} "
+            "(access check page)"
         )
 
 
@@ -399,6 +423,13 @@ def refresh_lattes_cache(
         if not fresh.exists():
             raise ScriptLattesRuntimeError(
                 f"scriptLattes did not create the file for Lattes ID {lattes_id}"
+            )
+        if not is_curriculum_page(fresh):
+            # The cached copy stays: the portal's access check page is not a
+            # newer curriculum.
+            raise ScriptLattesRuntimeError(
+                f"The portal served no curriculum for Lattes ID {lattes_id} "
+                "(access check page)"
             )
         os.replace(fresh, cache_path / lattes_id)
 

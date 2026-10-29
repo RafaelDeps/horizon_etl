@@ -262,7 +262,16 @@ unchanged (spec 021).
   keeps the cached curriculum. A CNPq page that fails to download is
   processed from its stored copy, and with the portal down the run still
   completes with every stored group.
-- **Unidentified curricula**: a curriculum the portal served as
+- **Access check pages**: when the portal limits access, it serves its
+  reCAPTCHA page instead of the curriculum. That page has no
+  "Currículo do Sistema de Currículos Lattes (…)" title, and scriptLattes
+  would turn it into a "Nome-nao-identificado" CV with no items. The download
+  rejects such a page:
+  - a refresh keeps the cached copy;
+  - a new curriculum is not cached, and is tried again on the next run.
+
+  The captcha is never answered or bypassed.
+- **Unidentified curricula**: a cached curriculum that still turns out
   "Nome-nao-identificado" loses its download date after the
   `lattes_projects` phase. It is then the oldest item of the next rotation,
   and is downloaded again on the next run, within the share.

@@ -64,7 +64,10 @@ def test_prefetch_lattes_cache_downloads_only_missing_ids(tmp_path):
 
     def fake_downloader(lattes_id, target_cache_dir):
         downloaded.append((lattes_id, target_cache_dir))
-        (cache_dir / lattes_id).write_text("downloaded")
+        # A curriculum page names its owner in the title (spec 023 checks it).
+        (cache_dir / lattes_id).write_text(
+            "<title>Currículo do Sistema de Currículos Lattes (Nome)</title>"
+        )
 
     result = prefetch_lattes_cache(
         [cached_id, *missing_ids],
