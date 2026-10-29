@@ -160,6 +160,46 @@ CNPq fetch: workers=4 fetched=350 retries=0 failed_after_retries=0 concurrency_r
 | `concurrency_reductions` | How many times a failure burst halved the concurrency |
 | `researcher_index_loaded` / `researcher_hits` / `researcher_created` | Researchers loaded once for the phase, members matched to them, and researchers created during the phase |
 
+## Persistent database and unchanged documents (spec 021)
+
+Since spec 021 the database persists between runs. `make weekly-flows` no
+longer resets it: it depends on `make db-ensure`, which creates
+`db/horizon.db` (the path comes from `DATABASE_URL`) only when the file does
+not exist, and otherwise only applies the pending ETL migrations. A fresh
+machine or CI runner therefore still starts from an empty database. To rebuild
+on purpose, use `make full-refresh` (or `make db-reset` followed by the
+flows); both keep the horizon id history.
+
+Every per-document phase works one source document at a time: a Lattes CV
+(`lattes_projects`, `lattes_advisorships`), a CNPq group page (`cnpq_group`),
+a SigPesq report row (`sigpesq_group`, `sigpesq_project`,
+`sigpesq_advisorship`). The enrichment phase (`enrich_projects`) is not part
+of this. Each document ends in one of these outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| processed | New or changed content (or a person or initiative it resolved by name may now resolve differently). Written in one transaction with its state; the items it no longer carries are deleted when no other document needs them. |
+| skipped | Same content hash, same `HORIZON_RULE_VERSION`, and every name it resolved still resolves the same way. Nothing is written. |
+| failed | `download` (no JSON for a listed Lattes id, or a CNPq page that could not be fetched), `unparsable` (the file does not load), `unidentified` (a `Nome-nao-identificado` CV or no Lattes id in the file name), `total_loss` (a readable document that had items now has none), `partial` (a section or row failed). The document is rolled back whole; its stored data and processing state stay as they were, and it is tried again on the next run. |
+
+Each phase logs one line, for example
+`documents lattes_projects: processed=3 skipped=432 failed=27 (unidentified=27) inactive=0 reactivated=0 deleted_items=5`.
+
+A document absent from its source's complete listing becomes **inactive**:
+its data is kept and still exported, and `source_document_states_canonical.json`
+(in `exports_canonical.zip`) lists it as `inactive`. The listings are
+`data/lattes_run/lattes.list` for Lattes, the SigPesq reports, and, for CNPq,
+the groups active in the SigPesq groups report of the same weekly. A missing,
+empty or filtered listing (a campus filter, a standalone CNPq run) changes no
+status. A document listed again becomes active.
+
+**When to bump `HORIZON_RULE_VERSION`** (`src/core/logic/horizon_identity.py`):
+on any change to a parser, mapping strategy or loader that alters what an
+unchanged document produces, besides the key, hash and id rules of spec 020.
+Unchanged documents are skipped, so without the bump such a change would
+reach only the documents that change for other reasons. A database recorded
+with another version is rebuilt once by the weekly, keeping the id history.
+
 ## SQLite connection settings (spec 018)
 
 `libbase` commits after every record it adds, so a Lattes phase issues
@@ -176,8 +216,9 @@ the engines that `eo_lib` and `research_domain` create. It does nothing for
 PostgreSQL or in-memory databases.
 
 A power loss can roll back the last transactions; it cannot corrupt the file.
-The weekly rebuilds the database from scratch, so an interrupted run is redone
-anyway.
+Each source document is committed in one transaction (spec 021), so a lost
+transaction is a whole document without a processing state: the next run
+processes it again.
 
 | What you may see | Why |
 |---|---|
@@ -186,7 +227,7 @@ anyway.
 | `⚠️ SQLite finalize falhou: …` in the Telegram summary | The final step failed, usually because a connection was still open. The data is still in `horizon.db-wal`; the exit code is not affected. |
 | `-wal` / `-shm` left after a standalone command (`make sync-cnpq`, `make ingest-lattes-projects`, …) | Only `make weekly-flows` runs the final step. Harmless: the next connection uses them, and `make db-clean` removes them. |
 
-`make db-clean` (and so `make db-reset` and `make weekly-flows`) removes
+`make db-clean` (and so `make db-reset` and `make full-refresh`) removes
 `horizon.db`, `horizon.db-wal` and `horizon.db-shm` together. A stale `-wal`
 next to a new database could corrupt it.
 

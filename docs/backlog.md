@@ -345,3 +345,49 @@ Mapping Epics -> User Stories -> Tasks status.
   (695 → 714 rows in `null_researchers_canonical.json` between the old and new
   code). A fix would resolve names against the full set of known names before
   writing (two passes). Status: Ready (design).
+- **TD-025 — `PersonConsolidator` talks to the database directly from the core**:
+  `src/core/logic/person_consolidator.py` opens `sqlite3` connections and, since
+  spec 020, imports `record_merge` from `src/adapters/database/horizon_id_store.py`.
+  Constitution principle I asks that `src/core/logic/` reach the database only
+  through ports and never import adapters. Found by `/speckit-analyze` of spec
+  021 (2026-10-28), which avoids widening it: its merge re-pointing is injected
+  as a hook by the flow. A fix would move the consolidator's SQL behind a port
+  (a `IPersonMergeStore` with a SQLite adapter) and inject the spec 020 merge
+  log the same way. Status: Ready.
+- **TD-026 — Some phases ignore `DATABASE_URL` and always open `db/horizon.db`**:
+  `src/scripts/consolidate_duplicates.py` (`DEFAULT_DB_PATH`), `PersonConsolidator`,
+  `ReferenceConsolidator`, `DuplicateAuditor`, `anonymize_backfill` and
+  `etl_flow_reporter` default to the relative path `db/horizon.db`, and `app.py`
+  calls them without a path. Run from another folder they open an empty file
+  there; run from the repository root with `DATABASE_URL` pointing at a copy,
+  `consolidate_duplicates` and `anonymize_backfill` write the real database.
+  Found in the spec 021 replay (2026-10-28). Not fixed there: the maintainer
+  allowed the local validation to write `db/horizon.db` after a backup
+  (`data/_backup_2026-10-28_pre021/`). A fix would resolve the path from
+  `DATABASE_URL` as `sqlite_path_from_url` already does. Status: Ready.
+- **TD-027 — Two SigPesq workplans of one project collapse into one advisorship**:
+  rows with different workplan codes of the same project (e.g.
+  `sigpesq workplan|5475|2144` and `sigpesq workplan|5475|2320`, different
+  students) are resolved by `AdvisorshipHandler` to the same advisorship, so one
+  student is lost and the advisorship keeps whichever row was written last.
+  Found by the spec 021 replay (2026-10-28): 67 advisorships. With spec 021 a
+  row repeated with identical content in a later yearly file is skipped, so the
+  winner became the last distinct version (deterministic, the same in a rebuild
+  and an incremental run, but different from the previous last-writer for those
+  67). A fix would key the advisorship by its workplan code so both rows become
+  two advisorships. Status: Ready.
+
+- **TD-028 — Rows shared by several documents keep the last writer's values**:
+  an initiative listed in several Lattes CVs or SigPesq rows, and a fellowship
+  shared by several workplans, take the description, status, dates (and the
+  fellowship value) of whichever document wrote them last. A rebuild writes in
+  a fixed order, so it is deterministic; an incremental run reprocesses only
+  some documents, so the last writer can differ. Found by the spec 021 replay
+  (2026-10-29): after a rebuild plus two unchanged passes, about 130
+  initiatives (description 50, status 27, start date 26, end date 18,
+  `enrichment_json` 38) and 5 advisorships differ from the rebuild, while
+  every other table is identical. It stays stable afterwards (passes 3+ write
+  nothing). A fix would merge these values by a rule that does not depend on
+  order, as spec 020 did for article fields (`_fill_missing_article_fields`):
+  for example the most recent source date, or the value of the highest-priority
+  source. Status: Ready.
