@@ -72,6 +72,8 @@ class Document:
         self.begun = False
         self.skipped = False
         self.partial_reason: Optional[str] = None
+        # Spec 023: when the content being read was downloaded (set by the phase).
+        self.downloaded_at: Optional[str] = None
 
     def unchanged(self, content) -> bool:
         """True when the stored state says this exact content was already
@@ -124,6 +126,7 @@ class Document:
             ingestion_run_id=current_ingestion_run_id.get(),
             references=references,
             items=sorted((t, r, subject) for (t, r), subject in self.items.items()),
+            downloaded_at=self.downloaded_at,
         )
 
 
@@ -153,10 +156,13 @@ class DocumentSkip:
         self.failures: List[tuple] = []
         self.listing = None
         self.listing_complete: Optional[bool] = None
+        # Spec 023: download counts of the phase, when it downloads its documents.
+        self.downloads: Optional[dict] = None
 
     @contextmanager
-    def document(self, key: str):
+    def document(self, key: str, downloaded_at: Optional[str] = None):
         doc = Document(self, str(key))
+        doc.downloaded_at = downloaded_at
         self.seen.add(doc.key)
         token = current_document.set((self.source_system, doc.key))
         doc_token = _active_document.set(doc)
@@ -174,10 +180,12 @@ class DocumentSkip:
                     # Read again and unchanged: an earlier failure (a download
                     # that failed once) no longer applies.
                     self.store.clear_failure(self.source_system, doc.key)
+                self._note_download(doc)
             elif not doc.begun:
                 # Read but neither skipped nor processed (the phase decided it
                 # has nothing to write): counts as skipped, state unchanged.
                 self.counts[SKIPPED] += 1
+                self._note_download(doc)
             elif doc.partial_reason:
                 self._fail(doc, "partial", doc.partial_reason)
             else:
@@ -185,6 +193,14 @@ class DocumentSkip:
         finally:
             _active_document.reset(doc_token)
             current_document.reset(token)
+
+    def _note_download(self, doc: Document) -> None:
+        """An unchanged document read from a newer download: only its
+        download date moves; the same date writes nothing (spec 023)."""
+        if not doc.downloaded_at or doc.state is None:
+            return
+        if doc.state.downloaded_at != doc.downloaded_at:
+            self.store.set_downloaded(self.source_system, doc.key, doc.downloaded_at)
 
     def references_hold(self, state: DocumentState) -> bool:
         """Research R3: an unchanged document is skipped only if every name it
@@ -258,6 +274,7 @@ class DocumentSkip:
             processed_at=None,
             last_seen_at="",
             status="active",
+            downloaded_at=outcome.downloaded_at,
         )
 
     def _fail(self, doc: Document, reason: str, detail: str = "") -> None:
@@ -305,6 +322,7 @@ class DocumentSkip:
                 {"document_key": k, "reason": r, "detail": d}
                 for k, r, d in self.failures
             ],
+            "downloads": self.downloads,
         }
 
     def log_summary(self) -> dict:
@@ -418,6 +436,21 @@ def carry(item_type: str, item_ref, is_subject: bool = False) -> None:
         doc.carry(item_type, item_ref, is_subject)
 
 
+def file_download_date(path: Optional[str]) -> Optional[str]:
+    """Spec 023: the download date of a report fetched whole in this run,
+    from its file time (ISO-8601 UTC), or None when it cannot be read."""
+    import os
+    from datetime import datetime, timezone
+
+    try:
+        stamp = os.path.getmtime(path) if path else None
+    except OSError:
+        return None
+    if stamp is None:
+        return None
+    return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def mark_partial(detail: str = "") -> None:
     """For code that logs and swallows a failure inside a document."""
     doc = current()
@@ -432,6 +465,7 @@ _STATE_FIELDS = (
     "status",
     "last_seen_at",
     "processed_at",
+    "downloaded_at",
 )
 
 

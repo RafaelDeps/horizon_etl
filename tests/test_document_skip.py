@@ -50,6 +50,9 @@ class FakeStore(IDocumentStateStore):
     def clear_failure(self, source_system, document_key):
         self.log.append(("clear", document_key))
 
+    def set_downloaded(self, source_system, document_key, downloaded_at):
+        self.log.append(("downloaded", document_key, downloaded_at))
+
     def mark_listing(self, source_system, listed_keys, complete):
         return ListingResult(listed=len(list(listed_keys)))
 
@@ -323,3 +326,35 @@ def test_order_free_content_hashes_the_same_in_any_list_order():
     b = {"nome": "G", "equipamentos": {"items": [["a", 2], ["b", 1]]}}
     assert stable_hash(order_free(a)) == stable_hash(order_free(b))
     assert stable_hash(order_free(a)) != stable_hash(order_free({"nome": "H"}))
+
+
+def test_download_dates_follow_the_content_read():
+    """Spec 023: a processed document stores its download date; a skipped one
+    with a newer download updates only that date; the same date writes
+    nothing; a failed one keeps its date."""
+    from dataclasses import replace
+
+    content = {"nome": "Ana"}
+    store = FakeStore()
+    skip = DocumentSkip(store, "lattes_projects", rule_version=1)
+    with skip.document("new", downloaded_at="2026-11-05T02:00:00Z") as doc:
+        doc.unchanged(content)
+        doc.begin()
+    assert store.last_outcome.downloaded_at == "2026-11-05T02:00:00Z"
+
+    state = replace(_state("1", content), downloaded_at="2026-10-29T00:00:00Z")
+    for when, expected in (
+        ("2026-11-05T02:00:00Z", [("downloaded", "1", "2026-11-05T02:00:00Z")]),
+        ("2026-10-29T00:00:00Z", []),
+    ):
+        store = FakeStore({"1": state})
+        skip = DocumentSkip(store, "lattes_projects", rule_version=1)
+        with skip.document("1", downloaded_at=when) as doc:
+            assert doc.unchanged(content)
+        assert store.log == expected
+
+    store = FakeStore({"1": state})
+    skip = DocumentSkip(store, "lattes_projects", rule_version=1)
+    with skip.document("1", downloaded_at="2026-11-05T02:00:00Z"):
+        raise DocumentFailed("download", "x")
+    assert [e for e in store.log if e[0] == "downloaded"] == []

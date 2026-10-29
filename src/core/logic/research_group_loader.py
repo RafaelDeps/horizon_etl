@@ -11,7 +11,7 @@ from research_domain import (
     UniversityController,
 )
 
-from src.core.logic.document_skip import mark_partial
+from src.core.logic.document_skip import file_download_date, mark_partial
 from src.core.logic.initiative_identity import normalize_text
 from src.core.logic.pii_anonymizer import anonymize_person_data
 from src.tracking.recorder import tracking_recorder
@@ -109,7 +109,9 @@ class ResearchGroupLoader:
             return nullcontext(None)
         name = self.mapping_strategy.map_row(dict(row)).get("name")
         key = normalize_text(name) if isinstance(name, str) else str(name)
-        return self.document_skip.document(key)
+        return self.document_skip.document(
+            key, downloaded_at=getattr(self, "_report_date", None)
+        )
 
     def _try_rollback(self, controller):
         """Attempts to rollback session via private attributes."""
@@ -162,6 +164,8 @@ class ResearchGroupLoader:
 
     def process_file(self, file_path: str):
         logger.info(f"Processing Research Groups from: {file_path}")
+        # Spec 023: the rows date from the report, downloaded whole each run.
+        self._report_date = file_download_date(file_path)
 
         try:
             df = pd.read_excel(file_path)

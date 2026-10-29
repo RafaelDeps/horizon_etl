@@ -1,5 +1,5 @@
 """Spec 020 (FR-014) and spec 021 (FR-002): the migrations only add the
-ETL-owned tables; every table that existed before keeps its columns, types and
+ETL-owned tables (and columns on them, spec 023); every table that existed before keeps its columns, types and
 indexes."""
 
 import importlib.util
@@ -27,6 +27,8 @@ NEW_TABLES = {
 }
 # Migrations that create an index on a new table rather than a table.
 NEW_INDEXES = {"0010_source_document_items_index"}
+# Migrations that add a column to a new (ETL-owned) table (spec 023).
+NEW_COLUMNS = {"0012_source_document_downloaded_at"}
 # Shipped before spec 020; the base schema is taken after it.
 PRE_020 = "0001_initiatives_enrichment_json"
 
@@ -83,7 +85,9 @@ def test_migrations_only_add_the_new_tables(tmp_path):
     assert {"persons", "researchers", "initiatives", "source_records"} <= set(before)
 
     with Session(engine) as session:
-        assert run_migrations(session) == len(NEW_TABLES) + len(NEW_INDEXES)
+        assert run_migrations(session) == len(NEW_TABLES) + len(NEW_INDEXES) + len(
+            NEW_COLUMNS
+        )
     engine.dispose()
     after = _schema(path)
 

@@ -19,6 +19,16 @@ on:
         required: false
         default: false
         type: boolean
+      refresh_share:
+        description: "Share of stored Lattes curricula and CNPq pages downloaded again (0-1; blank = 0.25)."
+        required: false
+        default: ""
+        type: string
+      full_refresh:
+        description: "Download every Lattes curriculum and CNPq page again."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -94,6 +104,10 @@ jobs:
         run: make restore-weekly
 
       - name: Run weekly flows
+        env:
+          # Spec 023: rotation of the raw downloads (defaults when blank).
+          HORIZON_REFRESH_SHARE: ${{ github.event.inputs.refresh_share }}
+          HORIZON_FULL_REFRESH: ${{ github.event.inputs.full_refresh }}
         run: make weekly-flows
 
       - name: Compress large export files

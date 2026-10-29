@@ -127,6 +127,11 @@ MIGRATIONS: List[Tuple[str, str]] = [
         " score REAL,"
         " PRIMARY KEY (source_system, document_key, kind, lookup_key))",
     ),
+    (
+        # Spec 023: the date of the download a document's data comes from.
+        "0012_source_document_downloaded_at",
+        "ALTER TABLE source_document_states ADD COLUMN downloaded_at TEXT",
+    ),
 ]
 
 

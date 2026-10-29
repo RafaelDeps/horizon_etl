@@ -72,3 +72,17 @@ def test_the_artifact_carries_what_the_next_run_restores():
     assert upload["retention-days"] == 90
     compress = _step(steps, "Compress large export files")["run"]
     assert "! -path 'data/raw/*'" in compress
+
+
+def test_the_raw_download_rotation_can_be_tuned_on_dispatch():
+    # Spec 023: share and full refresh reach the weekly as environment.
+    workflow, steps = _steps()
+    trigger = workflow.get("on") or workflow.get(True)
+    inputs = trigger["workflow_dispatch"]["inputs"]
+    assert inputs["refresh_share"]["type"] == "string"
+    assert inputs["refresh_share"]["default"] == ""
+    assert inputs["full_refresh"]["type"] == "boolean"
+    assert inputs["full_refresh"]["default"] is False
+    env = _step(steps, "Run weekly flows")["env"]
+    assert env["HORIZON_REFRESH_SHARE"] == "${{ github.event.inputs.refresh_share }}"
+    assert env["HORIZON_FULL_REFRESH"] == "${{ github.event.inputs.full_refresh }}"

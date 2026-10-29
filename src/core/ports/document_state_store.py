@@ -41,6 +41,8 @@ class DocumentState:
     status: str
     last_failure: Optional[str] = None
     last_failure_at: Optional[str] = None
+    # Spec 023: when the content the document was last read from was downloaded.
+    downloaded_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,7 @@ class DocumentOutcome:
     references: List[Reference] = field(default_factory=list)
     # (item_type, item_ref, is_subject)
     items: List[Tuple[str, str, bool]] = field(default_factory=list)
+    downloaded_at: Optional[str] = None
 
 
 @dataclass
@@ -138,6 +141,12 @@ class IDocumentStateStore(ABC):
     def clear_failure(self, source_system: str, document_key: str) -> None:
         """Clears a stale failure record: the document was read again,
         unchanged, so its stored processing state is current (FR-008)."""
+
+    def set_downloaded(
+        self, source_system: str, document_key: str, downloaded_at: str
+    ) -> None:
+        """Spec 023: an unchanged document was read from content downloaded
+        at ``downloaded_at``; only that date is written."""
 
     @abstractmethod
     def mark_listing(

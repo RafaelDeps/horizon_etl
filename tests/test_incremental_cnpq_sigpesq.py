@@ -116,7 +116,10 @@ def _select(con, table):
     columns = [
         f'"{r[1]}"'
         for r in con.execute(f'PRAGMA table_info("{table}")')
-        if not (table == "source_document_states" and r[1] == "last_seen_at")
+        if not (
+            table == "source_document_states"
+            and r[1] in ("last_seen_at", "downloaded_at")  # dates of reading, spec 023
+        )
     ]
     return f'SELECT {", ".join(columns)} FROM "{table}"'
 
@@ -215,7 +218,7 @@ def _failures(db, source_system):
     return rows
 
 
-def test_a_failed_row_or_page_is_rolled_back_and_retried(tmp_path):
+def test_a_failed_row_or_page_is_rolled_back_and_retried(tmp_path, monkeypatch):
     work = tmp_path / "work"
     raw = work / "data" / "raw" / "sigpesq"
     _cut(REPORTS["research_group"], str(raw / "research_group" / "r.xlsx"), 8)
@@ -258,6 +261,9 @@ def test_a_failed_row_or_page_is_rolled_back_and_retried(tmp_path):
     ids = {k.split(":", 1)[-1] for k in processed}  # "cnpq:<group id>"
     url = next(u for u in data if any(i in u for i in ids))
     data[url] = None
+    # Spec 023: a stored copy would be used; without one it is a failed download.
+    os.remove(work / "data" / "raw" / "cnpq" / f"{url.rsplit('/', 1)[-1]}.json")
+    monkeypatch.setenv("HORIZON_FULL_REFRESH", "1")  # the group is due now
     payloads.write_text(json.dumps(data, ensure_ascii=False))
     before = _dump(db)
     cnpq_second = _run(work, db, CNPQ, str(payloads))
@@ -362,3 +368,60 @@ def test_a_group_gone_from_the_report_becomes_inactive_and_comes_back(
     statuses = _status(db, "sigpesq_group")
     _run(work, db, SIGPESQ)
     assert _status(db, "sigpesq_group") == statuses
+
+
+# --------------------------------------------------------------------------
+# Spec 023: with the portal down, stored CNPq pages keep every group's data
+# --------------------------------------------------------------------------
+
+
+def test_stored_pages_keep_the_groups_when_the_portal_is_down(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    raw = work / "data" / "raw" / "sigpesq"
+    _cut(REPORTS["research_group"], str(raw / "research_group" / "r.xlsx"), 8)
+    _cut(REPORTS["research_projects"], str(raw / "research_projects" / "r.xlsx"), 2)
+    _cut(REPORTS["advisorships"], str(raw / "advisorships" / "2026" / "r.xlsx"), 2)
+    db = tmp_path / "inc.db"
+    subprocess.run(
+        [sys.executable, os.path.join(REPO, "db", "create_db.py")],
+        cwd=work,
+        env=_env(db),
+        check=True,
+        capture_output=True,
+    )
+    payloads = _payloads(tmp_path)
+    _run(work, db, SIGPESQ)
+    first = _run(work, db, CNPQ, str(payloads))
+    processed = first["cnpq_group"][0]
+    assert processed > 0
+    stored = sorted((work / "data" / "raw" / "cnpq").glob("*.json"))
+    assert len(stored) == processed
+
+    def states():
+        con = sqlite3.connect(db)
+        rows = dict(
+            con.execute(
+                "SELECT document_key, downloaded_at FROM source_document_states "
+                "WHERE source_system = 'cnpq_group' AND content_hash IS NOT NULL"
+            ).fetchall()
+        )
+        con.close()
+        return rows
+
+    dates = states()
+    assert dates and all(dates.values())
+
+    # Every fetch fails, and every group is due (full refresh).
+    down = tmp_path / "down.json"
+    down.write_text(json.dumps({url: None for url in json.loads(payloads.read_text())}))
+    monkeypatch.setenv("HORIZON_FULL_REFRESH", "1")
+    before = _dump(db)
+    second = _run(work, db, CNPQ, str(down))
+    assert second["cnpq_group"][2] == 0, second  # no failed document
+    assert second["cnpq_group"][1] == processed  # unchanged stored pages: skipped
+    after = _dump(db)
+    assert [t for t in before if before[t] != after.get(t)] in (
+        [],
+        ["source_document_states"],
+    )
+    assert states() == dates  # the stored copies' dates

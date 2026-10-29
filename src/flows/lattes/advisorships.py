@@ -11,12 +11,13 @@ from prefect.utilities.annotations import quote
 from research_domain.controllers import ResearcherController
 
 from src.adapters.sources.lattes_parser import LattesParser
+from src.adapters.sources.raw_store import JsonDownloadManifest
+from src.core.logic.document_skip import carry
 from src.core.logic.horizon_identity import (
     dedupe_same_document,
     join_normalized,
     lattes_id_from_cv_path,
 )
-from src.core.logic.document_skip import carry
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
     ResearcherRef,
@@ -178,10 +179,12 @@ def _ingest_lattes_advisorships(json_files: List[str], skip, logger) -> None:
     with tracking_recorder.run_context(
         source_system="lattes_advisorships", flow_name="lattes_advisorships"
     ):
+        # Spec 023: when each curriculum in cache/ was downloaded.
+        download_dates = JsonDownloadManifest().dates()
         for position, json_file in enumerate(json_files, start=1):
             started = time.perf_counter()
             key = lattes_id_from_cv_path(json_file) or os.path.basename(json_file)
-            with skip.document(key) as doc:
+            with skip.document(key, downloaded_at=download_dates.get(key)) as doc:
                 data = read_cv(json_file)
                 if doc.unchanged(data):
                     continue

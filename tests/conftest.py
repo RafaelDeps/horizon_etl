@@ -34,6 +34,15 @@ def _no_rule_version_reset(monkeypatch, tmp_path_factory):
         "REPORT_PATH",
         str(tmp_path_factory.mktemp("reports") / "source_document_states_report.json"),
     )
+    # Spec 023: raw stores of in-process tests never touch the repository's
+    # data/raw (the stored CNPq pages and the Lattes manifest).
+    import src.adapters.sources.raw_store as raw_store
+
+    raw_dir = tmp_path_factory.mktemp("raw")
+    monkeypatch.setattr(raw_store, "CNPQ_PAGES", str(raw_dir / "cnpq"))
+    monkeypatch.setattr(
+        raw_store, "LATTES_MANIFEST", str(raw_dir / "lattes" / "download_manifest.json")
+    )
     # run_weekly sets the weekly start for its phases; restored after the test.
     monkeypatch.setenv("HORIZON_WEEKLY_STARTED_AT", "")
     yield real
@@ -87,6 +96,9 @@ class _MemoryDocumentStore:
         pass
 
     def clear_failure(self, source_system, document_key):
+        pass
+
+    def set_downloaded(self, source_system, document_key, downloaded_at):
         pass
 
     def mark_listing(self, source_system, listed_keys, complete):

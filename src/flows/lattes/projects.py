@@ -27,6 +27,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from src.adapters.sources.lattes_parser import LattesParser
+from src.adapters.sources.raw_store import JsonDownloadManifest
 from src.core.logic.document_skip import carry, current, mark_partial
 from src.core.logic.entity_manager import EntityManager
 from src.core.logic.horizon_identity import (
@@ -1065,10 +1066,12 @@ def _ingest_lattes_projects(json_files: List[str], skip) -> None:
     with tracking_recorder.run_context(
         source_system="lattes_projects", flow_name="lattes_projects"
     ):
+        # Spec 023: when each curriculum in cache/ was downloaded.
+        download_dates = JsonDownloadManifest().dates()
         for position, json_file in enumerate(json_files, start=1):
             started = time.perf_counter()
             key = lattes_id_from_cv_path(json_file) or os.path.basename(json_file)
-            with skip.document(key) as doc:
+            with skip.document(key, downloaded_at=download_dates.get(key)) as doc:
                 data = read_cv(json_file)
                 if doc.unchanged(data):
                     continue

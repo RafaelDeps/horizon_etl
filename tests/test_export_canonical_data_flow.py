@@ -199,6 +199,7 @@ def test_document_states_file_follows_the_contract(tmp_path, monkeypatch):
     db = tmp_path / "states.db"
     con = sqlite3.connect(db)
     con.execute(dict(MIGRATIONS)["0008_source_document_states"])
+    con.execute(dict(MIGRATIONS)["0012_source_document_downloaded_at"])
     con.executemany(
         "INSERT INTO source_document_states (source_system, document_key, "
         "content_hash, rule_version, last_seen_at, processed_at, status, "
@@ -256,8 +257,10 @@ def test_document_states_file_follows_the_contract(tmp_path, monkeypatch):
             "status",
             "last_seen_at",
             "processed_at",
+            "downloaded_at",  # spec 023
         }
     assert docs[1]["processed_at"] is None
+    assert all(d["downloaded_at"] is None for d in docs)  # not read since spec 023
     assert docs[2]["status"] == "inactive"
     # Keys, statuses and dates only: no failure details, no hashes.
     text_out = json.dumps(payload)

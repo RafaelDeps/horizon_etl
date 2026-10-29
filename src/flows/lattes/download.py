@@ -6,12 +6,20 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from platform import system
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 
 from loguru import logger
 from prefect import flow, task
 
+from src.adapters.sources.raw_store import JsonDownloadManifest
 from src.core.logic.lattes_generators import LattesConfigGenerator, LattesListGenerator
+from src.core.logic.raw_rotation import (
+    counts_line,
+    download_counts,
+    plan_downloads,
+    refresh_settings,
+)
+from src.core.ports.raw_store import IDownloadManifest
 from src.notifications.telegram import telegram_flow_state_handlers
 
 LATTES_ID_RE = re.compile(r"(?<!\d)\d{16}(?!\d)")
@@ -362,6 +370,98 @@ def prefetch_lattes_cache(
     return [lid for lid in missing_ids if lid not in failed_ids]
 
 
+def refresh_lattes_cache(
+    lattes_ids: List[str],
+    cache_dir: str,
+    max_workers: int = DEFAULT_LATTES_PREFETCH_WORKERS,
+    downloader: LattesDownloader | None = None,
+) -> Tuple[List[str], List[str]]:
+    """Downloads cached curricula again (spec 023). Each download goes to an
+    empty folder under ``cache/.refresh/``; the cached file is replaced only
+    when the new one arrived, so a failed refresh keeps the previous copy
+    (constitution, raw inputs rule). Returns (refreshed, failed)."""
+    if not lattes_ids:
+        return [], []
+    if max_workers < 1:
+        raise ValueError("max_workers must be >= 1")
+    if downloader is None:
+        patch_script_lattes_runtime()
+        downloader = _script_lattes_downloader
+    cache_path = Path(cache_dir)
+    work = cache_path / ".refresh" / time.strftime("%Y%m%dT%H%M%S")
+    work.mkdir(parents=True, exist_ok=True)
+
+    def refresh_one(lattes_id: str) -> None:
+        folder = work / lattes_id
+        folder.mkdir(parents=True, exist_ok=True)
+        downloader(lattes_id, str(folder))
+        fresh = folder / lattes_id
+        if not fresh.exists():
+            raise ScriptLattesRuntimeError(
+                f"scriptLattes did not create the file for Lattes ID {lattes_id}"
+            )
+        os.replace(fresh, cache_path / lattes_id)
+
+    refreshed, failed = [], []
+    try:
+        with ThreadPoolExecutor(
+            max_workers=min(max_workers, len(lattes_ids))
+        ) as executor:
+            futures = {executor.submit(refresh_one, lid): lid for lid in lattes_ids}
+            for future in as_completed(futures):
+                lattes_id = futures[future]
+                try:
+                    future.result()
+                    refreshed.append(lattes_id)
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to refresh Lattes {lattes_id}; keeping the cached "
+                        f"copy: {exc}"
+                    )
+                    failed.append(lattes_id)
+    finally:
+        shutil.rmtree(cache_path / ".refresh", ignore_errors=True)
+    return sorted(refreshed), sorted(failed)
+
+
+def rotate_lattes_downloads(
+    lattes_ids: List[str],
+    cache_dir: str,
+    manifest: IDownloadManifest,
+    share: float,
+    full: bool,
+    max_workers: int = DEFAULT_LATTES_PREFETCH_WORKERS,
+    downloader: LattesDownloader | None = None,
+) -> Dict[str, object]:
+    """Spec 023: downloads the curricula missing from the cache plus the share
+    of cached ones downloaded longest ago, and records the dates of the
+    successful downloads in the manifest. Returns the download counts."""
+    plan = plan_downloads(lattes_ids, manifest.dates(), share=share, full=full)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    failed: List[str] = []
+    if plan.new:
+        prefetch_lattes_cache(
+            plan.new, cache_dir, max_workers=max_workers, downloader=downloader
+        )
+        cache_path = Path(cache_dir)
+        for lattes_id in plan.new:
+            if (cache_path / lattes_id).exists():
+                manifest.record(lattes_id, now)
+            else:
+                failed.append(lattes_id)
+    if plan.refresh:
+        refreshed, refresh_failed = refresh_lattes_cache(
+            plan.refresh, cache_dir, max_workers=max_workers, downloader=downloader
+        )
+        for lattes_id in refreshed:
+            manifest.record(lattes_id, now)
+        failed.extend(refresh_failed)
+    manifest.save()
+    counts = download_counts(plan, failed)
+    logger.info(counts_line("lattes", counts))
+    return counts
+
+
 @task
 def get_researchers_from_db() -> List[Dict]:
     """
@@ -582,9 +682,14 @@ def download_lattes_flow():
 
     effective_list_path = list_path
     if is_lattes_prefetch_enabled():
-        prefetch_lattes_cache(
+        # Spec 023: missing curricula plus a rotating share of cached ones.
+        share, full = refresh_settings()
+        rotate_lattes_downloads(
             lattes_ids,
             cache_dir,
+            JsonDownloadManifest(cache_dir=cache_dir),  # data/raw/lattes/
+            share,
+            full,
             max_workers=get_lattes_prefetch_workers(),
         )
         cache_path = Path(cache_dir)

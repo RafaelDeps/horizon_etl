@@ -85,7 +85,10 @@ def _select(con, table):
     columns = [
         f'"{r[1]}"'
         for r in con.execute(f'PRAGMA table_info("{table}")')
-        if not (table == "source_document_states" and r[1] == "last_seen_at")
+        if not (
+            table == "source_document_states"
+            and r[1] in ("last_seen_at", "downloaded_at")  # dates of reading, spec 023
+        )
     ]
     return f'SELECT {", ".join(columns)} FROM "{table}"'
 

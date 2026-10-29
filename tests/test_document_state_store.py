@@ -287,3 +287,31 @@ def test_links_of_a_document_without_recorded_links_delete_nothing(tmp_path):
         assert rows("SELECT COUNT(*) FROM persons") == [(1,)]
         """,
     )
+
+
+def test_download_date_is_stored_and_updated_alone(tmp_path):
+    """Spec 023: commit_processed writes downloaded_at; set_downloaded changes
+    only that column."""
+    _run(
+        tmp_path,
+        """
+        from src.adapters.database.document_state_store import read_document_states
+        from src.core.ports.document_state_store import DocumentOutcome
+
+        out = DocumentOutcome("lattes_projects", "A", "h1", "f", 1, None, [],
+                              [("award", "9", False)], "2026-11-05T02:00:00Z")
+        store.begin_document()
+        store.commit_processed(out)
+        store.commit_document()
+        before = rows("SELECT content_hash, processed_at FROM source_document_states")
+        # Outside a document, as for a skipped one: committed with the next
+        # document boundary (here the transaction's close).
+        store.set_downloaded("lattes_projects", "A", "2026-12-03T02:00:00Z")
+        tx.close()
+        assert rows("SELECT downloaded_at FROM source_document_states") == [
+            ("2026-12-03T02:00:00Z",)
+        ]
+        assert rows("SELECT content_hash, processed_at FROM source_document_states") == before
+        tx = DocumentTransaction()
+        """,
+    )

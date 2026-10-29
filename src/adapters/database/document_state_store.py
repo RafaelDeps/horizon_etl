@@ -220,13 +220,15 @@ class SqliteDocumentStateStore(IDocumentStateStore):
                 "INSERT INTO source_document_states (source_system, document_key, "
                 "content_hash, dependency_fingerprint, rule_version, max_person_id, "
                 "max_initiative_id, item_count, last_ingestion_run_id, processed_at, "
-                "last_seen_at, status, last_failure, last_failure_at) VALUES "
-                "(:s, :k, :h, :f, :v, :mp, :mi, :n, :run, :now, :now, :active, NULL, NULL) "
+                "last_seen_at, status, last_failure, last_failure_at, downloaded_at) "
+                "VALUES (:s, :k, :h, :f, :v, :mp, :mi, :n, :run, :now, :now, :active, "
+                "NULL, NULL, :dl) "
                 "ON CONFLICT (source_system, document_key) DO UPDATE SET "
                 "content_hash = :h, dependency_fingerprint = :f, rule_version = :v, "
                 "max_person_id = :mp, max_initiative_id = :mi, item_count = :n, "
                 "last_ingestion_run_id = :run, processed_at = :now, "
-                "last_failure = NULL, last_failure_at = NULL"
+                "last_failure = NULL, last_failure_at = NULL, "
+                "downloaded_at = COALESCE(:dl, downloaded_at)"
             ),
             {
                 "s": s,
@@ -240,6 +242,7 @@ class SqliteDocumentStateStore(IDocumentStateStore):
                 "run": outcome.ingestion_run_id,
                 "now": now,
                 "active": ACTIVE,
+                "dl": outcome.downloaded_at,
             },
         )
         return deletions
@@ -273,6 +276,17 @@ class SqliteDocumentStateStore(IDocumentStateStore):
                 "last_failure_at = NULL WHERE source_system = :s AND document_key = :k"
             ),
             {"s": source_system, "k": document_key},
+        )
+
+    def set_downloaded(
+        self, source_system: str, document_key: str, downloaded_at: str
+    ) -> None:
+        self._conn.execute(
+            text(
+                "UPDATE source_document_states SET downloaded_at = :d "
+                "WHERE source_system = :s AND document_key = :k"
+            ),
+            {"s": source_system, "k": document_key, "d": downloaded_at},
         )
 
     def mark_listing(
@@ -348,11 +362,24 @@ def read_document_states(db_path: str) -> List[dict]:
         ).fetchone()
         if not exists:
             return []
+        columns = {
+            r[1] for r in con.execute("PRAGMA table_info(source_document_states)")
+        }
+        # downloaded_at arrives with migration 0012 (spec 023).
+        downloaded = "downloaded_at" if "downloaded_at" in columns else "NULL"
         rows = con.execute(
-            "SELECT source_system, document_key, status, last_seen_at, processed_at "
-            "FROM source_document_states ORDER BY source_system, document_key"
+            "SELECT source_system, document_key, status, last_seen_at, processed_at, "
+            f"{downloaded} FROM source_document_states "
+            "ORDER BY source_system, document_key"
         ).fetchall()
     finally:
         con.close()
-    fields = ("source_system", "document_key", "status", "last_seen_at", "processed_at")
+    fields = (
+        "source_system",
+        "document_key",
+        "status",
+        "last_seen_at",
+        "processed_at",
+        "downloaded_at",
+    )
     return [dict(zip(fields, row)) for row in rows]

@@ -53,3 +53,7 @@ links and failure details. They are internal bookkeeping; the failures are in
 
 **Parquet**: `src/scripts/export_parquet.py` converts it with `documents` as
 the row list and no integer id column.
+
+**Spec 023**: the file gains the field `downloaded_at` (the date of the
+download a document's data comes from); see
+[`specs/023-rotating-raw-downloads/contracts/states-export-v2.md`](../../023-rotating-raw-downloads/contracts/states-export-v2.md).

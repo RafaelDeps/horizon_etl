@@ -241,6 +241,44 @@ was placed, and the run skips the unchanged documents as a local kept run does
   never into the repository's `db/horizon.db`:
   `python -m src.scripts.restore_weekly_artifact --from-dir <artifact> --target <scratch>`.
 
+## Rotating raw downloads (spec 023)
+
+Lattes curricula and CNPq group pages are kept between runs, in `cache/` and
+`data/raw/cnpq/`; spec 022 restores both folders in CI. Each run downloads:
+
+- the items it has no copy of;
+- the share of stored items downloaded longest ago (one quarter by default).
+  With the default, every curriculum and page is downloaded again about every
+  four runs.
+
+Every other item is processed from its stored copy, which is skipped when
+unchanged (spec 021).
+
+- **Download dates**:
+  - Lattes: `data/raw/lattes/download_manifest.json` (`lattes_id -> date`);
+  - CNPq: inside each `data/raw/cnpq/<group id>.json` (`downloaded_at`, with
+    the page under `page`).
+- **A copy is replaced only by a successful download.** A failed refresh
+  keeps the cached curriculum. A CNPq page that fails to download is
+  processed from its stored copy, and with the portal down the run still
+  completes with every stored group.
+- **Provenance**: every document records the date of the download its data
+  comes from (`downloaded_at`). The states export
+  `source_document_states_canonical.json` publishes it. SigPesq rows date
+  from their report, which is downloaded whole every run.
+- **Log line**, one per source:
+  `downloads cnpq: new=… refreshed=… reused=… failed=… reused_after_failure=…`.
+  The same counts are in `data/reports/source_document_states_report.json`.
+- **Tuning**:
+  - `HORIZON_REFRESH_SHARE` (`make weekly-flows REFRESH_SHARE=0.5`) sets the
+    share, between 0 and 1;
+  - `HORIZON_FULL_REFRESH=1` (`FULL_REFRESH=1`) downloads everything again;
+  - in CI, the `refresh_share` and `full_refresh` dispatch inputs do the same.
+  A campus-filtered CNPq run never does a full refresh.
+- **First run after this spec**: every CNPq page is downloaded once (none is
+  stored yet). The cached curricula have no date, so they count as the oldest
+  and are dated a quarter at a time, in four runs.
+
 ## SQLite connection settings (spec 018)
 
 `libbase` commits after every record it adds, so a Lattes phase issues

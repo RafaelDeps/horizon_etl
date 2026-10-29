@@ -317,6 +317,10 @@ class ProjectLoader:
             "skipped_reasons": {},
         }
 
+        # Spec 023: a report is downloaded whole each run; its rows date from it.
+        from src.core.logic.document_skip import file_download_date
+
+        report_date = file_download_date(source_file) if self.document_skip else None
         for row_dict in records:
             skip = self.document_skip
             if skip is None:
@@ -329,7 +333,10 @@ class ProjectLoader:
                     existing_by_norm_name,
                 )
                 continue
-            with skip.document(self._row_document_key(row_dict, source_file)) as doc:
+            with skip.document(
+                self._row_document_key(row_dict, source_file),
+                downloaded_at=report_date,
+            ) as doc:
                 if doc.unchanged(row_dict):
                     stats["skipped_unchanged"] = stats.get("skipped_unchanged", 0) + 1
                     continue

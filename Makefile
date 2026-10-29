@@ -129,8 +129,11 @@ pipeline-log: prefect-server logs-dir ## Run the unified pipeline and tee output
 full-refresh: db-reset prefect-server ## Reset DB and run full pipeline for all campuses
 	@$(FLOW_PYTHON) app.py full_pipeline "" "$(OUTPUT_DIR)"
 
-weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; incl. SigPesq document extraction)
-	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" $(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
+weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; REFRESH_SHARE=0.25 / FULL_REFRESH=1 tune the raw download rotation)
+	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" \
+		$(if $(REFRESH_SHARE),HORIZON_REFRESH_SHARE="$(REFRESH_SHARE)") \
+		$(if $(FULL_REFRESH),HORIZON_FULL_REFRESH="$(FULL_REFRESH)") \
+		$(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
 
 # --- Ingestion ---
 
