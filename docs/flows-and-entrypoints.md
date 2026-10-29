@@ -200,6 +200,47 @@ Unchanged documents are skipped, so without the bump such a change would
 reach only the documents that change for other reasons. A database recorded
 with another version is rebuilt once by the weekly, keeping the id history.
 
+## Persistent database in GitHub Actions (spec 022)
+
+The weekly workflow (`.github/workflows/weekly-etl.yml`) keeps the database
+between runs through its own artifact. Before `make weekly-flows`, the step
+"Restore previous weekly run" (`make restore-weekly`,
+`src/scripts/restore_weekly_artifact.py`) looks for the newest successful
+weekly run of the **same branch** whose `weekly-etl-artifacts` artifact has
+not expired. It puts back three items from it:
+
+- `db/horizon.db`, only if `PRAGMA quick_check` is `ok`;
+- `data/raw`;
+- `cache/`, the Lattes HTML cache.
+
+`make db-ensure` then migrates the restored database, or creates one when none
+was placed, and the run skips the unchanged documents as a local kept run does
+(spec 021).
+
+- **Never a failed run.** These cases all end as a rebuild with the reason in
+  the log and in the job summary, and the step has `continue-on-error`:
+  - no successful run (the first run of a branch);
+  - every artifact expired;
+  - a download error;
+  - a damaged database.
+- **Retention**: 90 days, so about twelve failed weeklies in a row still leave
+  a database to restore.
+- **Force a rebuild**: dispatch the workflow with `fresh_database: true`.
+  Scheduled runs always restore.
+- **Where the database came from**: the job summary ("Restored from run …" or
+  "Rebuilt from scratch: …") and `data/reports/restore_outcome.json`, which
+  the artifact also carries.
+- **What is not restored**: `data/exports`, `data/reports` and
+  `data/lattes_json` are produced again by every run. The SigPesq reports in
+  `data/raw/sigpesq/` are restored but still cleared before their download.
+- **Compression**: the step that zips files over 10 MB before the upload
+  skips `data/raw`. For older artifacts, the restore unpacks a zip whose only
+  member has its own name.
+- CI databases are only written with the CI `HORIZON_PII_HMAC_KEY`. To test
+  the restore locally, run it on a downloaded artifact into a scratch folder,
+  never into the repository's `db/horizon.db`:
+  `python -m src.scripts.restore_weekly_artifact --from-dir <artifact> --target <scratch>`.
+
 ## SQLite connection settings (spec 018)
 
 `libbase` commits after every record it adds, so a Lattes phase issues

@@ -27,7 +27,7 @@ PREFECT_SERVER_SERVICE ?= server
 PREFECT_DB_SERVICE ?= database
 
 .PHONY: help setup logs-dir \
-	db-clean db-init db-ensure db-reset db-save-ids \
+	db-clean db-init db-ensure db-reset db-save-ids restore-weekly \
 	prefect-server prefect-stop prefect-status \
 	pipeline pipeline-log weekly-flows full-refresh \
 	ingest-sigpesq extract-project-files \
@@ -75,6 +75,13 @@ db-reset: db-save-ids db-clean db-init ## Recreate the local database from scrat
 
 db-ensure: ## Create the local database only if it does not exist (keeps a persistent database)
 	@$(PYTHON) db/ensure_db.py
+
+restore-weekly: ## Restore db/horizon.db, data/raw and cache/ from the last successful weekly run of this branch (CI; FRESH_DATABASE=true skips it)
+	@if [ "$(FRESH_DATABASE)" = "true" ]; then \
+		$(PYTHON) -m src.scripts.restore_weekly_artifact --disabled; \
+	else \
+		$(PYTHON) -m src.scripts.restore_weekly_artifact --github; \
+	fi
 
 # --- Prefect Server ---
 

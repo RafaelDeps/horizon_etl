@@ -14,6 +14,11 @@ on:
         required: false
         default: "data/exports"
         type: string
+      fresh_database:
+        description: "Ignore the previous run's database and rebuild from scratch."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -77,6 +82,17 @@ jobs:
           test -n "$HORIZON_PII_HMAC_KEY" || { echo "Missing GitHub secret: HORIZON_PII_HMAC_KEY"; exit 1; }
           test -n "$MISTRAL_API_KEY" || { echo "Missing GitHub secret: MISTRAL_API_KEY"; exit 1; }
 
+      # Spec 022: start from the database, raw downloads and Lattes cache of
+      # the last successful weekly of this branch. Anything missing or broken
+      # leaves a rebuild (make weekly-flows -> make db-ensure creates it); the
+      # step never fails the run, and the job summary says what happened.
+      - name: Restore previous weekly run
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FRESH_DATABASE: ${{ github.event.inputs.fresh_database }}
+        run: make restore-weekly
+
       - name: Run weekly flows
         run: make weekly-flows
 
@@ -85,8 +101,10 @@ jobs:
         run: |
           # Never touch archives: exports_canonical.zip is the flow's own
           # deliverable and must ship byte-for-byte as written by
-          # `make weekly-flows` (no double wrapping).
-          find data/ -type f -size +10M ! -name '*.zip' \
+          # `make weekly-flows` (no double wrapping). data/raw is restored by
+          # the next run (spec 022), so its files travel as the phases read
+          # them.
+          find data/ -type f -size +10M ! -name '*.zip' ! -path 'data/raw/*' \
             -exec sh -c 'for f; do zip -m -j "$f.zip" "$f"; done' sh {} +
 
       - name: Commit exports_canonical.zip if changed
@@ -113,11 +131,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: weekly-etl-artifacts
-          retention-days: 30
+          # Spec 022: the next run restores from this artifact; 90 days leave
+          # a database to restore after about twelve failed weeklies in a row.
+          retention-days: 90
           if-no-files-found: ignore
           path: |
             data
             db/horizon.db
+            cache
             !data/exports/exports_canonical.zip
             !.venv
             !.venv/**
