@@ -110,6 +110,10 @@ _PHASES = [
         False,
         "module",
     ),
+    # Last writer of data/exports: packages exports_canonical.zip only after the
+    # canonical export, marts, graphs and reports exist, so the archive holds
+    # this run's files and not leftovers from a previous one.
+    ("zip_exports", ["zip_exports"], 900, True, "app"),
     ("anonymize_backfill", ["anonymize_backfill"], 1800, True, "app"),
 ]
 
@@ -136,6 +140,8 @@ def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
         # only that campus) instead of exporting the full dataset.
         if argv_tail[0] == "cnpq_sync" and campus:
             argv.append(campus)
+        elif argv_tail[0] == "zip_exports":
+            argv.append(output_dir)
         elif argv_tail[0] == "export_canonical":
             argv.append(output_dir)
             if campus:

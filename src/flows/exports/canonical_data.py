@@ -351,7 +351,9 @@ def zip_exports_task(output_dir: str):
 
 @flow(name="Export Canonical Data Flow", **telegram_flow_state_handlers())
 def export_canonical_data_flow(
-    output_dir: str = "data/exports", campus: Optional[str] = None
+    output_dir: str = "data/exports",
+    campus: Optional[str] = None,
+    zip_exports: bool = True,
 ):
     """
     Flow to export canonical data (Organizations, Campuses, Knowledge Areas, Researchers)
@@ -360,6 +362,10 @@ def export_canonical_data_flow(
     Args:
         output_dir: Directory where the JSON files will be saved. Defaults to 'data/exports'.
         campus: Optional name of the campus to filter by.
+        zip_exports: Package the export folder at the end. The weekly pipeline
+            passes False: the marts and report phases still write into the
+            folder after this flow, so it zips in its own final phase
+            (``zip_exports_flow``) instead of freezing stale leftovers.
     """
     # Ensure absolute path or relative to CWD
     if not os.path.isabs(output_dir):
@@ -398,6 +404,20 @@ def export_canonical_data_flow(
     export_outside_ifes_collaboration_graph_flow(output_dir=output_dir)
     export_null_researchers_collaboration_graph_flow(output_dir=output_dir)
     export_research_group_membership_graphs_manifest_flow(output_dir=output_dir)
+    if zip_exports:
+        zip_exports_task(output_dir)
+
+
+@flow(name="Zip Exports Flow", **telegram_flow_state_handlers())
+def zip_exports_flow(output_dir: str = "data/exports"):
+    """Packages the export folder into exports_canonical.zip.
+
+    Runs after every phase that writes into ``output_dir`` (canonical export,
+    marts, graphs, reports) so the archive never carries files from a previous
+    run.
+    """
+    if not os.path.isabs(output_dir):
+        output_dir = os.path.join(os.getcwd(), output_dir)
     zip_exports_task(output_dir)
 
 

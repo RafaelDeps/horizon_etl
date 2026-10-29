@@ -41,6 +41,20 @@ def test_consolidate_duplicates_phase_runs_before_canonical_export():
     ), "the dedup phase writes to the DB; it must run under app.py"
 
 
+def test_zip_exports_phase_runs_after_every_export_writer():
+    names = [p[0] for p in wo._PHASES]
+    zip_at = names.index("zip_exports")
+    for writer in (
+        "export_canonical",
+        "knowledge_areas_mart",
+        "initiatives_analytics_mart",
+        "people_relationship_graph",
+        "ppp_edital_report",
+    ):
+        assert names.index(writer) < zip_at, writer
+    assert wo._critical("zip_exports")
+
+
 def _fake_run_factory(fail_cmd=None, rc=1, timeout_cmd=None, seen=None):
     def fake_run(argv, timeout=None):
         cmd = argv[2]

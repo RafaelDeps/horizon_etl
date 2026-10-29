@@ -8,7 +8,10 @@ from src.adapters.database.sqlite_settings import install_sqlite_connection_sett
 from src.core.logic.pii_session_hook import install_lgpd_session_hooks
 from src.flows.all import ingest_all_sources_flow
 from src.flows.cnpq.groups import sync_cnpq_groups_flow
-from src.flows.exports.canonical_data import export_canonical_data_flow
+from src.flows.exports.canonical_data import (
+    export_canonical_data_flow,
+    zip_exports_flow,
+)
 from src.flows.exports.initiatives_analytics_mart import (
     export_initiatives_analytics_mart_flow,
 )
@@ -171,7 +174,11 @@ def main():
             logger.info(
                 f"Executing Flow: Export Canonical Data (Output: {output_dir}, Campus: {campus_filter})"
             )
-            export_canonical_data_flow(output_dir=output_dir, campus=campus_filter)
+            # Zipping is its own step (`zip_exports`): the marts and graphs are
+            # written after this flow and must be in the archive.
+            export_canonical_data_flow(
+                output_dir=output_dir, campus=campus_filter, zip_exports=False
+            )
 
         if flow_to_run in ["ka_mart", "all"]:
             output_path = (
@@ -279,6 +286,15 @@ def main():
                 f"Executing Flow: Export People Collaboration Graph (Output Dir: {output_dir})"
             )
             export_people_collaboration_graph_flow(output_dir=output_dir)
+
+        if flow_to_run in ["zip_exports", "all"]:
+            output_dir = (
+                sys.argv[2]
+                if len(sys.argv) > 2 and flow_to_run == "zip_exports"
+                else "data/exports"
+            )
+            logger.info(f"Executing Flow: Zip Exports (Output Dir: {output_dir})")
+            zip_exports_flow(output_dir=output_dir)
 
         if flow_to_run == "lattes_download":
             logger.info("Executing Flow: Download Lattes Curricula")
