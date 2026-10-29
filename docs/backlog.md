@@ -391,3 +391,14 @@ Mapping Epics -> User Stories -> Tasks status.
   order, as spec 020 did for article fields (`_fill_missing_article_fields`):
   for example the most recent source date, or the value of the highest-priority
   source. Status: Ready.
+
+- **TD-029 — A Lattes project whose title collides with another initiative's
+  name fails its whole CV**: on the 2026-10-29 CI run 40952053776, CV
+  `1703547133505721` failed as `partial` with `UNIQUE constraint failed:
+  initiatives.name`. One of its projects resolved to no existing initiative,
+  but its title equals the stored name of another one. Before spec 021 the
+  row was lost silently (`PERDIDO por erro`). Now the whole CV is rolled
+  back, keeps its previous data, and is tried again every run. A fix would
+  resolve such a project to the existing initiative of that name (the loader
+  already does it for names that differ only in spelling,
+  `_process_row`). Status: Ready.

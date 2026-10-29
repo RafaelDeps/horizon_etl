@@ -213,11 +213,11 @@ description: "Task list for downloading only new items plus a rotating share"
   - run 1: CNPq stores all pages and Lattes refreshes 109;
   - run 2: the CNPq phase time falls to about a third.
   - Record the times.
-- [ ] T031 CI, after the maintainer's go-ahead: push `026-rotating-raw-downloads` to the fork and dispatch the weekly twice:
+- [X] T031 CI, after the maintainer's go-ahead: push `026-rotating-raw-downloads` to the fork and dispatch the weekly twice:
   - run 1 restores the database (spec 022) and stores the CNPq pages;
   - run 2 fetches a quarter;
   - measure the cnpq phase (SC-002) and check that `downloaded_at` is in the export (SC-004).
-- [ ] T032 Write `docs/reports/2026-XX-XX-rotating-raw-downloads-validation.md` with SC-001 to SC-006, the local checks (T015, T020, T030) and the CI runs (T031).
+- [X] T032 Write `docs/reports/2026-XX-XX-rotating-raw-downloads-validation.md` with SC-001 to SC-006, the local checks (T015, T020, T030) and the CI runs (T031).
 
 ---
 
