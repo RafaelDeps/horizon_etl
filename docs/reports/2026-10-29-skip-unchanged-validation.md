@@ -38,8 +38,9 @@ Date: 2026-10-29 · Spec: `specs/021-skip-unchanged-documents/` · Branch:
 - **Not met yet** (section 8): rows shared by several documents (about 130
   initiatives, 5 fellowships and the 123 advisorships that point at those
   fellowships) keep the values of the last document that wrote them, so they can differ from a rebuild after documents are reprocessed out
-  of the rebuild order (TD-028). The GitHub Actions run (SC-008, T061) waits for
-  the maintainer.
+  of the rebuild order (TD-028).
+- **GitHub Actions** (SC-008): the weekly on the fork succeeds on an empty
+  runner with the same export files and fields, plus the new file (section 11).
 
 ## 2. Success criteria
 
@@ -52,7 +53,7 @@ Date: 2026-10-29 · Spec: `specs/021-skip-unchanged-documents/` · Branch:
 | SC-005 listings | failed listing: 0 inactive; complete: exactly the absent | Round 3: 1 inactive per affected source; tests: empty report, missing `lattes.list` and a campus filter change no status | Met |
 | SC-006 three rounds | equal to a rebuild on the last inputs | Rounds 1–3: every table identical except TD-028 rows, R9.3 membership rows and 2 orphan knowledge areas | Met except TD-028 |
 | SC-007 schema | no existing table or export changes | Schema check identical (102 tables/indexes); export tests pass | Met |
-| SC-008 CI | same results as before plus the new file | Not run: T061 waits for the maintainer | Pending |
+| SC-008 CI | same results as before plus the new file | Fork run 40856179199: all 21 phases exit 0; same 37 export files and fields plus the new file; count differences only in Lattes items, from different CV downloads (section 11) | Met |
 
 ## 3. Replays
 
@@ -270,7 +271,33 @@ from the duplicated SigPesq group row, every phase exit 0.
   relies on are pinned by a test (`eo_lib` 0.2.2, `research_domain` 0.14.4,
   `libbase` 0.1.0).
 
-## 11. GitHub Actions (T061)
+## 11. GitHub Actions (T061, SC-008)
 
-Not run: pushing to the fork and dispatching the weekly workflow wait for the
-maintainer's go-ahead.
+Run [40856179199](https://github.com/RafaelDeps/horizon_etl/actions/runs/40856179199)
+on the fork, branch `024-skip-unchanged-documents`, dispatched on 2026-10-29
+after the maintainer's go-ahead. The runner starts with no database, so the
+run is a rebuild: `make weekly-flows` created it through `make db-ensure`.
+All 21 phases exited 0 in 1 h 38 min; the workflow committed the new
+`exports_canonical.zip` (`bffecb9`).
+
+```text
+documents sigpesq_group: processed=353 skipped=0 failed=0
+documents sigpesq_project: processed=103 skipped=0 failed=0
+documents sigpesq_advisorship: processed=704 skipped=498 failed=0
+documents cnpq_group: processed=347 skipped=3 failed=0
+documents lattes_projects: processed=409 skipped=0 failed=26 (unidentified=26)
+documents lattes_advisorships: processed=409 skipped=0 failed=26 (unidentified=26)
+```
+
+Against the previous CI export (`0b55907`, weekly of 2026-10-28, spec 020
+code): the same 37 files with the same record fields, plus
+`source_document_states_canonical.json` (2,376 documents, fields
+`source_system`, `document_key`, `status`, `last_seen_at`, `processed_at`).
+Record counts differ, all in items that come from Lattes CVs: of the
+horizon ids, 4,958 are only in the old export and 6,554 only in the new one,
+mostly `person:h` (1,124 / 940), Lattes teams (1,077 / 1,549), Lattes
+advisorships (771 / 1,166), DOI-less articles (426 / 713) and professional
+activities (518 / 588); `person:lattes` ids differ both ways (21 / 27). The
+runner downloads the CVs live, so the two runs read different sets of CVs,
+as in spec 020 (section 11 of its report). No difference outside Lattes items
+was found, and no field changed.
