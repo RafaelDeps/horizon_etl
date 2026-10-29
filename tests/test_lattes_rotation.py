@@ -111,3 +111,26 @@ def test_full_refresh_downloads_every_curriculum(tmp_path):
         IDS, str(cache), _manifest(cache, path), 0.25, True, downloader=downloader
     )
     assert sorted(downloader.calls) == IDS and counts["refreshed"] == len(IDS)
+
+
+def test_an_unidentified_curriculum_is_retried_on_the_next_run(tmp_path):
+    from src.core.logic.raw_rotation import plan_downloads
+    from src.flows.lattes.cv_document import retry_unidentified
+
+    cache, path = _setup(tmp_path, IDS)
+    manifest = _manifest(cache, path)
+    for lattes_id in IDS:
+        manifest.record(lattes_id, "2026-11-05T02:00:00Z")
+    manifest.save()
+
+    class Skip:
+        failures = [
+            (IDS[5], "unidentified", "x"),
+            (IDS[6], "download", "y"),  # other failures keep their date
+        ]
+
+    assert retry_unidentified(Skip(), _manifest(cache, path)) == 1
+    dates = _manifest(cache, path).dates()
+    assert dates[IDS[5]] is None and dates[IDS[6]] == "2026-11-05T02:00:00Z"
+    # The next rotation takes it first.
+    assert plan_downloads(IDS, dates, share=0.125).refresh == [IDS[5]]

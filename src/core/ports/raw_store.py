@@ -17,6 +17,11 @@ class IDownloadManifest(ABC):
         """A successful download of ``item_id`` at ``when``."""
 
     @abstractmethod
+    def forget(self, item_id: str) -> None:
+        """Drops the date of ``item_id``: its cached copy is then undated and
+        counts as the oldest in the next rotation."""
+
+    @abstractmethod
     def save(self) -> None:
         """Writes the manifest atomically."""
 

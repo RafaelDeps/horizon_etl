@@ -73,3 +73,21 @@ def finish_lattes_listing(skip, json_files: List[str]) -> None:
         with skip.document(lattes_id):
             raise DocumentFailed("download", f"no JSON file for {lattes_id}")
     skip.finish(listed, complete=True)
+
+
+def retry_unidentified(skip, manifest) -> int:
+    """Spec 023: a curriculum the portal served as "Nome-nao-identificado" is
+    not a good download, even if the download itself succeeded. Dropping its
+    date makes it the oldest item of the next rotation, so it is downloaded
+    again on the next run instead of in about four weeks. The share still
+    bounds how many curricula a run downloads. Returns how many were dropped."""
+    keys = sorted(
+        {key for key, reason, _d in skip.failures if reason == "unidentified"}
+    )
+    dates = manifest.dates()
+    dropped = [key for key in keys if dates.get(key)]
+    for key in dropped:
+        manifest.forget(key)
+    if dropped:
+        manifest.save()
+    return len(dropped)

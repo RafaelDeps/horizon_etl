@@ -262,6 +262,10 @@ unchanged (spec 021).
   keeps the cached curriculum. A CNPq page that fails to download is
   processed from its stored copy, and with the portal down the run still
   completes with every stored group.
+- **Unidentified curricula**: a curriculum the portal served as
+  "Nome-nao-identificado" loses its download date after the
+  `lattes_projects` phase. It is then the oldest item of the next rotation,
+  and is downloaded again on the next run, within the share.
 - **Provenance**: every document records the date of the download its data
   comes from (`downloaded_at`). The states export
   `source_document_states_canonical.json` publishes it. SigPesq rows date

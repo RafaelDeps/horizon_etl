@@ -51,7 +51,11 @@ from src.core.logic.researcher_resolution import (
 from src.core.logic.strategies.lattes_projects import LattesProjectMappingStrategy
 from src.core.ports.document_state_store import DocumentFailed
 from src.flows.document_phase import document_phase
-from src.flows.lattes.cv_document import finish_lattes_listing, read_cv
+from src.flows.lattes.cv_document import (
+    finish_lattes_listing,
+    read_cv,
+    retry_unidentified,
+)
 from src.flows.lattes.cv_timing import log_cv_duration
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
@@ -1099,6 +1103,9 @@ def _ingest_lattes_projects(json_files: List[str], skip) -> None:
             )
         project_loader.flush_change_log()
         finish_lattes_listing(skip, json_files)
+        retried = retry_unidentified(skip, JsonDownloadManifest())
+        if retried:
+            logger.info(f"{retried} unidentified curricula will be downloaded again")
     project_loader.team_synchronizer.log_lookup_summary("lattes_projects")
     project_loader.person_matcher.log_match_summary("lattes_projects")
     log_researcher_resolution_summary("lattes_projects")

@@ -79,6 +79,9 @@ class JsonDownloadManifest(IDownloadManifest):
     def record(self, item_id: str, when: str) -> None:
         self._downloads[item_id] = when
 
+    def forget(self, item_id: str) -> None:
+        self._downloads.pop(item_id, None)
+
     def save(self) -> None:
         _write_json(self.path, {"version": 1, "downloads": self._downloads})
 
