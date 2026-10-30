@@ -37,7 +37,7 @@ then the fix `7cdfe65`.
 | SC-002 CNPq time | ≤ 40% of 15.6 min | 3.9 min (25%) | Met |
 | SC-003 no lost copy | 0 | Tests: a failed refresh keeps `cache/<id>` byte for byte; a failed page uses the stored copy. CI run 2: 0 download failures | Met |
 | SC-004 provenance | 100% of documents dated | 2,257 / 2,376; the 119 undated are unidentified CVs, which fail and are never read | Met for every document that is read |
-| SC-005 portal down | groups keep their data | Local: 347 failed downloads, all processed from stored pages, 0 failed documents; integration test with the portal fully down | Met |
+| SC-005 portal down | groups keep their data | Local: 347 failed downloads, all processed from stored pages, 0 failed documents; integration test with the portal fully down. CI run 4: the CNPq portal hung, the phase timed out, and the data stayed intact, but the stored pages were not used (section 7) | Met for data safety; the fallback needs a time limit |
 | SC-006 exports | same files and fields | Same 38 files and fields as the spec 022 export; one field added to the states export | Met (counts: see section 4) |
 
 ## 3. CI runs
@@ -106,7 +106,71 @@ deleted.
 | 2 | refreshed 87, reused 260 | processed 0 | 19 s |
 | 3 (every download failing, full refresh) | failed 347, reused after failure 347 | failed 0 | 18 s |
 
-## 6. Not done
+## 6. Why run 2 had fewer entities, and the two fixes
+
+The "Nome-nao-identificado" curricula are the Lattes portal's reCAPTCHA
+page, served instead of the curriculum when the portal limits access. The
+page is about 18 KB and has no "Currículo do Sistema de Currículos Lattes
+(<name>)" title, and scriptLattes builds a CV with no items from it. It hits
+different curricula on every full download:
+
+| Run | Unidentified CVs |
+|---|---:|
+| spec 022, 3 runs (cache restored between them) | 36 |
+| spec 023 run 1 (fresh download, new branch) | 73 |
+| spec 023 run 2 | 68 |
+| spec 023 run 3 (first fix) | 53 |
+| spec 023 run 4 (both fixes) | **12** |
+
+- Only 6 of run 1's 73 were among spec 022's 36.
+- 54 of the 57 CVs that owned the entities missing from run 2's export were
+  unidentified in run 1.
+
+The fixes:
+
+- `7cdfe65`: a CV that turns out unidentified loses its download date, so the
+  next rotation downloads it first.
+- `ae87205`: the download checks the page title.
+  - An access check page never replaces a cached curriculum, and is never
+    cached for a new one.
+  - Locally, 408 curricula were recognized and all 27 unidentified pages
+    rejected.
+  - The captcha is never answered or bypassed.
+
+Export counts after each run:
+
+| File | spec 022 | run 2 | run 3 | run 4 |
+|---|---:|---:|---:|---:|
+| `researchers_canonical.json` | 17,445 | 16,666 | 16,970 | **17,758** |
+| `initiatives_canonical.json` | 12,535 | 11,598 | 12,002 | **12,879** |
+| `articles_canonical.json` | 7,209 | 6,590 | 6,775 | **7,435** |
+
+Run 4 ([40966298828](https://github.com/RafaelDeps/horizon_etl/actions/runs/40966298828))
+went past spec 022 because it has fewer unreadable CVs (12 against 36).
+
+- **Lattes:** it refreshed 86 curricula and rejected 23 access check
+  pages, keeping the old copies.
+
+## 7. Run 4: the CNPq portal was down
+
+Run 4 took 3 h 40 min:
+
+- **CNPq:** the phase timed out after its 3 h limit. Every page failed
+  9 times (3 ETL attempts × 3 library attempts), and the adaptive gate cut
+  the concurrency from 4 to 2. With 87 pages due, the phase was killed
+  before its writer reached them, so nothing was written. The CNPq data in
+  the database stayed as run 3 left it, intact.
+- **The rest of the run:** it completed normally from the Lattes download
+  on.
+
+**Gap found.** A failed CNPq download falls back to the stored page only
+when the fetch returns. When the portal hangs, the phase hits its time limit
+first. A follow-up should stop fetching once failures cluster (the gate
+already detects it), and process every group from its stored page. The same
+idea applies to Lattes when the portal starts serving its access check page.
+Neither is implemented.
+
+## 8. Not done
 
 - T030, the local weekly on the real database with the real portals, was not
   run; the two CI runs cover the same path.
