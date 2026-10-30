@@ -43,6 +43,14 @@ def _no_rule_version_reset(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(
         raw_store, "LATTES_MANIFEST", str(raw_dir / "lattes" / "download_manifest.json")
     )
+    # Spec 024: the report of the portals given up.
+    import src.flows.portal_stops as portal_stops
+
+    monkeypatch.setattr(
+        portal_stops,
+        "PORTAL_STOPS_PATH",
+        str(tmp_path_factory.mktemp("stops") / "portal_stops.json"),
+    )
     # run_weekly sets the weekly start for its phases; restored after the test.
     monkeypatch.setenv("HORIZON_WEEKLY_STARTED_AT", "")
     yield real

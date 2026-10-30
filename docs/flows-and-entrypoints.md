@@ -292,6 +292,42 @@ unchanged (spec 021).
   stored yet). The cached curricula have no date, so they count as the oldest
   and are dated a quarter at a time, in four runs.
 
+### Giving a portal up (spec 024)
+
+A portal that blocks or stops answering is given up for the rest of the run,
+and the run finishes from the stored copies above.
+
+- **CNPq**: the downloads stop after 8 failed attempts in a row with no
+  success between them, or after 45 min of downloads. An attempt already
+  includes the CNPq library's 3 tries, about 95 s when the portal hangs.
+  - No attempt or retry starts after the stop, and the back-off waits end at
+    once.
+  - The attempts in flight end within the library's timeouts.
+  - Every group left is processed from its stored page, with its original
+    date. A group with no stored page is a failed download, as before.
+- **Lattes**: the downloads stop after 5 requests in a row that failed or
+  returned the access check page. New and refreshed curricula share one
+  count.
+  - The curricula not requested keep their cached copy and date, so the next
+    rotation takes them first.
+  - A new curriculum not requested is new again on the next run.
+- **Report**: `portal given up: <source> reason=…` in the log, and `stopped=N`
+  on the `downloads` line. The entry also goes to
+  `data/reports/portal_stops.json`, which is cleared at the start of each
+  weekly. The weekly summary and its Telegram message add one `⚠` line per
+  source given up. A stop never changes a phase's exit code.
+- **Tuning**: a blank value means the default, and 0 turns that rule off.
+
+  | Variable | Make | Dispatch input | Default |
+  |---|---|---|---|
+  | `HORIZON_PORTAL_EARLY_STOP` (`0` = off) | `EARLY_STOP` | `early_stop` | on |
+  | `HORIZON_CNPQ_STOP_AFTER_FAILURES` | `CNPQ_STOP_AFTER` | `cnpq_stop_after` | 8 |
+  | `HORIZON_CNPQ_DOWNLOAD_BUDGET_MIN` | `CNPQ_BUDGET_MIN` | `cnpq_budget_min` | 45 |
+  | `HORIZON_LATTES_STOP_AFTER_FAILURES` | `LATTES_STOP_AFTER` | `lattes_stop_after` | 5 |
+
+  The Make variables work for `weekly-flows`, `sync-cnpq` and
+  `ingest-lattes-download`.
+
 ## SQLite connection settings (spec 018)
 
 `libbase` commits after every record it adds, so a Lattes phase issues

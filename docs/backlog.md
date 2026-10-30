@@ -402,3 +402,15 @@ Mapping Epics -> User Stories -> Tasks status.
   resolve such a project to the existing initiative of that name (the loader
   already does it for names that differ only in spelling,
   `_process_row`). Status: Ready.
+
+## Follow-ups — origin: `specs/024-portal-early-stop` (2026-10-30)
+
+- **TD-030 — A CNPq navigation that hangs past the library's timeout still
+  holds the phase**: spec 024 stops new requests once the portal is given up,
+  but it lets the attempts already in flight end on their own. In every log
+  so far, an attempt on a hung portal ended in about 95 s: the library's 3
+  navigations of 30 s. A navigation that ignored that timeout would keep the
+  phase until the orchestrator's 10,800 s limit, and the phase would write
+  nothing, as in run 40966298828. Closing the browser of an attempt in flight
+  would need a change in `dgp_cnpq_lib`, which stays unchanged. Status:
+  Watch (no occurrence).

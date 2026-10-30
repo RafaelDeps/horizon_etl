@@ -17,6 +17,7 @@ from src.adapters.sources.raw_store import FileCnpqPageStore
 from src.core.logic.document_skip import order_free
 from src.core.logic.horizon_identity import cnpq_group_id_from_url, cnpq_payload_key
 from src.core.logic.initiative_identity import normalize_text
+from src.core.logic.portal_stop import portal_stop_settings
 from src.core.logic.raw_rotation import (
     counts_line,
     download_counts,
@@ -28,6 +29,7 @@ from src.core.logic.strategies.cnpq_sync import CnpqSyncLogic
 from src.core.ports.document_state_store import ACTIVE, DocumentFailed
 from src.flows.cnpq.concurrent_fetch import FetchOutcome, fetch_all, resolve_workers
 from src.flows.document_phase import document_phase
+from src.flows.portal_stops import record_portal_stop
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
@@ -410,8 +412,12 @@ def _sync_cnpq_groups(campus_name: Optional[str], skip, logger):
     results = []
     outcomes = []
     failed_downloads = []
+    stopped_downloads = []
     now = _now()
-    batch = fetch_all(to_fetch, CnpqCrawlerAdapter, workers, sleep=_SLEEP)
+    # Spec 024: after 8 failed attempts in a row, or 45 min of downloads, no
+    # page is requested any more; the groups left use their stored page.
+    stop = portal_stop_settings().for_source("cnpq")
+    batch = fetch_all(to_fetch, CnpqCrawlerAdapter, workers, sleep=_SLEEP, stop=stop)
     try:
         with tracking_recorder.run_context(
             source_system="cnpq_sync", flow_name="cnpq_sync"
@@ -422,7 +428,18 @@ def _sync_cnpq_groups(campus_name: Optional[str], skip, logger):
                 if group_id in fetch_position:
                     outcome = batch.outcome(fetch_position[group_id])
                     outcomes.append(outcome)
-                    if outcome.data:
+                    if outcome.stopped and outcome.attempts == 0:
+                        # Never requested: processed like a reused group, and
+                        # not a failure; without a stored page it is a
+                        # failed download, as today.
+                        if group_id not in stopped_downloads:
+                            stopped_downloads.append(group_id)
+                        stored = store.load(group_id)
+                        outcome = FetchOutcome(
+                            i, g_info, stored["page"] if stored else None, 0
+                        )
+                        downloaded_at = stored.get("downloaded_at") if stored else None
+                    elif outcome.data:
                         store.save(group_id, g_info["url"], outcome.data, now)
                         downloaded_at = now
                     else:
@@ -446,9 +463,11 @@ def _sync_cnpq_groups(campus_name: Optional[str], skip, logger):
                 results.append(res)
     finally:
         batch.close()
-    counts = download_counts(plan, failed_downloads)
+    counts = download_counts(plan, failed_downloads, stopped_downloads)
     summary_logger.info(counts_line("cnpq", counts))
     skip.downloads = counts
+    if stop is not None and stop.stopped:
+        record_portal_stop("cnpq", stop, counts)
 
     # The listing (R8): partial with a campus filter or without a complete
     # SigPesq listing in the same weekly; then no group changes status.
@@ -462,8 +481,10 @@ def _sync_cnpq_groups(campus_name: Optional[str], skip, logger):
         f"CNPq fetch: workers={workers} "
         f"fetched={sum(1 for o in outcomes if o.data)} "
         f"retries={sum(max(o.attempts - 1, 0) for o in outcomes)} "
-        f"failed_after_retries={sum(1 for o in outcomes if not o.data)} "
-        f"concurrency_reductions={batch.gate.reductions} "
+        f"failed_after_retries="
+        f"{sum(1 for o in outcomes if not o.data and o.attempts)} "
+        + (f"not_tried={len(stopped_downloads)} " if stopped_downloads else "")
+        + f"concurrency_reductions={batch.gate.reductions} "
         f"researcher_index_loaded={researcher_index_loaded} "
         f"researcher_hits={counters['hits']} "
         f"researcher_created={counters['created']}"

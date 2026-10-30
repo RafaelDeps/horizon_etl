@@ -38,6 +38,7 @@ from typing import Optional
 from loguru import logger
 
 from src.adapters.database.sqlite_settings import finalize_sqlite_database
+from src.flows.portal_stops import clear_portal_stops, read_portal_stops
 
 # (name, argv tail, timeout seconds, critical, mode)
 #   mode "app"    -> `python app.py <argv...>`      (DB-writing phases; LGPD hook active)
@@ -204,7 +205,51 @@ def _critical(name):
     return False
 
 
-def _notify(results, crit_failed, finalize: Optional[dict] = None):
+_STOP_REASONS = {
+    "failures_in_a_row": (
+        "failures_in_a_row, limit {limit}",
+        "{limit} falhas seguidas",
+    ),
+    "time_budget": ("time_budget, {minutes:g} min", "limite de {minutes:g} min"),
+}
+
+
+def _portal_stop_lines(stops: dict, portuguese: bool = False) -> list:
+    """One line per portal given up in this weekly (spec 024)."""
+    lines = []
+    for source, entry in sorted(stops.items()):
+        try:
+            counts = entry.get("counts") or {}
+            english, pt = _STOP_REASONS.get(
+                entry.get("reason"), ("{reason}", "{reason}")
+            )
+            values = {
+                "limit": entry.get("limit"),
+                "minutes": (entry.get("budget_s") or 0) / 60,
+                "reason": entry.get("reason"),
+            }
+            after = round(entry.get("elapsed_s") or 0)
+            stored = counts.get("reused", 0) + counts.get("reused_after_failure", 0)
+            if portuguese:
+                lines.append(
+                    f"⚠️ {source}: portal abandonado ({pt.format(**values)}) após "
+                    f"{after} s; {counts.get('stopped', 0)} não tentados, "
+                    f"{stored} das cópias guardadas, {counts.get('failed', 0)} falhas"
+                )
+            else:
+                lines.append(
+                    f"⚠ {source}: portal given up ({english.format(**values)}) after "
+                    f"{after} s; {counts.get('stopped', 0)} not tried, {stored} from "
+                    f"stored copies, {counts.get('failed', 0)} failed"
+                )
+        except Exception as exc:  # a report problem never changes the run
+            logger.warning("Portal stop entry of {} not shown: {}", source, exc)
+    return lines
+
+
+def _notify(
+    results, crit_failed, finalize: Optional[dict] = None, stops: Optional[dict] = None
+):
     from src.notifications.telegram import send_telegram_message
 
     head = "❌ Weekly ETL FALHOU" if crit_failed else "✅ Weekly ETL concluído"
@@ -220,6 +265,10 @@ def _notify(results, crit_failed, finalize: Optional[dict] = None):
     if finalize and not finalize.get("finalized") and not finalize.get("skipped"):
         lines.append("")
         lines.append(f"⚠️ SQLite finalize falhou: {finalize.get('reason')}")
+    stop_lines = _portal_stop_lines(stops or {}, portuguese=True)
+    if stop_lines:
+        lines.append("")
+        lines.extend(stop_lines)
     send_telegram_message("\n".join(lines))
 
 
@@ -277,6 +326,8 @@ def run_weekly(
     )
     _run_pending_migrations()
     _reset_if_rule_version_changed()
+    # Spec 024: the portals given up are reported per weekly.
+    clear_portal_stops()
     results = []
     for name, argv_tail, timeout, _crit, mode in _PHASES:
         results.append(_run_phase(name, argv_tail, timeout, campus, output_dir, mode))
@@ -295,9 +346,12 @@ def run_weekly(
         logger.info(
             "  {} {} ({})", "✓" if r["ok"] else "✗", r["name"], _describe_rc(r["rc"])
         )
+    stops = read_portal_stops()
+    for line in _portal_stop_lines(stops):
+        logger.warning("  {}", line)
 
     try:
-        _notify(results, crit_failed, finalize=finalize)
+        _notify(results, crit_failed, finalize=finalize, stops=stops)
     except Exception as exc:  # notification must never change the run outcome
         logger.warning("Telegram summary failed: {}", exc)
 

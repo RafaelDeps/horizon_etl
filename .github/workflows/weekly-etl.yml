@@ -29,6 +29,26 @@ on:
         required: false
         default: false
         type: boolean
+      early_stop:
+        description: "Stop downloading from a portal that blocks or stops answering, and use the stored copies."
+        required: false
+        default: true
+        type: boolean
+      cnpq_stop_after:
+        description: "CNPq failed attempts in a row that stop the downloads (blank = 8; 0 = off)."
+        required: false
+        default: ""
+        type: string
+      cnpq_budget_min:
+        description: "Minutes of CNPq downloads before they stop (blank = 45; 0 = off)."
+        required: false
+        default: ""
+        type: string
+      lattes_stop_after:
+        description: "Lattes failures or access check pages in a row that stop the downloads (blank = 5; 0 = off)."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -108,6 +128,11 @@ jobs:
           # Spec 023: rotation of the raw downloads (defaults when blank).
           HORIZON_REFRESH_SHARE: ${{ github.event.inputs.refresh_share }}
           HORIZON_FULL_REFRESH: ${{ github.event.inputs.full_refresh }}
+          # Spec 024: give a portal up when it blocks (defaults when blank).
+          HORIZON_PORTAL_EARLY_STOP: ${{ github.event.inputs.early_stop }}
+          HORIZON_CNPQ_STOP_AFTER_FAILURES: ${{ github.event.inputs.cnpq_stop_after }}
+          HORIZON_CNPQ_DOWNLOAD_BUDGET_MIN: ${{ github.event.inputs.cnpq_budget_min }}
+          HORIZON_LATTES_STOP_AFTER_FAILURES: ${{ github.event.inputs.lattes_stop_after }}
         run: make weekly-flows
 
       - name: Compress large export files

@@ -201,3 +201,101 @@ def test_campus_is_forwarded_to_cnpq_sync_and_export_canonical():
     # export_canonical receives output_dir then campus
     assert export[-1] == "Serra"
     assert export[-2] == "data/exports"
+
+
+# --- Spec 024: portals given up ------------------------------------------
+
+
+def _cnpq_stop_entry():
+    return {
+        "source": "cnpq",
+        "reason": "failures_in_a_row",
+        "limit": 8,
+        "budget_s": 2700,
+        "stopped_at": "2026-10-29T22:38:21Z",
+        "elapsed_s": 289.4,
+        "failures_total": 8,
+        "successes_total": 0,
+        "counts": {
+            "new": 0,
+            "refreshed": 0,
+            "reused": 344,
+            "failed": 6,
+            "reused_after_failure": 6,
+            "stopped": 81,
+        },
+    }
+
+
+def _run_with_telegram(side_effect):
+    sent = []
+    with (
+        patch(
+            "src.notifications.telegram.send_telegram_message",
+            side_effect=lambda text: sent.append(text) or True,
+        ),
+        patch.object(wo.subprocess, "run", side_effect=side_effect),
+    ):
+        rc = wo.run_weekly()
+    return rc, sent
+
+
+def test_a_stale_portal_stop_report_is_cleared_before_the_phases():
+    import src.flows.portal_stops as portal_stops
+
+    portal_stops.record_portal_stop(
+        "cnpq", MagicMock(summary=lambda: {"reason": "x"}), {}
+    )
+    seen = []
+
+    def fake(cmd, **kwargs):
+        seen.append(portal_stops.read_portal_stops())
+        return _fake_run_factory()(cmd, **kwargs)
+
+    rc, sent = _run_with_telegram(fake)
+    assert rc == 0 and seen[0] == {}
+    assert "portal abandonado" not in sent[0]
+
+
+def test_a_portal_given_up_shows_in_the_summary_and_keeps_the_exit_code():
+    import src.flows.portal_stops as portal_stops
+    from src.core.logic.atomic_io import atomic_write_json
+
+    def fake(cmd, **kwargs):
+        if "cnpq_sync" in cmd:
+            atomic_write_json(
+                portal_stops.PORTAL_STOPS_PATH,
+                {"version": 1, "stops": {"cnpq": _cnpq_stop_entry()}},
+            )
+        return _fake_run_factory()(cmd, **kwargs)
+
+    lines = []
+    from loguru import logger
+
+    sink = logger.add(lambda m: lines.append(m.record["message"]), level="INFO")
+    try:
+        rc, sent = _run_with_telegram(fake)
+    finally:
+        logger.remove(sink)
+    assert rc == 0
+    expected = (
+        "⚠ cnpq: portal given up (failures_in_a_row, limit 8) after 289 s; "
+        "81 not tried, 350 from stored copies, 6 failed"
+    )
+    assert any(expected in line for line in lines)
+    assert (
+        "⚠️ cnpq: portal abandonado (8 falhas seguidas) após 289 s; "
+        "81 não tentados, 350 das cópias guardadas, 6 falhas"
+    ) in sent[0]
+
+
+def test_a_time_budget_line():
+    entry = dict(_cnpq_stop_entry(), reason="time_budget")
+    line = wo._portal_stop_lines({"cnpq": entry})[0]
+    assert "(time_budget, 45 min)" in line
+    assert "(limite de 45 min)" in wo._portal_stop_lines({"cnpq": entry}, True)[0]
+
+
+def test_no_report_means_no_extra_line():
+    rc, sent = _run_with_telegram(_fake_run_factory())
+    assert rc == 0 and "⚠️" not in sent[0]

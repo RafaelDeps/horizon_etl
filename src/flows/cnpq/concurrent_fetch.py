@@ -17,6 +17,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
+from src.core.logic.portal_stop import PortalStop
+
 DEFAULT_WORKERS = 4
 
 # dgp_cnpq_lib already retries a page 3 times, 1-10 s apart; that is too short
@@ -39,6 +41,9 @@ class FetchOutcome:
     group_info: Dict[str, Any]
     data: Optional[Dict[str, Any]]
     attempts: int
+    # Spec 024: the task ended because the portal was given up; with
+    # attempts == 0 the page was never requested.
+    stopped: bool = False
 
 
 def resolve_workers(value: Optional[str], default: int = DEFAULT_WORKERS) -> int:
@@ -137,20 +142,43 @@ def fetch_with_retries(
     gate: AdaptiveGate,
     sleep: Callable[[float], None],
     rng: random.Random,
+    stop: Optional[PortalStop] = None,
 ) -> FetchOutcome:
     """Up to MAX_ATTEMPTS fetches; "no data" is the retry signal (the adapter
-    swallows the cause). The back-off sleep happens outside the gate."""
+    swallows the cause). The back-off sleep happens outside the gate.
+
+    With a ``stop`` (spec 024), every attempt counts towards it, and no
+    attempt starts once the portal is given up; the back-off then ends at
+    once."""
+
+    def stopped(attempts: int) -> FetchOutcome:
+        return FetchOutcome(index, group_info, None, attempts, stopped=True)
+
     data = None
     attempt = 0
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        if stop is not None and stop.should_stop():
+            return stopped(attempt - 1)
         with gate.slot():
+            if stop is not None and stop.should_stop():
+                return stopped(attempt - 1)
             data = adapter_factory().get_group_data(group_info["url"])
+        if stop is not None:
+            stop.record(bool(data))
         if data:
             break
         gate.record_failure()
         if attempt < MAX_ATTEMPTS:
             base = BACKOFF_SECONDS[attempt - 1]
-            sleep(base * rng.uniform(1 - BACKOFF_JITTER, 1 + BACKOFF_JITTER))
+            seconds = base * rng.uniform(1 - BACKOFF_JITTER, 1 + BACKOFF_JITTER)
+            if stop is not None and sleep is time.sleep:
+                # The real back-off ends at once when the portal is given up.
+                if stop.wait(seconds):
+                    return stopped(attempt)
+            else:
+                sleep(seconds)  # tests inject their own sleep
+                if stop is not None and stop.should_stop():
+                    return stopped(attempt)
     return FetchOutcome(index=index, group_info=group_info, data=data, attempts=attempt)
 
 
@@ -161,16 +189,21 @@ def fetch_all(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     rng: Optional[random.Random] = None,
+    stop: Optional[PortalStop] = None,
 ) -> FetchBatch:
     gate = AdaptiveGate(max_workers, clock=clock)
     rng = rng or random.Random()
+    if stop is not None:
+        stop.start()
     # A few extra threads beyond the gate, so groups waiting out a retry
     # back-off never hold the slots other fetches need.
     executor = ThreadPoolExecutor(
         max_workers=max_workers + 4, thread_name_prefix="cnpq-fetch"
     )
     futures = [
-        executor.submit(fetch_with_retries, i, g, adapter_factory, gate, sleep, rng)
+        executor.submit(
+            fetch_with_retries, i, g, adapter_factory, gate, sleep, rng, stop
+        )
         for i, g in enumerate(groups)
     ]
     return FetchBatch(executor, futures, gate)

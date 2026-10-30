@@ -14,7 +14,7 @@ stores and pass them here.
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from loguru import logger
 
@@ -84,19 +84,30 @@ def refresh_settings(env: Optional[Mapping[str, str]] = None) -> Tuple[float, bo
     return share, full
 
 
-def download_counts(plan: RotationPlan, failed: List[str]) -> Dict[str, object]:
+def download_counts(
+    plan: RotationPlan, failed: List[str], stopped: Iterable[str] = ()
+) -> Dict[str, object]:
     """The counts of FR-011 for one source, from its plan and the ids whose
-    download failed (a failed stored item is reused from its stored copy)."""
-    failed_set = set(failed)
-    refreshed = [i for i in plan.refresh if i not in failed_set]
-    return {
-        "new": sum(1 for i in plan.new if i not in failed_set),
+    download failed (a failed stored item is reused from its stored copy).
+    ``stopped`` are the ids never tried because the portal was given up
+    (spec 024): a stored one is reused, a new one is neither new nor failed."""
+    stopped_set = set(stopped)
+    failed_set = set(failed) - stopped_set
+    refreshed = [
+        i for i in plan.refresh if i not in failed_set and i not in stopped_set
+    ]
+    counts = {
+        "new": sum(1 for i in plan.new if i not in failed_set | stopped_set),
         "refreshed": len(refreshed),
-        "reused": len(plan.reuse),
+        "reused": len(plan.reuse) + sum(1 for i in plan.refresh if i in stopped_set),
         "failed": len(failed_set),
         "reused_after_failure": sum(1 for i in plan.refresh if i in failed_set),
         "failed_ids": sorted(failed_set),
     }
+    if stopped_set:  # a healthy run's counts stay as spec 023 wrote them
+        counts["stopped"] = len(stopped_set)
+        counts["stopped_ids"] = sorted(stopped_set)
+    return counts
 
 
 def counts_line(source: str, counts: Mapping[str, object]) -> str:
@@ -104,4 +115,5 @@ def counts_line(source: str, counts: Mapping[str, object]) -> str:
         f"downloads {source}: new={counts['new']} refreshed={counts['refreshed']} "
         f"reused={counts['reused']} failed={counts['failed']} "
         f"reused_after_failure={counts['reused_after_failure']}"
+        + (f" stopped={counts['stopped']}" if counts.get("stopped") else "")
     )

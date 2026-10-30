@@ -129,10 +129,18 @@ pipeline-log: prefect-server logs-dir ## Run the unified pipeline and tee output
 full-refresh: db-reset prefect-server ## Reset DB and run full pipeline for all campuses
 	@$(FLOW_PYTHON) app.py full_pipeline "" "$(OUTPUT_DIR)"
 
-weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; REFRESH_SHARE=0.25 / FULL_REFRESH=1 tune the raw download rotation)
+# Spec 024: give a portal up when it blocks; each variable is passed only
+# when set (blank = the defaults: 8 CNPq attempts, 45 min, 5 Lattes requests).
+PORTAL_STOP_ENV = $(if $(EARLY_STOP),HORIZON_PORTAL_EARLY_STOP="$(EARLY_STOP)") \
+	$(if $(CNPQ_STOP_AFTER),HORIZON_CNPQ_STOP_AFTER_FAILURES="$(CNPQ_STOP_AFTER)") \
+	$(if $(CNPQ_BUDGET_MIN),HORIZON_CNPQ_DOWNLOAD_BUDGET_MIN="$(CNPQ_BUDGET_MIN)") \
+	$(if $(LATTES_STOP_AFTER),HORIZON_LATTES_STOP_AFTER_FAILURES="$(LATTES_STOP_AFTER)")
+
+weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; REFRESH_SHARE=0.25 / FULL_REFRESH=1 tune the raw download rotation; EARLY_STOP=0 / CNPQ_STOP_AFTER / CNPQ_BUDGET_MIN / LATTES_STOP_AFTER tune the portal early stop)
 	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" \
 		$(if $(REFRESH_SHARE),HORIZON_REFRESH_SHARE="$(REFRESH_SHARE)") \
 		$(if $(FULL_REFRESH),HORIZON_FULL_REFRESH="$(FULL_REFRESH)") \
+		$(PORTAL_STOP_ENV) \
 		$(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
 
 # --- Ingestion ---
@@ -150,8 +158,8 @@ ingest-sigpesq: prefect-server ## Ingest all SigPesq reports (groups, projects, 
 extract-project-files: prefect-server ## Baixa os PDFs dos projetos e extrai PJ_*.json via Mistral (sob demanda)
 	@$(FLOW_PYTHON) app.py extract_project_files "$(PROJECT_FILES_LIMIT)"
 
-ingest-lattes-download: prefect-server ## Download Lattes curricula via scriptLattes
-	@$(FLOW_PYTHON) -m src.flows.lattes.download
+ingest-lattes-download: prefect-server ## Download Lattes curricula via scriptLattes (EARLY_STOP / LATTES_STOP_AFTER)
+	@$(PORTAL_STOP_ENV) $(FLOW_PYTHON) -m src.flows.lattes.download
 
 ingest-lattes-projects: prefect-server ## Ingest Lattes projects, articles, and education
 	@$(FLOW_PYTHON) -m src.flows.lattes.projects
@@ -159,8 +167,8 @@ ingest-lattes-projects: prefect-server ## Ingest Lattes projects, articles, and 
 ingest-lattes-full: prefect-server ## Run complete Lattes ingestion (download + projects + advisorships)
 	@$(FLOW_PYTHON) -m src.flows.lattes.complete
 
-sync-cnpq: prefect-server ## Sync CNPq research groups (CAMPUS=Serra)
-	@$(FLOW_PYTHON) app.py cnpq_sync "$(CAMPUS)"
+sync-cnpq: prefect-server ## Sync CNPq research groups (CAMPUS=Serra; EARLY_STOP / CNPQ_STOP_AFTER / CNPQ_BUDGET_MIN)
+	@$(PORTAL_STOP_ENV) $(FLOW_PYTHON) app.py cnpq_sync "$(CAMPUS)"
 
 # --- Exports ---
 

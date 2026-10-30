@@ -68,3 +68,27 @@ def test_counts():
         "failed_ids": [IDS[1], IDS[3]],
     }
     assert counts_line("cnpq", counts).startswith("downloads cnpq: new=0 refreshed=1")
+
+
+def test_counts_with_items_not_tried_after_a_portal_stop():
+    # Spec 024: new 3; refresh 0 and 1. 1 failed; 0 and 3 never tried.
+    dates = {IDS[0]: None, IDS[1]: None, IDS[2]: "2026-10-01T00:00:00Z"}
+    plan = plan_downloads(IDS[:4], dates, share=0.5)
+    counts = download_counts(plan, failed=[IDS[1]], stopped=[IDS[0], IDS[3]])
+    assert counts == {
+        "new": 0,
+        "refreshed": 0,
+        "reused": 2,  # 2 as planned, 0 from its stored copy
+        "failed": 1,
+        "reused_after_failure": 1,
+        "failed_ids": [IDS[1]],
+        "stopped": 2,
+        "stopped_ids": [IDS[0], IDS[3]],
+    }
+    assert counts_line("lattes", counts).endswith("reused_after_failure=1 stopped=2")
+
+
+def test_a_stopped_id_is_not_also_a_failure():
+    plan = plan_downloads(IDS[:2], {}, share=0.25)  # both new
+    counts = download_counts(plan, failed=[IDS[0]], stopped=[IDS[0]])
+    assert counts["failed"] == 0 and counts["stopped"] == 1 and counts["new"] == 1

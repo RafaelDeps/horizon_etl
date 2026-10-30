@@ -86,3 +86,39 @@ def test_the_raw_download_rotation_can_be_tuned_on_dispatch():
     env = _step(steps, "Run weekly flows")["env"]
     assert env["HORIZON_REFRESH_SHARE"] == "${{ github.event.inputs.refresh_share }}"
     assert env["HORIZON_FULL_REFRESH"] == "${{ github.event.inputs.full_refresh }}"
+
+
+def test_the_portal_early_stop_can_be_tuned_on_dispatch():
+    # Spec 024: four inputs reach the weekly as environment; scheduled runs
+    # pass none, so every variable is blank and the defaults apply.
+    workflow, steps = _steps()
+    trigger = workflow.get("on") or workflow.get(True)
+    inputs = trigger["workflow_dispatch"]["inputs"]
+    assert inputs["early_stop"]["type"] == "boolean"
+    assert inputs["early_stop"]["default"] is True
+    for name in ("cnpq_stop_after", "cnpq_budget_min", "lattes_stop_after"):
+        assert inputs[name]["type"] == "string" and inputs[name]["default"] == ""
+    assert len(inputs) <= 10
+    env = _step(steps, "Run weekly flows")["env"]
+    for variable, name in (
+        ("HORIZON_PORTAL_EARLY_STOP", "early_stop"),
+        ("HORIZON_CNPQ_STOP_AFTER_FAILURES", "cnpq_stop_after"),
+        ("HORIZON_CNPQ_DOWNLOAD_BUDGET_MIN", "cnpq_budget_min"),
+        ("HORIZON_LATTES_STOP_AFTER_FAILURES", "lattes_stop_after"),
+    ):
+        assert env[variable] == "${{ github.event.inputs.%s }}" % name
+
+
+def test_makefile_forwards_the_portal_early_stop_settings():
+    makefile = Path("Makefile").read_text()
+    for variable in (
+        'HORIZON_PORTAL_EARLY_STOP="$(EARLY_STOP)"',
+        'HORIZON_CNPQ_STOP_AFTER_FAILURES="$(CNPQ_STOP_AFTER)"',
+        'HORIZON_CNPQ_DOWNLOAD_BUDGET_MIN="$(CNPQ_BUDGET_MIN)"',
+        'HORIZON_LATTES_STOP_AFTER_FAILURES="$(LATTES_STOP_AFTER)"',
+    ):
+        assert variable in makefile
+    for target in ("weekly-flows:", "sync-cnpq:", "ingest-lattes-download:"):
+        start = makefile.index(target)
+        recipe = makefile[start : makefile.index("\n\n", start)]
+        assert "$(PORTAL_STOP_ENV)" in recipe

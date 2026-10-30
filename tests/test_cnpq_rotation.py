@@ -63,7 +63,11 @@ def run(tmp_path, monkeypatch):
     monkeypatch.setattr(flow, "_now", lambda: next(clock))  # one run per week
 
     def go(env=None, campus=None):
-        for key in ("HORIZON_REFRESH_SHARE", "HORIZON_FULL_REFRESH"):
+        for key in (
+            "HORIZON_REFRESH_SHARE",
+            "HORIZON_FULL_REFRESH",
+            "HORIZON_PORTAL_EARLY_STOP",
+        ):
             monkeypatch.delenv(key, raising=False)
         for key, value in (env or {}).items():
             monkeypatch.setenv(key, value)
@@ -102,7 +106,11 @@ def test_a_failed_fetch_uses_the_stored_page(run):
     stored_dates = {w[0]: w[2] for w in first}
     FakeCrawler.failing = set(IDS)  # the portal is down
     try:
-        asked, written, skip = run({"HORIZON_FULL_REFRESH": "1"})
+        # Spec 024 would give the portal up after 8 failed attempts; this
+        # test checks the fallback of each page, so every page is tried.
+        asked, written, skip = run(
+            {"HORIZON_FULL_REFRESH": "1", "HORIZON_PORTAL_EARLY_STOP": "0"}
+        )
     finally:
         FakeCrawler.failing = set()
     assert sorted(set(asked)) == IDS  # each tried (with its retries)
