@@ -216,3 +216,36 @@ Checked on a copy of the final replay database (section 8) by re-running
 
 The old ids only exist in the fork's CI zip (`b404122`), never upstream, so
 the rule version stays 1.
+
+## 12. Second GitHub Actions run, with the suffix fix
+
+Run [40681064165](https://github.com/RafaelDeps/horizon_etl/actions/runs/40681064165)
+on the fork, 2026-10-28, at commit `6e5992d`. All 21 phases exit 0, in
+1 h 36 min. The id file comes from the zip of the bot commit `0b55907`. This
+is the first run with an id history to read: the zip of the previous run
+(`b404122`, section 11).
+
+- **Ids**: 62,318, all distinct, with 132 collision groups. The Lattes portal
+  behaved normally this time: 32 unreadable CVs, against 119 in the previous
+  run. There are 17,176 persons.
+- **Previous ids**: 3,964 ids of the previous run are no longer current, and
+  every one of them is in `horizon_id_aliases_canonical.json`.
+  - 282 point to a current id: 237 rebuild, 38 key corrected, 7 merge. Every
+    target is a current id.
+  - 3,682 are retired. Their entities are not in this run: 20 CVs that the
+    previous run could read came back unreadable in this one. All 20 persons
+    and their child items are among the retired ids.
+- **Same ids**: keyed by (`entity_type`, `parent_horizon_id`,
+  `natural_key`), 42,262 items are in both runs. 55 of them differ, and only
+  in the collision suffix (51 articles, 4 productions), because each run read
+  other CVs.
+
+The CI database still starts empty on every run (the log shows "No horizon
+ids … no id history saved"). An unreadable CV therefore drops its items from
+that run, and their ids are retired until the CV is readable again. When it
+is, the same ids become current again (the "reappearing id" scenario). Keeping
+the database between CI runs is spec C.
+
+Spec B deletes an item that disappears from a CV. An unreadable CV (one that
+yields "[Nome-nao-identificado]") must therefore count as a failed download,
+never as a CV whose items were all removed.
