@@ -92,3 +92,17 @@ def test_a_stopped_id_is_not_also_a_failure():
     plan = plan_downloads(IDS[:2], {}, share=0.25)  # both new
     counts = download_counts(plan, failed=[IDS[0]], stopped=[IDS[0]])
     assert counts["failed"] == 0 and counts["stopped"] == 1 and counts["new"] == 1
+
+
+def test_the_counts_line_names_the_second_try_only_when_it_ran():
+    # Spec 025.
+    counts = {
+        "new": 1,
+        "refreshed": 0,
+        "reused": 0,
+        "failed": 3,
+        "reused_after_failure": 0,
+    }
+    assert "retried" not in counts_line("lattes", counts)
+    line = counts_line("lattes", dict(counts, retried=38, recovered=35))
+    assert line.endswith(" failed=3 reused_after_failure=0 retried=38 recovered=35")

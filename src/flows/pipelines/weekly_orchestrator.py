@@ -38,7 +38,11 @@ from typing import Optional
 from loguru import logger
 
 from src.adapters.database.sqlite_settings import finalize_sqlite_database
-from src.flows.portal_stops import clear_portal_stops, read_portal_stops
+from src.flows.portal_stops import (
+    clear_portal_stops,
+    read_access_check_retries,
+    read_portal_stops,
+)
 
 # (name, argv tail, timeout seconds, critical, mode)
 #   mode "app"    -> `python app.py <argv...>`      (DB-writing phases; LGPD hook active)
@@ -247,8 +251,38 @@ def _portal_stop_lines(stops: dict, portuguese: bool = False) -> list:
     return lines
 
 
+def _access_check_retry_lines(retries: dict, portuguese: bool = False) -> list:
+    """One line per source whose access check pages got a second try in
+    this weekly (spec 025)."""
+    lines = []
+    for source, entry in sorted(retries.items()):
+        try:
+            retried = entry.get("retried", 0)
+            recovered = entry.get("recovered", 0)
+            pause = f"{(entry.get('pause_s') or 0) / 60:g} min"
+            if portuguese:
+                lines.append(
+                    f"🔁 {source}: {retried} páginas de captcha pedidas de novo "
+                    f"após {pause}; {recovered} recuperadas, "
+                    f"{retried - recovered} ainda faltando"
+                )
+            else:
+                lines.append(
+                    f"↻ {source}: {retried} access check pages asked again after "
+                    f"{pause}; {recovered} recovered, {retried - recovered} "
+                    "still missing"
+                )
+        except Exception as exc:  # a report problem never changes the run
+            logger.warning("Access check retry entry of {} not shown: {}", source, exc)
+    return lines
+
+
 def _notify(
-    results, crit_failed, finalize: Optional[dict] = None, stops: Optional[dict] = None
+    results,
+    crit_failed,
+    finalize: Optional[dict] = None,
+    stops: Optional[dict] = None,
+    retries: Optional[dict] = None,
 ):
     from src.notifications.telegram import send_telegram_message
 
@@ -266,6 +300,7 @@ def _notify(
         lines.append("")
         lines.append(f"⚠️ SQLite finalize falhou: {finalize.get('reason')}")
     stop_lines = _portal_stop_lines(stops or {}, portuguese=True)
+    stop_lines += _access_check_retry_lines(retries or {}, portuguese=True)
     if stop_lines:
         lines.append("")
         lines.extend(stop_lines)
@@ -349,9 +384,12 @@ def run_weekly(
     stops = read_portal_stops()
     for line in _portal_stop_lines(stops):
         logger.warning("  {}", line)
+    retries = read_access_check_retries()
+    for line in _access_check_retry_lines(retries):
+        logger.info("  {}", line)
 
     try:
-        _notify(results, crit_failed, finalize=finalize, stops=stops)
+        _notify(results, crit_failed, finalize=finalize, stops=stops, retries=retries)
     except Exception as exc:  # notification must never change the run outcome
         logger.warning("Telegram summary failed: {}", exc)
 

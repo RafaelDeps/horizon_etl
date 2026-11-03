@@ -51,6 +51,10 @@ def _no_rule_version_reset(monkeypatch, tmp_path_factory):
         "PORTAL_STOPS_PATH",
         str(tmp_path_factory.mktemp("stops") / "portal_stops.json"),
     )
+    # Spec 025: the spec 023 and spec 024 tests describe the Lattes download
+    # without the second try for access check pages (research R7); the tests
+    # of spec 025 turn it on themselves.
+    monkeypatch.setenv("HORIZON_LATTES_RETRY_WORKERS", "0")
     # run_weekly sets the weekly start for its phases; restored after the test.
     monkeypatch.setenv("HORIZON_WEEKLY_STARTED_AT", "")
     yield real

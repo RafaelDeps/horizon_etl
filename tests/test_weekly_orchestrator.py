@@ -289,6 +289,51 @@ def test_a_portal_given_up_shows_in_the_summary_and_keeps_the_exit_code():
     ) in sent[0]
 
 
+def test_an_access_check_retry_shows_in_the_summary_and_keeps_the_exit_code():
+    # Spec 025: one line after the stop lines, in the log and in Telegram.
+    import src.flows.portal_stops as portal_stops
+
+    def fake(cmd, **kwargs):
+        if "lattes_download" in cmd:
+            portal_stops.record_access_check_retry(
+                "lattes",
+                {
+                    "source": "lattes",
+                    "pause_s": 300.0,
+                    "workers": 1,
+                    "retried": 38,
+                    "recovered": 35,
+                    "not_tried": 0,
+                },
+            )
+        return _fake_run_factory()(cmd, **kwargs)
+
+    lines = []
+    from loguru import logger
+
+    sink = logger.add(lambda m: lines.append(m.record["message"]), level="INFO")
+    try:
+        rc, sent = _run_with_telegram(fake)
+    finally:
+        logger.remove(sink)
+    assert rc == 0
+    expected = (
+        "↻ lattes: 38 access check pages asked again after 5 min; "
+        "35 recovered, 3 still missing"
+    )
+    assert any(expected in line for line in lines)
+    assert (
+        "🔁 lattes: 38 páginas de captcha pedidas de novo após 5 min; "
+        "35 recuperadas, 3 ainda faltando"
+    ) in sent[0]
+
+
+def test_no_access_check_retry_means_no_retry_line():
+    rc, sent = _run_with_telegram(_fake_run_factory())
+    assert rc == 0 and "captcha" not in sent[0]
+    assert wo._access_check_retry_lines({}) == []
+
+
 def test_a_time_budget_line():
     entry = dict(_cnpq_stop_entry(), reason="time_budget")
     line = wo._portal_stop_lines({"cnpq": entry})[0]

@@ -116,4 +116,9 @@ def counts_line(source: str, counts: Mapping[str, object]) -> str:
         f"reused={counts['reused']} failed={counts['failed']} "
         f"reused_after_failure={counts['reused_after_failure']}"
         + (f" stopped={counts['stopped']}" if counts.get("stopped") else "")
+        + (
+            f" retried={counts['retried']} recovered={counts['recovered']}"
+            if "retried" in counts  # spec 025: only when a second try ran
+            else ""
+        )
     )

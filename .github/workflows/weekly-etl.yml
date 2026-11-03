@@ -49,6 +49,16 @@ on:
         required: false
         default: ""
         type: string
+      lattes_retry_workers:
+        description: "Workers that ask again, in the same run, for the Lattes curricula that got the access check page (blank = 1; 0 = off)."
+        required: false
+        default: ""
+        type: string
+      lattes_retry_pause_min:
+        description: "Minutes to wait before asking again for those curricula (blank = 5)."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -133,6 +143,9 @@ jobs:
           HORIZON_CNPQ_STOP_AFTER_FAILURES: ${{ github.event.inputs.cnpq_stop_after }}
           HORIZON_CNPQ_DOWNLOAD_BUDGET_MIN: ${{ github.event.inputs.cnpq_budget_min }}
           HORIZON_LATTES_STOP_AFTER_FAILURES: ${{ github.event.inputs.lattes_stop_after }}
+          # Spec 025: second try of the Lattes access check pages (defaults when blank).
+          HORIZON_LATTES_RETRY_WORKERS: ${{ github.event.inputs.lattes_retry_workers }}
+          HORIZON_LATTES_RETRY_PAUSE_MIN: ${{ github.event.inputs.lattes_retry_pause_min }}
         run: make weekly-flows
 
       - name: Compress large export files

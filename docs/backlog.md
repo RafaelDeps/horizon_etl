@@ -308,20 +308,25 @@ Mapping Epics -> User Stories -> Tasks status.
 - **TD-022 — 27 Lattes CVs collapse into one "[Nome-nao-identificado]"
   person**: for 27 of the 435 CVs in `data/lattes_json/`, scriptLattes could not
   read the name and writes `[Nome-nao-identificado]` (files
-  `NNN_Nome-nao-identificado_<lattes_id>.json`). The content is real (resume,
-  education, projects). The Lattes phases resolve all 27 to the same person
-  (id 7185 in the 2026-10-24 database), so their projects, articles and
-  educations hang on one fake person. Its `cnpq_url` and resume are overwritten
-  by each CV in turn, so the data never settles between runs, and the spec 020
-  fixpoint check excludes these CVs. Every one of the 27 `lattes_id` values is in
-  the versioned `data/lattes_run/lattes.list` with the real name (for example
-  0418477486525610 Felipe Sellin, 4528503986063803 Tessa Chimalli,
-  3943417292642301 Anderson Mathias Holtz). Proposed fix: when a CV's name is
-  the placeholder, take the name from `lattes.list` for its `lattes_id`, in
-  `src/flows/lattes/projects.py` and `src/flows/lattes/advisorships.py`. Expected
-  effect: 27 distinct persons with `person:lattes:<id>` ids instead of one.
-  Agreed with the maintainer on 2026-10-27 as a future spec, kept out of spec 020
-  for size. Status: Ready.
+  `NNN_Nome-nao-identificado_<lattes_id>.json`). The Lattes phases resolved all
+  27 to the same person (id 7185 in the 2026-10-24 database). Every one of the
+  27 `lattes_id` values is in `data/lattes_run/lattes.list` with the real name
+  (for example 0418477486525610 Felipe Sellin, 3943417292642301 Anderson
+  Mathias Holtz).
+  **Corrected on 2026-11-03**: the content was not real. The 27 files in
+  `cache/` (18–24 KB, dated 2026-10-21) were the portal's reCAPTCHA access
+  check page, saved before spec 023 started rejecting it, and the JSON built
+  from them had 0 items in every section. Taking the name from `lattes.list`
+  would only have named an empty CV. The case is already handled:
+  - spec 021 fails an unidentified CV (`read_cv`) instead of ingesting it;
+  - spec 023 rejects the access check page (`is_curriculum_page`) and
+    downloads an unidentified CV again on the next run (`retry_unidentified`);
+  - spec 025 asks for a rejected curriculum again in the same run.
+
+  A local run from scratch on 2026-11-03 got the real curriculum for 24 of the
+  27; the other 3 got the access check page again, and no
+  `Nome-nao-identificado` person is left in the database. Status: Done (no
+  fix needed beyond specs 021, 023 and 025).
 - **TD-023 — 149 groups of duplicate rows found by the horizon_id rules**: when
   two rows of the same type derive the same `horizon_id`, the assigner adds a
   collision suffix (`~<hex6>` of the source file name, then `~2`, `~3`). On the

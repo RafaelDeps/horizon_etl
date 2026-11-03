@@ -98,7 +98,9 @@ def test_the_portal_early_stop_can_be_tuned_on_dispatch():
     assert inputs["early_stop"]["default"] is True
     for name in ("cnpq_stop_after", "cnpq_budget_min", "lattes_stop_after"):
         assert inputs[name]["type"] == "string" and inputs[name]["default"] == ""
-    assert len(inputs) <= 10
+    # GitHub raised the workflow_dispatch input limit from 10 to 25 on
+    # 2025-12-04 (changelog); spec 025 takes the total to 11.
+    assert len(inputs) <= 25
     env = _step(steps, "Run weekly flows")["env"]
     for variable, name in (
         ("HORIZON_PORTAL_EARLY_STOP", "early_stop"),
@@ -122,3 +124,37 @@ def test_makefile_forwards_the_portal_early_stop_settings():
         start = makefile.index(target)
         recipe = makefile[start : makefile.index("\n\n", start)]
         assert "$(PORTAL_STOP_ENV)" in recipe
+
+
+def test_the_second_try_of_access_check_pages_can_be_tuned_on_dispatch():
+    # Spec 025: two inputs reach the weekly as environment; blank = defaults.
+    workflow, steps = _steps()
+    trigger = workflow.get("on") or workflow.get(True)
+    inputs = trigger["workflow_dispatch"]["inputs"]
+    for name in ("lattes_retry_workers", "lattes_retry_pause_min"):
+        assert inputs[name]["type"] == "string" and inputs[name]["default"] == ""
+    env = _step(steps, "Run weekly flows")["env"]
+    assert env["HORIZON_LATTES_RETRY_WORKERS"] == (
+        "${{ github.event.inputs.lattes_retry_workers }}"
+    )
+    assert env["HORIZON_LATTES_RETRY_PAUSE_MIN"] == (
+        "${{ github.event.inputs.lattes_retry_pause_min }}"
+    )
+
+
+def test_makefile_forwards_the_second_try_settings_only_when_set():
+    import subprocess
+
+    def dry_run(*args):
+        return subprocess.run(
+            ["make", "-n", "weekly-flows", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    forwarded = dry_run("LATTES_RETRY_WORKERS=0", "LATTES_RETRY_PAUSE_MIN=1")
+    assert 'HORIZON_LATTES_RETRY_WORKERS="0"' in forwarded
+    assert 'HORIZON_LATTES_RETRY_PAUSE_MIN="1"' in forwarded
+    plain = dry_run()
+    assert "HORIZON_LATTES_RETRY" not in plain

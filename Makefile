@@ -131,12 +131,16 @@ full-refresh: db-reset prefect-server ## Reset DB and run full pipeline for all 
 
 # Spec 024: give a portal up when it blocks; each variable is passed only
 # when set (blank = the defaults: 8 CNPq attempts, 45 min, 5 Lattes requests).
+# Spec 025: the second try of the Lattes access check pages (blank = 1 worker
+# after 5 min; LATTES_RETRY_WORKERS=0 turns it off).
 PORTAL_STOP_ENV = $(if $(EARLY_STOP),HORIZON_PORTAL_EARLY_STOP="$(EARLY_STOP)") \
 	$(if $(CNPQ_STOP_AFTER),HORIZON_CNPQ_STOP_AFTER_FAILURES="$(CNPQ_STOP_AFTER)") \
 	$(if $(CNPQ_BUDGET_MIN),HORIZON_CNPQ_DOWNLOAD_BUDGET_MIN="$(CNPQ_BUDGET_MIN)") \
-	$(if $(LATTES_STOP_AFTER),HORIZON_LATTES_STOP_AFTER_FAILURES="$(LATTES_STOP_AFTER)")
+	$(if $(LATTES_STOP_AFTER),HORIZON_LATTES_STOP_AFTER_FAILURES="$(LATTES_STOP_AFTER)") \
+	$(if $(LATTES_RETRY_WORKERS),HORIZON_LATTES_RETRY_WORKERS="$(LATTES_RETRY_WORKERS)") \
+	$(if $(LATTES_RETRY_PAUSE_MIN),HORIZON_LATTES_RETRY_PAUSE_MIN="$(LATTES_RETRY_PAUSE_MIN)")
 
-weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; REFRESH_SHARE=0.25 / FULL_REFRESH=1 tune the raw download rotation; EARLY_STOP=0 / CNPQ_STOP_AFTER / CNPQ_BUDGET_MIN / LATTES_STOP_AFTER tune the portal early stop)
+weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; REFRESH_SHARE=0.25 / FULL_REFRESH=1 tune the raw download rotation; EARLY_STOP=0 / CNPQ_STOP_AFTER / CNPQ_BUDGET_MIN / LATTES_STOP_AFTER tune the portal early stop; LATTES_RETRY_WORKERS / LATTES_RETRY_PAUSE_MIN tune the second try of access check pages)
 	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" \
 		$(if $(REFRESH_SHARE),HORIZON_REFRESH_SHARE="$(REFRESH_SHARE)") \
 		$(if $(FULL_REFRESH),HORIZON_FULL_REFRESH="$(FULL_REFRESH)") \
@@ -158,7 +162,7 @@ ingest-sigpesq: prefect-server ## Ingest all SigPesq reports (groups, projects, 
 extract-project-files: prefect-server ## Baixa os PDFs dos projetos e extrai PJ_*.json via Mistral (sob demanda)
 	@$(FLOW_PYTHON) app.py extract_project_files "$(PROJECT_FILES_LIMIT)"
 
-ingest-lattes-download: prefect-server ## Download Lattes curricula via scriptLattes (EARLY_STOP / LATTES_STOP_AFTER)
+ingest-lattes-download: prefect-server ## Download Lattes curricula via scriptLattes (EARLY_STOP / LATTES_STOP_AFTER / LATTES_RETRY_WORKERS / LATTES_RETRY_PAUSE_MIN)
 	@$(PORTAL_STOP_ENV) $(FLOW_PYTHON) -m src.flows.lattes.download
 
 ingest-lattes-projects: prefect-server ## Ingest Lattes projects, articles, and education
