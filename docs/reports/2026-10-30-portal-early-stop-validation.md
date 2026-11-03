@@ -107,14 +107,55 @@ The run found one thing to fix: two groups share a CNPq URL, so a page not
 tried was counted twice in the `not_tried` log value. It now counts each id
 once, as the `stopped` count already did.
 
-## 5. Not done yet
+## 5. Fork runs (quickstart.md §3)
 
-- **The fork dispatches of quickstart.md §3**, waiting for the maintainer's
-  approval:
-  - a healthy dispatch with the defaults;
-  - a forced one with `cnpq_budget_min=1` and `lattes_stop_after=1`.
-- **The Lattes stop on the real portal:** not exercised. Only its tests ran,
-  because forcing it needs the portal to fail first.
+**A) Healthy, defaults:** run
+[41057537912](https://github.com/RafaelDeps/horizon_etl/actions/runs/41057537912)
+(2026-10-30, `9cdd8ce`), success in 1 h 44 min. It was the branch's first
+run, so it had no previous run to restore and rebuilt from scratch.
+
+| | CNPq | Lattes |
+|---|---|---|
+| Portal given up | no | no |
+| Counts | `new=347 failed=0` | `new=391 refreshed=4 reused=9 failed=31` |
+| Phase time | 21 min | 28 min |
+
+- No `portal given up` line and no `⚠` line in the summary.
+- The 31 Lattes failures were access check pages, 7% of 426 requests. They
+  came between 13:10 and 13:35, with successes between them, never 5 in a
+  row. So the rule did not trigger, as intended (research R3).
+- Those 31 curricula had no stored copy yet, so they have no data in this
+  run. The next run takes them first as new (spec 023).
+- Every phase ended with exit 0.
+- `SQLite finalize: database is locked` also appears in runs 40959876147 and
+  40934866237. It predates this spec.
+
+**B) Forced, `cnpq_budget_min=1` and `lattes_stop_after=1`:** run
+[41082380552](https://github.com/RafaelDeps/horizon_etl/actions/runs/41082380552)
+(2026-10-30), success in 29 min. It restored the database, `data/raw` and
+`cache/` from run A, so it was a normal rotation.
+
+| | CNPq | Lattes |
+|---|---|---|
+| Portal given up | `time_budget`, limit 60 s, at 60.8 s; 24 successes, 0 failures | `failures_in_a_row`, limit 1, at 9.1 s; 1 access check page |
+| Counts | `refreshed=27 reused=320 failed=0 stopped=60` | `new=1 refreshed=0 reused=404 failed=2 stopped=129` |
+| Not tried | 60, processed from their stored pages | 129 (28 new, 101 refreshes), taken first by the next run |
+| Phase time | 1 min 13 s | 1 min 56 s |
+
+The weekly summary showed:
+
+```
+⚠ cnpq: portal given up (time_budget, 1 min) after 61 s; 60 not tried, 320 from stored copies, 0 failed
+⚠ lattes: portal given up (failures_in_a_row, limit 1) after 9 s; 129 not tried, 404 from stored copies, 2 failed
+```
+
+- The weekly did not fail: every phase ended with exit 0.
+- Lattes `failed=2` and `new=1` with a limit of 1: with 3 workers, the 2 other
+  requests were already in flight at the stop and finished (one failed, one
+  succeeded). This is within the 3-worker test bound.
+- The `⚠` lines are read from `portal_stops.json`, so the file was written.
+- **Not checked:** the Telegram message. The Telegram variables are empty in
+  the fork, so only the tests cover the Portuguese line.
 
 ## 6. Residual risk
 
