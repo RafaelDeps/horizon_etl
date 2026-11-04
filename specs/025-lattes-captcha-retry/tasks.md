@@ -237,10 +237,34 @@ without the backup rule.
     - `retries.lattes` in `data/reports/portal_stops.json`, `stops` empty;
     - all 435 curricula in `cache/` and in the manifest, 435 JSON files, none `Nome-nao-identificado`; `db/horizon.db` unchanged.
 
-- [ ] T028 Fork dispatches (quickstart.md §3; plan Validation 3–4), each one only after the maintainer agrees:
+- [X] T028 Fork dispatches (quickstart.md §3; plan Validation 3–4), each one only after the maintainer agrees:
   - the defaults: GitHub accepts the 11 inputs, the run is green, and the counts are recorded;
   - `lattes_retry_workers=0`: no `retried=` and no `↻` line.
-- [ ] T029 Write `docs/reports/<date>-lattes-captcha-retry-validation.md`, in English, in the style of `docs/reports/2026-10-30-portal-early-stop-validation.md`:
+  - **Run 41729360132 (2026-11-03, defaults, `da21d11`)**: green in 47 min. It was the branch's first run, so it rebuilt from scratch, with no stored pages and only the 16 curricula tracked in `cache/`.
+    - GitHub accepted the 11 inputs.
+    - Both portals were blocking:
+      - CNPq: timeouts; stopped at 803 s, `new=105 failed=7 stopped=235`, 0 from stored copies;
+      - Lattes: 8 access check pages in the first 11 requests; stopped at 42 s, `new=5 reused=13 failed=8 stopped=413`.
+    - No second pass, as FR-005 requires after a stop in the first pass, so no `↻` line.
+    - The run committed its export zip to the branch (`bea2664`).
+  - **Run 41739712881 (2026-11-03, defaults, `da21d11`)**: green in 1 h 46 min, all phases `exit 0`.
+    - It restored the database (58 MB), `data/raw` (222 MB) and `cache/` (4 MB) from run 41729360132.
+    - CNPq was healthy: `new=242 refreshed=27 reused=78 failed=0`, no stop.
+    - Lattes, first pass: 417 new curricula asked with 3 workers; 69 came back as the access check page (about 17%), no stop.
+    - Lattes, second pass: logged "Retrying 69 …, after 5 min, with 1 worker(s)", then "Second try for the access check page: 55 of 69 recovered", about 19 min including the pause.
+    - Downloads line: `new=403 refreshed=5 reused=13 failed=14 reused_after_failure=0 retried=69 recovered=55`.
+    - Summary: `↻ lattes: 69 access check pages asked again after 5 min; 55 recovered, 14 still missing`; no `⚠` line.
+    - The run committed its export zip to the branch (`481024f`, 50.8 MB, over GitHub's recommended 50 MB, a warning only).
+    - `SQLite finalize failed: database is locked` at the end, as in run 41729360132 and the local run from scratch, so it predates spec 025.
+  - **Run 41754550238 (2026-11-04, `lattes_retry_workers=0`)**: green in 37 min, all 22 phases `exit 0`.
+    - The job had `HORIZON_LATTES_RETRY_WORKERS: 0`; it restored the database (347 MB), `data/raw` (224 MB) and `cache/` (65 MB) from run 41739712881.
+    - CNPq: `new=0 refreshed=87 reused=260 failed=0`.
+    - Lattes: the 14 still missing, then the refresh share; 24 access check pages, no second pass and no `Retrying …` line.
+    - Downloads line as before spec 025: `new=10 refreshed=86 reused=315 failed=24 reused_after_failure=20`, no `retried=`/`recovered=`.
+    - Summary: no `↻` and no `⚠` line.
+    - The run committed its export zip to the branch (`eeeda3c`).
+
+- [X] T029 Write `docs/reports/<date>-lattes-captcha-retry-validation.md`, in English, in the style of `docs/reports/2026-10-30-portal-early-stop-validation.md`:
   - why, with the evidence of research R3;
   - tests before and after;
   - the local run;
