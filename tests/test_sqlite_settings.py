@@ -175,3 +175,35 @@ def test_finalize_is_a_no_op_when_the_file_does_not_exist(tmp_path):
     assert result["finalized"] is False
     assert result["skipped"] is True
     assert not (tmp_path / "missing.db").exists()
+
+
+def test_finalize_after_the_rule_version_check_of_the_weekly(tmp_path):
+    """run_weekly checks the rule version before the phases, in its own
+    process. The id store's reads must close their connections, or the final
+    step finds one still open and fails with ``database is locked``. The
+    garbage collector is off, as it is between its rare passes."""
+    import gc
+
+    from src.adapters.database.horizon_id_store import SqliteHorizonIdStore
+    from src.flows.maintenance.horizon_ids import rule_version_requires_reset
+
+    db = tmp_path / "horizon.db"
+    con = _wal_database(db)
+    con.execute("CREATE TABLE persons (id INTEGER PRIMARY KEY, name TEXT)")
+    con.execute("INSERT INTO persons VALUES (1, 'A')")
+    con.execute("CREATE TABLE horizon_meta (key TEXT PRIMARY KEY, value TEXT)")
+    con.commit()
+    con.close()
+
+    gc.disable()
+    try:
+        rule_version_requires_reset(str(db))
+        store = SqliteHorizonIdStore(str(db), snapshot_path="", zip_path="")
+        store.current_ids()
+        store.current_aliases()
+        store.history_snapshot()
+        result = finalize_sqlite_database(f"sqlite:///{db}")
+    finally:
+        gc.enable()
+
+    assert result["finalized"] is True
