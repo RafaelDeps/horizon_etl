@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from unittest.mock import MagicMock, call, patch
 
 from research_domain.domain.entities import Advisorship
@@ -424,3 +424,250 @@ def test_advisorship_handler_sets_cancelled_on_created_advisorship(
     assert created.cancelled is True
     assert created.cancellation_date is None
     MockAdvisorshipController.return_value.create.assert_called_once_with(created)
+
+
+# ---------------------------------------------------------------------------
+# Substituição de aluno x continuação da mesma bolsa
+# ---------------------------------------------------------------------------
+
+
+def _orientacao_existente(
+    *,
+    person_id: int,
+    start: datetime,
+    end: datetime,
+    workplan_code: str = "14293",
+    parent_id: int = 574,
+):
+    orientacao = MagicMock()
+    orientacao.parent_id = parent_id
+    orientacao.start_date = start
+    orientacao.end_date = end
+    orientacao.metadata = {"sigpesq_workplan_code": workplan_code}
+
+    membro = MagicMock()
+    membro.person_id = person_id
+    membro.role_name = "Student"
+    membro.start_date = start.date()
+    membro.end_date = end.date()
+    orientacao.members = [membro]
+    return orientacao
+
+
+def test_find_continuous_reuses_same_student_across_year_boundary():
+    handler = _advisorship_handler()
+    existente = _orientacao_existente(
+        person_id=1019,
+        start=datetime(2024, 9, 1),
+        end=datetime(2025, 2, 17),
+    )
+    handler._known_advisorships_cache = [existente]
+
+    aluno = MagicMock()
+    aluno.id = 1019
+    handler._resolve_advisorship_people = MagicMock(return_value=(aluno, MagicMock()))
+
+    encontrada = handler._find_continuous_advisorship(
+        {
+            "start_date": datetime(2025, 2, 18),
+            "end_date": datetime(2025, 8, 31),
+            "metadata": {"sigpesq_workplan_code": "14293"},
+        },
+        574,
+    )
+
+    assert encontrada is existente
+
+
+def test_find_continuous_does_not_match_a_different_student():
+    handler = _advisorship_handler()
+    existente = _orientacao_existente(
+        person_id=474,
+        start=datetime(2024, 9, 1),
+        end=datetime(2025, 2, 17),
+    )
+    handler._known_advisorships_cache = [existente]
+
+    aluna = MagicMock()
+    aluna.id = 1019
+    handler._resolve_advisorship_people = MagicMock(return_value=(aluna, MagicMock()))
+
+    encontrada = handler._find_continuous_advisorship(
+        {
+            "start_date": datetime(2025, 2, 18),
+            "end_date": datetime(2025, 8, 31),
+            "metadata": {"sigpesq_workplan_code": "14293"},
+        },
+        574,
+    )
+
+    assert (
+        encontrada is None
+    ), "a Julia foi tratada como continuação do Kauã: são bolsas diferentes"
+
+
+def test_find_continuous_does_not_match_a_real_gap():
+    handler = _advisorship_handler()
+    existente = _orientacao_existente(
+        person_id=900,
+        start=datetime(2022, 1, 1),
+        end=datetime(2022, 9, 27),
+    )
+    handler._known_advisorships_cache = [existente]
+
+    aluno = MagicMock()
+    aluno.id = 900
+    handler._resolve_advisorship_people = MagicMock(return_value=(aluno, MagicMock()))
+
+    encontrada = handler._find_continuous_advisorship(
+        {
+            "start_date": datetime(2023, 3, 9),
+            "end_date": datetime(2023, 12, 31),
+            "metadata": {"sigpesq_workplan_code": "14293"},
+        },
+        574,
+    )
+
+    assert encontrada is None
+
+
+def test_extend_continuous_keeps_original_start_and_does_not_rename():
+    handler = _advisorship_handler()
+    existente = _orientacao_existente(
+        person_id=1019,
+        start=datetime(2024, 9, 1),
+        end=datetime(2025, 2, 17),
+    )
+    existente.name = "Plano de Trabalho Compartilhado"
+    existente.status = "Active"
+
+    aluno = MagicMock()
+    aluno.id = 1019
+    supervisor = MagicMock()
+    supervisor.id = 680
+    handler._resolve_advisorship_people = MagicMock(return_value=(aluno, supervisor))
+    handler._ensure_fellowship = MagicMock(return_value=None)
+    handler._sync_advisorship_member = MagicMock()
+    handler.adv_controller.update = MagicMock()
+
+    resultado = handler._extend_continuous_advisorship(
+        existente,
+        {
+            "start_date": datetime(2025, 2, 18),
+            "end_date": datetime(2025, 8, 31),
+            "status": "Concluded",
+            "metadata": {"sigpesq_workplan_code": "14293"},
+        },
+    )
+
+    assert resultado is existente
+    assert existente.start_date == datetime(2024, 9, 1)
+    assert existente.end_date == datetime(2025, 8, 31)
+    assert existente.name == "Plano de Trabalho Compartilhado"
+    assert existente.status == "Concluded"
+    assert existente._reused_existing is True
+    assert existente._aggregated_period is True
+
+
+def test_repeated_segment_does_not_shrink_aggregated_period():
+    handler = _advisorship_handler()
+    existente = _orientacao_existente(
+        person_id=1019,
+        start=datetime(2023, 9, 1),
+        end=datetime(2024, 8, 31),
+        workplan_code="12191",
+    )
+    existente.name = "Plano Agregado"
+    existente.status = "Concluded"
+    existente._aggregated_period = True
+
+    aluno = MagicMock()
+    aluno.id = 1019
+    supervisor = MagicMock()
+    supervisor.id = 680
+    handler._resolve_advisorship_people = MagicMock(return_value=(aluno, supervisor))
+    handler._ensure_fellowship = MagicMock(return_value=None)
+    handler._resolve_persisted_title = MagicMock(return_value="Plano Agregado")
+    handler._coerce_to_person = MagicMock(side_effect=lambda person: person)
+    handler.adv_controller.update = MagicMock()
+
+    resultado = handler.create_or_update(
+        project_data={
+            "title": "Plano Agregado",
+            "identity_key": "sigpesq_workplan|12191|7031",
+            "start_date": datetime(2023, 9, 1),
+            "end_date": datetime(2024, 3, 13),
+            "status": "Cancelled",
+            "metadata": {"sigpesq_workplan_code": "12191"},
+        },
+        existing_initiative=existente,
+        initiative_type_name="Advisorship",
+        initiative_type_id=7,
+        organization_id=9,
+        parent_id=574,
+    )
+
+    assert resultado is existente
+    assert existente.start_date == datetime(2023, 9, 1)
+    assert existente.end_date == datetime(2024, 8, 31)
+    assert existente.name == "Plano Agregado"
+    membro = existente.members[0]
+    assert membro.start_date == date(2023, 9, 1)
+    assert membro.end_date == date(2024, 8, 31)
+
+
+def test_sync_member_updates_dates_without_duplicating():
+    handler = _advisorship_handler()
+    orientacao = MagicMock()
+    membro = MagicMock()
+    membro.person_id = 11
+    membro.role_name = "Student"
+    membro.start_date = date(2024, 9, 1)
+    membro.end_date = None
+    orientacao.members = [membro]
+
+    aluno = MagicMock()
+    aluno.id = 11
+
+    with patch.object(handler, "_coerce_to_person", return_value=aluno):
+        handler._sync_advisorship_member(
+            orientacao,
+            person=aluno,
+            role_name="Student",
+            start_date=datetime(2024, 9, 1),
+            end_date=datetime(2025, 2, 17),
+        )
+
+    assert orientacao.members == [membro]
+    assert membro.start_date == date(2024, 9, 1)
+    assert membro.end_date == date(2025, 2, 17)
+    orientacao.add_member.assert_not_called()
+
+
+def test_sync_member_adds_end_date_on_created_member():
+    handler = _advisorship_handler()
+    orientacao = MagicMock()
+    orientacao.members = []
+
+    novo_membro = MagicMock()
+    novo_membro.person_id = 12
+    novo_membro.role_name = "Student"
+
+    def adiciona(person, role, start_date):
+        orientacao.members.append(novo_membro)
+
+    orientacao.add_member.side_effect = adiciona
+
+    aluno = MagicMock()
+    aluno.id = 12
+
+    with patch.object(handler, "_coerce_to_person", return_value=aluno):
+        handler._sync_advisorship_member(
+            orientacao,
+            person=aluno,
+            role_name="Student",
+            start_date=datetime(2025, 2, 18),
+            end_date=datetime(2025, 8, 31),
+        )
+
+    assert novo_membro.end_date == date(2025, 8, 31)

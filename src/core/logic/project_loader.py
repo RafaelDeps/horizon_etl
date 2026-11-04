@@ -481,8 +481,13 @@ class ProjectLoader:
             parent_id=parent_id,
         )
 
+        # O handler pode ter reutilizado uma orientação existente mesmo sem o
+        # loader tê-la encontrado por identidade — é o caso da continuação da
+        # mesma bolsa, quebrada em dois Ids pelo relatório anual.
+        reused_existing = bool(getattr(initiative, "_reused_existing", False))
+
         if not existing:
-            stats["created"] += 1
+            stats["updated" if reused_existing else "created"] += 1
             if initiative:
                 self._register_existing_initiative(
                     existing_by_name=existing_by_name,
@@ -496,7 +501,9 @@ class ProjectLoader:
                         normalize_text(nome_novo), initiative
                     )
                 resolved_identity = (
-                    get_existing_initiative_identity(initiative) or identity_key
+                    identity_key
+                    if reused_existing
+                    else get_existing_initiative_identity(initiative) or identity_key
                 )
                 self._register_identity(
                     existing_by_identity, resolved_identity, initiative
@@ -530,7 +537,11 @@ class ProjectLoader:
                 source_record_id=getattr(source_record, "id", None),
                 canonical_entity_type=canonical_entity_type,
                 canonical_entity_id=initiative.id,
-                match_strategy="identity_key" if identity_key else "title_fallback",
+                match_strategy=(
+                    "continuity"
+                    if reused_existing
+                    else ("identity_key" if identity_key else "title_fallback")
+                ),
                 match_confidence=1.0 if identity_key else 0.7,
             )
             tracked_attrs = {
@@ -554,7 +565,9 @@ class ProjectLoader:
                 source_record_id=getattr(source_record, "id", None),
                 canonical_entity_type=canonical_entity_type,
                 canonical_entity_id=initiative.id,
-                operation="create" if not existing else "update",
+                operation=(
+                    "create" if not existing and not reused_existing else "update"
+                ),
                 changed_fields=[
                     key
                     for key, value in tracked_attrs.items()
@@ -605,10 +618,24 @@ class ProjectLoader:
         title: Optional[str],
         existing_by_norm_name: Optional[Dict[str, Any]] = None,
     ) -> Optional[Any]:
+        identity_candidate = None
         if identity_key:
-            candidate = existing_by_identity.get(identity_key)
-            if self._candidate_matches_model(candidate, model_class):
-                return candidate
+            identity_candidate = existing_by_identity.get(identity_key)
+            if self._candidate_matches_model(identity_candidate, model_class):
+                return identity_candidate
+
+        # Uma orientação com identidade própria que não existe no catálogo é
+        # uma bolsa nova, não a mesma orientação com outro nome. O título é o
+        # título do TRABALHO: duas bolsas consecutivas do mesmo plano (por
+        # exemplo, um aluno que substituiu outro) compartilham o título e
+        # precisam continuar separadas. Sem esta guarda, a segunda bolsa cai
+        # no título exato e sobrescreve o aluno da primeira.
+        #
+        # A exceção é a identidade que existe mas aponta para outro tipo de
+        # iniciativa: aí o título ainda serve de rede de segurança para
+        # cargas antigas, sem prefixo de fonte, cuja chave era o próprio nome.
+        if model_class is Advisorship and identity_key and identity_candidate is None:
+            return None
 
         if title:
             candidate = existing_by_name.get(title)

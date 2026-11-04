@@ -219,6 +219,101 @@ def test_segunda_orientacao_de_mesmo_titulo_e_criada_e_nao_atualizada():
     assert stats["updated"] == 0
 
 
+def test_orientacao_com_identidade_desconhecida_nao_casa_por_titulo_exato():
+    """Duas bolsas do mesmo plano têm o mesmo título, mas identidades distintas.
+
+    É o caso Julia/Kauã: a segunda bolsa (aluno substituto) não pode cair no
+    título exato da primeira e sobrescrever o aluno dela.
+    """
+    loader = _loader_sem_banco()
+    loader.adv_controller.get_by_id.return_value = None
+    ja_existente = _candidato_orientacao(577)
+
+    existing = loader._resolve_existing_initiative(
+        existing_by_name={"Plano de Trabalho Compartilhado": ja_existente},
+        existing_by_identity={
+            "sigpesq_workplan|14293|8825": ja_existente,
+        },
+        model_class=Advisorship,
+        identity_key="sigpesq_workplan|14293|9171",
+        title="Plano de Trabalho Compartilhado",
+    )
+
+    assert existing is None, (
+        "a segunda bolsa do mesmo plano casou pelo título exato e vai "
+        "sobrescrever o aluno da primeira"
+    )
+
+
+def test_substituicao_de_aluno_cria_duas_orientacoes_com_mesmo_titulo():
+    """A consequência prática: a segunda bolsa chega ao handler como nova."""
+    loader = _loader_sem_banco()
+    loader.adv_controller.get_by_id.return_value = None
+
+    handler = MagicMock()
+    criadas = []
+
+    def cria(**kwargs):
+        nova = _candidato_orientacao(1000 + len(criadas))
+        nova.name = kwargs["project_data"]["title"]
+        criadas.append(kwargs)
+        return nova
+
+    handler.create_or_update.side_effect = cria
+    loader.handlers = {Initiative: handler, Advisorship: handler}
+    loader.mapping_strategy = MagicMock()
+    loader.entity_manager = MagicMock()
+    loader.initiative_type = MagicMock(id=2, name="Advisorship")
+    loader.org_id = 1
+    loader.linker = MagicMock()
+
+    titulo = "Plano de Trabalho Compartilhado"
+    loader.mapping_strategy.map_row.side_effect = [
+        {
+            "title": titulo,
+            "model_class": Advisorship,
+            "identity_key": "sigpesq_workplan|14293|8825",
+            "student_names": ["Kauã"],
+        },
+        {
+            "title": titulo,
+            "model_class": Advisorship,
+            "identity_key": "sigpesq_workplan|14293|9171",
+            "student_names": ["Julia"],
+        },
+    ]
+
+    existing_by_name, existing_by_identity, existing_by_norm_name = {}, {}, {}
+    stats = {
+        "created": 0,
+        "updated": 0,
+        "skipped_not_approved": 0,
+        "skipped_no_title": 0,
+        "failed": 0,
+        "teams": 0,
+        "skipped_reasons": {},
+    }
+
+    with patch("src.core.logic.project_loader.tracking_recorder") as rastreio:
+        rastreio.record_source_record.return_value = None
+        for linha in ({"orientado": "Kauã"}, {"orientado": "Julia"}):
+            loader._process_row(
+                linha,
+                existing_by_name,
+                existing_by_identity,
+                stats,
+                source_file="teste.xlsx",
+                existing_by_norm_name=existing_by_norm_name,
+            )
+
+    assert len(criadas) == 2
+    assert (
+        criadas[1]["existing_initiative"] is None
+    ), "a bolsa da Julia foi tratada como atualização da bolsa do Kauã"
+    assert stats["created"] == 2
+    assert stats["updated"] == 0
+
+
 # --- US2: projeto continua casando ----------------------------------------
 
 

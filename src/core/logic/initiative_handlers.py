@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from datetime import date, datetime
-from typing import Any, Dict, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional
 
 from eo_lib import Initiative, InitiativeController, Person
 from eo_lib.domain import Role
@@ -122,6 +122,7 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         self.entity_manager = entity_manager
         self._fellowships_cache: Dict[str, Fellowship] = {}
         self._advisorship_roles_cache: Dict[str, Role] = {}
+        self._known_advisorships_cache: Optional[List[Any]] = None
         self._preload_fellowships()
 
     def _preload_fellowships(self):
@@ -162,7 +163,31 @@ class AdvisorshipHandler(BaseInitiativeHandler):
             project_data,
             current_id=getattr(existing_initiative, "id", None),
         )
+        if existing_initiative is not None and getattr(
+            existing_initiative, "_aggregated_period", False
+        ):
+            # A orientação já absorveu mais de um segmento (mesma pessoa,
+            # bolsa quebrada em vários Ids). Reler um dos segmentos não pode
+            # encolher o período agregado nem renomear a orientação.
+            return self._extend_continuous_advisorship(
+                existing_initiative, project_data
+            )
         if not existing_initiative:
+            # Mesma pessoa, mesmo plano e período contíguo: é a continuação da
+            # mesma bolsa (o relatório anual costuma quebrá-la em dois Ids).
+            # Continua na orientação existente, sem renomear nem perder o
+            # início original.
+            existing_initiative = self._find_continuous_advisorship(
+                project_data, parent_id
+            )
+            if existing_initiative is not None:
+                return self._extend_continuous_advisorship(
+                    existing_initiative, project_data
+                )
+
+        if not existing_initiative and not project_data.get("identity_key"):
+            # Fallback legado para chamadas sem identidade de fonte. Com
+            # identidade, título igual é outra bolsa (aluno substituído).
             existing_initiative = self._find_existing_advisorship_by_title(
                 persisted_title
             )
@@ -255,6 +280,7 @@ class AdvisorshipHandler(BaseInitiativeHandler):
                 fellowship=fellowship,
             )
             self.adv_controller.create(initiative)
+            self._remember_advisorship(initiative)
             return initiative
 
     def _get_or_create_advisorship_role(self, role_name: str) -> Role:
@@ -436,23 +462,52 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         person: Optional[Any],
         role_name: str,
         start_date: Optional[Any],
+        end_date: Optional[Any] = None,
+        extend_end: bool = False,
     ) -> None:
         person = self._coerce_to_person(person)
 
         if advisorship_supports_members_api(initiative):
             members = list(getattr(initiative, "members", []) or [])
-            retained_members = [
-                member
-                for member in members
-                if getattr(member, "role_name", None) != role_name
-            ]
-            initiative.members = retained_members
+            person_id = getattr(person, "id", None)
+            existing_member = None
+            if person_id is not None:
+                existing_member = next(
+                    (
+                        member
+                        for member in members
+                        if getattr(member, "role_name", None) == role_name
+                        and self._member_person_id(member) == person_id
+                    ),
+                    None,
+                )
+
+            if existing_member is not None:
+                if start_date:
+                    existing_member.start_date = self._as_date(start_date)
+                if end_date:
+                    new_end = self._as_date(end_date)
+                    if (
+                        not extend_end
+                        or existing_member.end_date is None
+                        or new_end > self._as_date(existing_member.end_date)
+                    ):
+                        existing_member.end_date = new_end
+                return
 
             if not person:
                 return
 
             role = self._get_or_create_advisorship_role(role_name)
-            initiative.add_member(person=person, role=role, start_date=start_date)
+            before = len(list(getattr(initiative, "members", []) or []))
+            initiative.add_member(
+                person=person,
+                role=role,
+                start_date=self._as_date(start_date),
+            )
+            members = list(getattr(initiative, "members", []) or [])
+            if end_date and len(members) > before:
+                members[-1].end_date = self._as_date(end_date)
             return
 
         if role_name == AdvisorshipRole.STUDENT.value:
@@ -468,6 +523,22 @@ class AdvisorshipHandler(BaseInitiativeHandler):
             setattr(
                 initiative, id_attr, getattr(person, "id", None) if person else None
             )
+
+    @staticmethod
+    def _member_person_id(member: Any) -> Optional[int]:
+        person_id = getattr(member, "person_id", None)
+        if person_id is not None:
+            return person_id
+        person = getattr(member, "person", None)
+        return getattr(person, "id", None)
+
+    @staticmethod
+    def _as_date(value: Optional[Any]) -> Optional[Any]:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return value
 
     def _coerce_to_person(self, person: Optional[Any]) -> Optional[Person]:
         if not person:
@@ -583,6 +654,148 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         except Exception:
             return None
 
+    def _known_advisorships(self) -> List[Any]:
+        """Orientações já vistas nesta carga, para reconhecer continuações."""
+        if self._known_advisorships_cache is None:
+            try:
+                self._known_advisorships_cache = list(
+                    self.adv_controller.get_all() or []
+                )
+            except Exception as exc:
+                logger.warning(f"Falha ao listar orientações para continuidade: {exc}")
+                self._known_advisorships_cache = []
+        return self._known_advisorships_cache
+
+    def _remember_advisorship(self, initiative: Any) -> None:
+        if self._known_advisorships_cache is not None:
+            self._known_advisorships_cache.append(initiative)
+
+    def _find_continuous_advisorship(
+        self, project_data: Dict[str, Any], parent_id: Optional[int]
+    ) -> Optional[Advisorship]:
+        """Mesma pessoa + mesmo plano + período contíguo = continuação da bolsa.
+
+        O relatório anual do SigPesq às vezes quebra a mesma bolsa em dois
+        ``Id`` (um até dezembro, outro a partir de janeiro). Nesse caso a
+        orientação é a mesma; só o período se estende. Já uma troca de aluno
+        (mesmo plano, pessoa diferente) não casa aqui e vira orientação nova.
+        """
+        if parent_id is None:
+            return None
+
+        metadata = project_data.get("metadata") or {}
+        workplan_code = self._normalize_code(metadata.get("sigpesq_workplan_code"))
+        start_date = self._as_date(project_data.get("start_date"))
+        end_date = self._as_date(project_data.get("end_date"))
+        if not workplan_code or start_date is None:
+            return None
+
+        student_person, _ = self._resolve_advisorship_people(project_data)
+        student_id = getattr(student_person, "id", None)
+        if student_id is None:
+            return None
+
+        for candidate in self._known_advisorships():
+            if getattr(candidate, "parent_id", None) != parent_id:
+                continue
+
+            candidate_metadata = getattr(candidate, "metadata", None)
+            if not isinstance(candidate_metadata, dict):
+                continue
+            if (
+                self._normalize_code(candidate_metadata.get("sigpesq_workplan_code"))
+                != workplan_code
+            ):
+                continue
+            if not self._advisorship_has_person(
+                candidate,
+                student_id,
+                AdvisorshipRole.STUDENT.value,
+            ):
+                continue
+
+            candidate_start = self._as_date(getattr(candidate, "start_date", None))
+            candidate_end = self._as_date(getattr(candidate, "end_date", None))
+            if candidate_start is None or candidate_end is None:
+                continue
+
+            # Contíguo ou sobreposto, em qualquer ordem de chegada.
+            if start_date > candidate_end + timedelta(days=1):
+                continue
+            if end_date is not None and end_date < candidate_start - timedelta(days=1):
+                continue
+            return candidate
+
+        return None
+
+    def _extend_continuous_advisorship(
+        self, initiative: Advisorship, project_data: Dict[str, Any]
+    ) -> Advisorship:
+        """Estende a orientação existente sem renomear nem perder o início."""
+        start_date = self._as_date(project_data.get("start_date"))
+        end_date = self._as_date(project_data.get("end_date"))
+        current_start = self._as_date(getattr(initiative, "start_date", None))
+        current_end = self._as_date(getattr(initiative, "end_date", None))
+
+        if start_date and (current_start is None or start_date < current_start):
+            initiative.start_date = project_data.get("start_date")
+        if end_date and (current_end is None or end_date > current_end):
+            initiative.end_date = project_data.get("end_date")
+
+        if project_data.get("status") is not None:
+            initiative.status = project_data["status"]
+        self._sync_advisorship_cancellation(initiative, project_data)
+
+        program = project_data.get("program")
+        if program is not None and hasattr(initiative, "program"):
+            initiative.program = program
+
+        fellowship = self._ensure_fellowship(project_data)
+        if fellowship:
+            initiative.fellowship = fellowship
+            initiative.fellowship_id = fellowship.id
+
+        student_person, supervisor_person = self._resolve_advisorship_people(
+            project_data
+        )
+        self._sync_advisorship_member(
+            initiative,
+            person=student_person,
+            role_name=AdvisorshipRole.STUDENT.value,
+            start_date=initiative.start_date,
+            end_date=initiative.end_date,
+            extend_end=True,
+        )
+        self._sync_advisorship_member(
+            initiative,
+            person=supervisor_person,
+            role_name=AdvisorshipRole.SUPERVISOR.value,
+            start_date=initiative.start_date,
+            end_date=initiative.end_date,
+            extend_end=True,
+        )
+
+        self.adv_controller.update(initiative)
+        initiative._aggregated_period = True
+        initiative._reused_existing = True
+        return initiative
+
+    @staticmethod
+    def _normalize_code(value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _advisorship_has_person(
+        self, initiative: Any, person_id: int, role_name: str
+    ) -> bool:
+        for member in getattr(initiative, "members", None) or []:
+            if getattr(member, "role_name", None) != role_name:
+                continue
+            if self._member_person_id(member) == person_id:
+                return True
+        return False
+
     def _handle_advisorship_details(
         self,
         initiative: Advisorship,
@@ -612,6 +825,7 @@ class AdvisorshipHandler(BaseInitiativeHandler):
                 person=student_person,
                 role_name=AdvisorshipRole.STUDENT.value,
                 start_date=start_date,
+                end_date=project_data.get("end_date"),
             )
 
         if project_data.get("coordinator_name") or project_data.get(
@@ -622,6 +836,7 @@ class AdvisorshipHandler(BaseInitiativeHandler):
                 person=supervisor_person,
                 role_name=AdvisorshipRole.SUPERVISOR.value,
                 start_date=start_date,
+                end_date=project_data.get("end_date"),
             )
 
         if fellowship is None:
