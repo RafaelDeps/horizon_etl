@@ -53,3 +53,8 @@ lattes_effective.list
 /test_mapping*.xlsx
 site/
 chromedriver
+
+# Staging folder for the weekly artifact and local Prefect state.
+artifact_out/
+.prefect/
+data/exports/data_snapshot.zip
