@@ -10,6 +10,7 @@ import os
 import sqlite3
 import zipfile
 from collections import defaultdict
+from contextlib import closing
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -149,6 +150,10 @@ class SqliteHorizonIdStore(IHorizonIdStore):
         self.zip_path = zip_path
 
     def _connect(self) -> sqlite3.Connection:
+        # A sqlite3 connection used as ``with con:`` only commits; the caller
+        # closes it (``closing`` or ``finally``). run_weekly reads the rule
+        # version in its own process, and a connection left to the garbage
+        # collector kept the file locked for the final step.
         con = sqlite3.connect(self.db_path)
         con.row_factory = sqlite3.Row
         return con
@@ -156,12 +161,12 @@ class SqliteHorizonIdStore(IHorizonIdStore):
     # ----------------------------------------------------------------- reads
     def iter_entities(self, entity_type: str) -> Iterable[Dict[str, Any]]:
         sql = _ENTITY_SQL[entity_type]
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             return [dict(row) for row in con.execute(sql)]
 
     def source_keys(self) -> Dict[tuple, List[Dict[str, Any]]]:
         out: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             if not _table_exists(con, "entity_matches"):
                 return out
             rows = con.execute(
@@ -184,7 +189,7 @@ class SqliteHorizonIdStore(IHorizonIdStore):
 
     def team_initiatives(self) -> Dict[int, List[int]]:
         out: Dict[int, List[int]] = defaultdict(list)
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             for row in con.execute(
                 "SELECT team_id, initiative_id FROM initiative_teams"
             ):
@@ -205,7 +210,7 @@ class SqliteHorizonIdStore(IHorizonIdStore):
             "snapshot_merges": [],
             "source": [],
         }
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             if _table_exists(con, "horizon_merge_log"):
                 history["merges"] = [
                     {
@@ -279,7 +284,7 @@ class SqliteHorizonIdStore(IHorizonIdStore):
         reset."""
         if not os.path.exists(self.db_path):
             return None
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             if not _table_exists(con, "horizon_ids"):
                 return None
             ids = [
@@ -343,7 +348,7 @@ class SqliteHorizonIdStore(IHorizonIdStore):
             return None
 
     def current_ids(self) -> List[Dict[str, Any]]:
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             if not _table_exists(con, "horizon_ids"):
                 return []
             return [
@@ -355,7 +360,7 @@ class SqliteHorizonIdStore(IHorizonIdStore):
             ]
 
     def current_aliases(self) -> List[Dict[str, Any]]:
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             if not _table_exists(con, "horizon_id_aliases"):
                 return []
             return [
@@ -367,13 +372,13 @@ class SqliteHorizonIdStore(IHorizonIdStore):
             ]
 
     def has_entities(self) -> bool:
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             if not _table_exists(con, "persons"):
                 return False
             return con.execute("SELECT 1 FROM persons LIMIT 1").fetchone() is not None
 
     def get_meta(self, key: str) -> Optional[str]:
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             if not _table_exists(con, "horizon_meta"):
                 return None
             row = con.execute(
