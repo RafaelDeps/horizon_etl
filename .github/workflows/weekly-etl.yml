@@ -131,6 +131,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FRESH_DATABASE: ${{ github.event.inputs.fresh_database }}
+          # Spec 029: the state travels in one encrypted bundle. The keys are
+          # given to this step and to "Prepare artifact" only.
+          HORIZON_STATE_KEY: ${{ secrets.HORIZON_STATE_KEY }}
+          HORIZON_STATE_KEY_PREVIOUS: ${{ secrets.HORIZON_STATE_KEY_PREVIOUS }}
         run: make restore-weekly
 
       - name: Run weekly flows
@@ -148,17 +152,6 @@ jobs:
           HORIZON_LATTES_RETRY_PAUSE_MIN: ${{ github.event.inputs.lattes_retry_pause_min }}
         run: make weekly-flows
 
-      - name: Compress large export files
-        if: always()
-        run: |
-          # Never touch archives: exports_canonical.zip is the flow's own
-          # deliverable and must ship byte-for-byte as written by
-          # `make weekly-flows` (no double wrapping). data/raw is restored by
-          # the next run (spec 022), so its files travel as the phases read
-          # them.
-          find data/ -type f -size +10M ! -name '*.zip' ! -path 'data/raw/*' \
-            -exec sh -c 'for f; do zip -m -j "$f.zip" "$f"; done' sh {} +
-
       - name: Commit exports_canonical.zip if changed
         if: success()
         run: |
@@ -166,6 +159,14 @@ jobs:
           ZIP="data/exports/exports_canonical.zip"
           if [ ! -f "$ZIP" ]; then
             echo "::warning::$ZIP was not generated; nothing to commit."
+            exit 0
+          fi
+          # Spec 029: never publish an archive made with another key, by a
+          # local run, or over the size limit. A refusal is a warning: the
+          # archive from HEAD is put back and the run stays green.
+          python -m src.scripts.check_publishable_archive data/exports/exports_canonical.zip --ref HEAD --warn-only
+          if [ ! -f "$ZIP" ]; then
+            echo "::warning::$ZIP was refused and is not in HEAD; nothing to commit."
             exit 0
           fi
           git add -- "$ZIP"
@@ -178,6 +179,17 @@ jobs:
           git commit -m "chore(exports_canonical.zip): update from weekly run $(date -u +%Y-%m-%d)"
           git push origin "HEAD:${{ github.ref_name }}"
 
+      # Spec 029: the artifact is public, so it is built as an allow-list. The
+      # database, raw downloads and Lattes cache go in one encrypted bundle;
+      # next to it only text files that pass a scan. Never fails the run; with
+      # no usable key the bundle is simply absent and the next run rebuilds.
+      - name: Prepare artifact
+        if: always()
+        continue-on-error: true
+        env:
+          HORIZON_STATE_KEY: ${{ secrets.HORIZON_STATE_KEY }}
+        run: make seal-weekly
+
       - name: Upload ETL artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -187,15 +199,7 @@ jobs:
           # a database to restore after about twelve failed weeklies in a row.
           retention-days: 90
           if-no-files-found: ignore
-          path: |
-            data
-            db/horizon.db
-            cache
-            !data/exports/exports_canonical.zip
-            !.venv
-            !.venv/**
-            !.env
-            !.env.*
+          path: artifact_out
 
       - name: Show Prefect logs on failure
         if: failure()

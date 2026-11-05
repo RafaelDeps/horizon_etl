@@ -584,3 +584,37 @@ def test_retired_id_that_reappears_is_current_again(db_a):
     _assign(db_a)
     assert "fellowship:pibiti:700" in _current(db_a)
     assert "fellowship:pibiti:700" not in _aliases(db_a)
+
+
+# --- Spec 029: a suffixed id is never the permanent id of a merged entity ---
+
+
+def _merge_case(survivor_id, loser_candidates):
+    from src.core.logic.horizon_id_assigner import _apply_merges
+    from src.core.logic.horizon_identity import IdDecision
+
+    decision = IdDecision("article", 1, survivor_id, "title_year_type_venue")
+    merge = {
+        "entity_type": "article",
+        "winner_entity_id": 1,
+        "loser_candidate_ids": loser_candidates,
+    }
+    _apply_merges([decision], [merge])
+    return decision.horizon_id
+
+
+def test_merge_never_picks_a_suffixed_id_when_a_bare_candidate_exists():
+    # "B~c" sorts before "M" and would win the alphabetical tie-break.
+    assert (
+        _merge_case("article:h:M~a1b2c3", ["article:h:B~c", "article:h:M"])
+        == "article:h:M"
+    )
+
+
+def test_merge_without_a_bare_candidate_keeps_the_existing_behaviour():
+    assert _merge_case("article:h:M~a1b2c3", ["article:h:B~c"]) == "article:h:B~c"
+
+
+def test_merge_with_bare_ids_is_unchanged():
+    assert _merge_case("article:h:M", ["article:h:B"]) == "article:h:B"
+    assert _merge_case("article:h:B", ["article:h:M"]) == "article:h:B"

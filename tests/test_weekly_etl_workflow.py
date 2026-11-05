@@ -64,14 +64,12 @@ def test_the_previous_run_is_restored_before_the_weekly_flows():
 
 
 def test_the_artifact_carries_what_the_next_run_restores():
+    # Spec 022 asked for data, db and cache in the upload; spec 029 moved them
+    # into the sealed bundle that "Prepare artifact" stages in artifact_out.
     _workflow, steps = _steps()
     upload = _step(steps, "Upload ETL artifacts")["with"]
-    paths = upload["path"].split()
-    assert {"data", "db/horizon.db", "cache"} <= set(paths)
-    assert "!data/exports/exports_canonical.zip" in paths
+    assert upload["path"].strip() == "artifact_out"
     assert upload["retention-days"] == 90
-    compress = _step(steps, "Compress large export files")["run"]
-    assert "! -path 'data/raw/*'" in compress
 
 
 def test_the_raw_download_rotation_can_be_tuned_on_dispatch():
@@ -158,3 +156,92 @@ def test_makefile_forwards_the_second_try_settings_only_when_set():
     assert 'HORIZON_LATTES_RETRY_PAUSE_MIN="1"' in forwarded
     plain = dry_run()
     assert "HORIZON_LATTES_RETRY" not in plain
+
+
+# --- Spec 029: the artifact is an allow-list and the state travels sealed ---
+
+
+def test_large_exports_are_no_longer_compressed_into_the_artifact():
+    _, steps = _steps()
+    assert "Compress large export files" not in [s.get("name") for s in steps]
+
+
+def test_prepare_artifact_seals_the_state_with_the_state_key():
+    _, steps = _steps()
+    names = [s.get("name") for s in steps]
+    step = _step(steps, "Prepare artifact")
+    assert step["if"] == "always()"
+    assert step["continue-on-error"] is True
+    assert step["run"] == "make seal-weekly"
+    assert step["env"]["HORIZON_STATE_KEY"] == "${{ secrets.HORIZON_STATE_KEY }}"
+    assert names.index("Prepare artifact") > names.index("Run weekly flows")
+    assert names.index("Prepare artifact") < names.index("Upload ETL artifacts")
+
+
+def test_the_state_key_reaches_only_restore_and_seal():
+    workflow, steps = _steps()
+    assert "HORIZON_STATE_KEY" not in str(workflow["jobs"]["run-etl"].get("env", {}))
+    assert "HORIZON_STATE_KEY" not in str(workflow.get("env", {}))
+    holders = {s.get("name") for s in steps if "HORIZON_STATE_KEY" in str(s)}
+    assert holders == {"Restore previous weekly run", "Prepare artifact"}
+    restore_env = _step(steps, "Restore previous weekly run")["env"]
+    assert restore_env["HORIZON_STATE_KEY"] == "${{ secrets.HORIZON_STATE_KEY }}"
+    assert (
+        restore_env["HORIZON_STATE_KEY_PREVIOUS"]
+        == "${{ secrets.HORIZON_STATE_KEY_PREVIOUS }}"
+    )
+    # The key is never an argument or echoed.
+    for step in steps:
+        assert "HORIZON_STATE_KEY" not in str(step.get("run", ""))
+
+
+def test_upload_takes_the_staged_folder_only():
+    _, steps = _steps()
+    step = _step(steps, "Upload ETL artifacts")
+    assert step["if"] == "always()"
+    assert step["with"]["name"] == "weekly-etl-artifacts"
+    assert step["with"]["path"].strip() == "artifact_out"
+
+
+def test_the_weekly_workflow_has_no_pull_request_trigger():
+    workflow, _ = _steps()
+    triggers = workflow.get("on", workflow.get(True))
+    assert "pull_request" not in triggers
+    assert "pull_request_target" not in triggers
+
+
+def test_required_secrets_do_not_include_the_state_key():
+    _, steps = _steps()
+    validate = _step(steps, "Validate required secrets")["run"]
+    assert "HORIZON_STATE_KEY" not in validate
+
+
+# --- Spec 029: one official key; the archive gate in the weekly and in CI ---
+
+ARCHIVE_CHECK = "python -m src.scripts.check_publishable_archive"
+
+
+def test_the_weekly_checks_the_archive_before_committing_it():
+    _, steps = _steps()
+    run = _step(steps, "Commit exports_canonical.zip if changed")["run"]
+    command = (
+        f"{ARCHIVE_CHECK} data/exports/exports_canonical.zip --ref HEAD --warn-only"
+    )
+    assert command in run
+    assert run.index(command) < run.index("git add")
+
+
+def test_ci_refuses_a_changed_archive_that_fails_the_check():
+    import yaml
+
+    ci = yaml.safe_load(Path(".github/workflows/ci.yml").read_text())
+    steps = ci["jobs"]["test"]["steps"]
+    check = next(s for s in steps if ARCHIVE_CHECK in s.get("run", ""))
+    run = check["run"]
+    assert "--warn-only" not in run
+    assert "git diff --name-only" in run
+    assert "data/exports/exports_canonical.zip" in run
+    assert "--ref" in run
+    # CI never holds a key.
+    assert "HORIZON_STATE_KEY" not in str(ci)
+    assert "HORIZON_PII_HMAC_KEY" not in str(ci)

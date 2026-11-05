@@ -464,6 +464,8 @@ def merge_candidates(entity_type: str, row: dict) -> list:
         return person_decision(row).candidates
     if entity_type == "team":
         return team_decision(row, []).candidates
+    if entity_type == "article":
+        return article_decision(row).candidates
     return reference_decision(entity_type, row).candidates
 
 

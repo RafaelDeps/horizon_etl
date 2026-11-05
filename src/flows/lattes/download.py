@@ -1,3 +1,4 @@
+import contextlib
 import os
 import re
 import shutil
@@ -873,8 +874,12 @@ def run_script_lattes_real(config_path: str):
 
         patch_script_lattes_runtime()
         logger.info(f"Starting real scriptLattes execution with config: {config_path}")
-        # Run with somente_json=True since we are an ETL pipeline
-        executar_scriptLattes(config_path, somente_json=True)
+        # Run with somente_json=True since we are an ETL pipeline.
+        # Spec 029: the library prints curriculum lines (phones, documents)
+        # on stdout and the public run log keeps them; drop them. stderr and
+        # the loguru messages are not touched.
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            executar_scriptLattes(config_path, somente_json=True)
         logger.info("Real scriptLattes execution finished.")
     except ImportError:
         logger.error("scriptLattes library not found. Please install it.")

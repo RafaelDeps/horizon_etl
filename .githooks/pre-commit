@@ -19,6 +19,17 @@ if [ -n "$blocked" ]; then
   exit 1
 fi
 
+# Spec 029: the export archive must carry the official manifest, stay under the
+# size limit and keep the anonymization key of the archive at HEAD. CI is the
+# real guard (this hook runs only where core.hooksPath points here).
+archive="data/exports/exports_canonical.zip"
+if printf '%s\n' "$staged_paths" | grep -qx "$archive"; then
+  if ! python3 -m src.scripts.check_publishable_archive "$archive" --ref HEAD; then
+    printf '%s\n' "Commit bloqueado: o arquivo ${archive} nao pode ser publicado."
+    exit 1
+  fi
+fi
+
 large_exports=""
 for path in $staged_paths; do
   case "$path" in

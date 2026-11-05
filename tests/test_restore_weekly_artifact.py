@@ -372,6 +372,7 @@ def test_summary_of_a_restored_run(tmp_path, artifact_dir, fake_gh, monkeypatch)
         "source_run",
         "restored",
         "checked_at",
+        "format",  # spec 029
     }
 
 
@@ -403,3 +404,176 @@ def test_log_lines():
     assert restore.log_line(restore.Outcome("rebuilt", "artifact expired")) == (
         "restore: rebuilt — artifact expired"
     )
+
+
+# --------------------------------------------------------------------------
+# Spec 029: the encrypted state bundle
+# --------------------------------------------------------------------------
+
+import base64  # noqa: E402
+
+from src.core.logic.pii_anonymizer import key_fingerprint  # noqa: E402
+from src.scripts.weekly_state_bundle import seal_bundle  # noqa: E402
+
+STATE_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
+OLD_STATE_KEY = base64.urlsafe_b64encode(bytes(range(1, 33))).decode()
+
+
+def _stamp(path, value):
+    con = sqlite3.connect(path)
+    con.execute("DROP TABLE horizon_meta")
+    con.execute("CREATE TABLE horizon_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    if value is not None:
+        con.execute(
+            "INSERT INTO horizon_meta VALUES ('pii_key_fingerprint', ?)", (value,)
+        )
+    con.commit()
+    con.close()
+
+
+def _download(tmp_path, artifact_dir, key=STATE_KEY, name="download"):
+    """What the artifact download holds: the bundle and public text only."""
+    folder = tmp_path / name
+    folder.mkdir()
+    seal_bundle(str(artifact_dir), str(folder / "weekly_state.bundle"), key)
+    _write(str(folder / "public" / "data" / "reports" / "r.json"), b"{}")
+    return folder
+
+
+@pytest.fixture
+def state_key(monkeypatch):
+    monkeypatch.setenv("HORIZON_STATE_KEY", STATE_KEY)
+    monkeypatch.delenv("HORIZON_STATE_KEY_PREVIOUS", raising=False)
+
+
+def test_bundle_restores_the_three_items(tmp_path, artifact_dir, state_key):
+    folder = _download(tmp_path, artifact_dir)
+    target = _target(tmp_path)
+
+    _run(["--from-dir", str(folder), "--target", str(target)])
+
+    outcome = _outcome(target)
+    assert outcome["outcome"] == "restored" and outcome["format"] == "bundle"
+    assert _sha(target / "db" / "horizon.db") == _sha(
+        artifact_dir / "db" / "horizon.db"
+    )
+    assert (target / "cache" / "lattes" / "1234567890123456.html").exists()
+    assert not (target / "weekly_state.bundle").exists()
+
+
+def test_legacy_layout_still_restores(tmp_path, artifact_dir):
+    target = _target(tmp_path)
+
+    _run(["--from-dir", str(artifact_dir), "--target", str(target)])
+
+    outcome = _outcome(target)
+    assert outcome["outcome"] == "restored" and outcome["format"] == "legacy"
+
+
+@pytest.mark.parametrize("damage", ["flip", "truncate"])
+def test_tampered_bundle_is_rebuilt_and_places_nothing(
+    tmp_path, artifact_dir, state_key, damage
+):
+    folder = _download(tmp_path, artifact_dir)
+    bundle = folder / "weekly_state.bundle"
+    raw = bytearray(bundle.read_bytes())
+    if damage == "flip":
+        raw[len(raw) // 2] ^= 0x01
+    else:
+        raw = raw[:-30]
+    bundle.write_bytes(bytes(raw))
+    target = _target(tmp_path)
+
+    _run(["--from-dir", str(folder), "--target", str(target)])
+
+    outcome = _rebuilt(target, "state bundle: failed authentication")
+    assert outcome["format"] is None
+    assert not (target / "db" / "horizon.db").exists()
+    assert (target / "data" / "raw" / "stale.txt").exists()  # nothing placed
+    assert not (target / "cache").exists()
+
+
+def test_bundle_without_a_key_is_rebuilt(tmp_path, artifact_dir, monkeypatch):
+    folder = _download(tmp_path, artifact_dir)
+    monkeypatch.delenv("HORIZON_STATE_KEY", raising=False)
+    monkeypatch.delenv("HORIZON_STATE_KEY_PREVIOUS", raising=False)
+    target = _target(tmp_path)
+
+    _run(["--from-dir", str(folder), "--target", str(target)])
+
+    _rebuilt(target, "state bundle: no key")
+
+
+def test_bundle_with_an_unsafe_member_is_rebuilt(
+    tmp_path, artifact_dir, state_key, monkeypatch
+):
+    import io
+    import tarfile
+
+    from src.scripts import weekly_state_bundle as wsb
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        info = tarfile.TarInfo("../escape")
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"x"))
+    folder = tmp_path / "download"
+    folder.mkdir()
+    (folder / "weekly_state.bundle").write_bytes(
+        wsb._encrypt_payload(buffer.getvalue(), wsb.parse_key(STATE_KEY))
+    )
+    target = _target(tmp_path)
+
+    _run(["--from-dir", str(folder), "--target", str(target)])
+
+    _rebuilt(target, "state bundle: unsafe member")
+    assert not (tmp_path / "escape").exists()
+
+
+def test_database_with_another_key_is_not_placed_but_raw_and_cache_are(
+    tmp_path, artifact_dir, state_key
+):
+    _stamp(str(artifact_dir / "db" / "horizon.db"), "0" * 16)
+    assert key_fingerprint() != "0" * 16
+    folder = _download(tmp_path, artifact_dir)
+    target = _target(tmp_path)
+
+    _run(["--from-dir", str(folder), "--target", str(target)])
+
+    outcome = _rebuilt(target, "database built with another key")
+    assert outcome["format"] == "bundle"
+    assert not (target / "db" / "horizon.db").exists()
+    assert (target / "cache" / "lattes" / "1234567890123456.html").exists()
+    assert (target / "data" / "raw" / "sigpesq" / "research_group" / "r.xlsx").exists()
+
+
+def test_database_with_the_same_key_stamp_is_placed(tmp_path, artifact_dir, state_key):
+    _stamp(str(artifact_dir / "db" / "horizon.db"), key_fingerprint())
+    folder = _download(tmp_path, artifact_dir)
+    target = _target(tmp_path)
+
+    _run(["--from-dir", str(folder), "--target", str(target)])
+
+    assert _outcome(target)["outcome"] == "restored"
+
+
+def test_unstamped_database_is_accepted(tmp_path, artifact_dir, state_key):
+    _stamp(str(artifact_dir / "db" / "horizon.db"), None)
+    folder = _download(tmp_path, artifact_dir)
+    target = _target(tmp_path)
+
+    _run(["--from-dir", str(folder), "--target", str(target)])
+
+    assert _outcome(target)["outcome"] == "restored"
+
+
+def test_previous_key_is_tried_second(tmp_path, artifact_dir, monkeypatch):
+    folder = _download(tmp_path, artifact_dir, key=OLD_STATE_KEY)
+    monkeypatch.setenv("HORIZON_STATE_KEY", STATE_KEY)
+    monkeypatch.setenv("HORIZON_STATE_KEY_PREVIOUS", OLD_STATE_KEY)
+    target = _target(tmp_path)
+
+    _run(["--from-dir", str(folder), "--target", str(target)])
+
+    outcome = _outcome(target)
+    assert outcome["outcome"] == "restored" and outcome["format"] == "bundle"

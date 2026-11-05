@@ -236,3 +236,37 @@ def test_bounded_baixa_cv_lattes_skips_connection_resets(tmp_path, monkeypatch):
         baixa_lattes.baixaCVLattes("9583314331960942", str(tmp_path))
 
     assert len(attempts) == 3
+
+
+def test_script_lattes_prints_stay_out_of_the_run_log(monkeypatch, capsys):
+    """Spec 029: scriptLattes prints curriculum lines (phones, documents) on
+    stdout, which the public run log keeps. They are dropped; the loguru
+    summary stays."""
+    import sys
+    import types
+
+    from loguru import logger
+
+    from src.flows.lattes.download import run_script_lattes_real
+
+    def fake_run(config_path, somente_json=False):
+        print("Telefone: (00) 00000-0000 CPF 000.000.000-00")
+
+    package = types.ModuleType("scriptLattes")
+    run_module = types.ModuleType("scriptLattes.run")
+    run_module.executar_scriptLattes = fake_run
+    package.run = run_module
+    monkeypatch.setitem(sys.modules, "scriptLattes", package)
+    monkeypatch.setitem(sys.modules, "scriptLattes.run", run_module)
+    monkeypatch.setattr(
+        "src.flows.lattes.download.patch_script_lattes_runtime", lambda: None
+    )
+    messages = []
+    sink_id = logger.add(lambda message: messages.append(str(message)))
+    try:
+        run_script_lattes_real.fn("config.cfg")
+    finally:
+        logger.remove(sink_id)
+
+    assert "00000-0000" not in capsys.readouterr().out
+    assert any("scriptLattes execution finished" in m for m in messages)

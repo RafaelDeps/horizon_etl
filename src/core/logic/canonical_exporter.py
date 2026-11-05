@@ -19,7 +19,11 @@ from src.core.logic.advisorship_canonical_values import (
     resolve_advisorship_canonical_values,
 )
 from src.core.logic.export_campus_resolver import ExportCampusResolver
-from src.core.logic.pii_anonymizer import scrub_pii_deep, scrub_source_record_payload
+from src.core.logic.pii_anonymizer import (
+    keyed_export_hash,
+    scrub_pii_deep,
+    scrub_source_record_payload,
+)
 from src.core.ports.export_sink import IExportSink
 from src.research_domain_compat import AdvisorshipRole
 from src.tracking.entities import (
@@ -867,7 +871,12 @@ class CanonicalDataExporter:
                     "selection_reason": record.get("selection_reason"),
                     "asserted_at": record.get("asserted_at"),
                     "value": record.get("value_json"),
-                    "value_hash": record.get("value_hash"),
+                    # Published hashes carry a key (spec 029); stored ones stay.
+                    "value_hash": (
+                        keyed_export_hash(record["value_hash"])
+                        if record.get("value_hash")
+                        else None
+                    ),
                 }
 
             for row in session.execute(
@@ -949,6 +958,9 @@ class CanonicalDataExporter:
                     "campus", self._resolve_record_campus(item, entity_type)
                 )
             item = scrub_pii_deep(item)
+            for hash_field in ("payload_hash", "value_hash"):
+                if item.get(hash_field):
+                    item[hash_field] = keyed_export_hash(item[hash_field])
             if entity_type == "source_record":
                 payload = item.get("raw_payload_json")
                 if payload is not None:
@@ -1858,6 +1870,9 @@ class CanonicalDataExporter:
                 }
             )
 
+        # Free text (descriptions, enrichment, partner names) can carry e-mails
+        # and phones typed by people; scrub every field before writing.
+        serialized_data = scrub_pii_deep(serialized_data)
         logger.info(f"Exporting {len(serialized_data)} enriched Initiatives...")
         self.sink.export(serialized_data, output_path)
         logger.info(f"Successfully exported enriched Initiatives to {output_path}")
@@ -2284,6 +2299,7 @@ class CanonicalDataExporter:
                 }
             )
 
+        final_data = scrub_pii_deep(final_data)
         logger.info(
             f"Filtered export: {len(final_data)} parent projects with advisorships (excluded {len(projects_map) - len([p for p in projects_map.values() if p.get('advisorships')])} projects without advisorships)"
         )

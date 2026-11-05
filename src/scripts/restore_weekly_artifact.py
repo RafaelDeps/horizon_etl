@@ -43,6 +43,9 @@ DATABASE = os.path.join("db", "horizon.db")
 FOLDERS = (os.path.join("data", "raw"), "cache")
 OUTCOME_FILE = os.path.join("data", "reports", "restore_outcome.json")
 REQUIRED_TABLES = ("persons", "horizon_meta")
+BUNDLE = "weekly_state.bundle"
+STATE_KEY_ENV = "HORIZON_STATE_KEY"
+STATE_KEY_PREVIOUS_ENV = "HORIZON_STATE_KEY_PREVIOUS"
 
 RESTORED = "restored"
 REBUILT = "rebuilt"
@@ -64,6 +67,8 @@ class Outcome:
     restored: dict = field(
         default_factory=lambda: {"db_bytes": 0, "data_raw_bytes": 0, "cache_bytes": 0}
     )
+    # "bundle" (spec 029), "legacy" (plain folders), None when nothing was placed.
+    format: Optional[str] = None
     checked_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
@@ -207,6 +212,29 @@ def check_database(path: str) -> None:
     missing = [t for t in REQUIRED_TABLES if t not in tables]
     if missing:
         raise RestoreError(f"database check failed: no table {', '.join(missing)}")
+    _check_key_stamp(path)
+
+
+def _check_key_stamp(path: str) -> None:
+    """Spec 029: a database stamped by another anonymization key must not be
+    mixed with this run's tokens. An unstamped one is accepted (the backfill
+    stamps it); without a key here the check cannot run."""
+    from src.core.logic.pii_anonymizer import key_fingerprint
+
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            row = con.execute(
+                "SELECT value FROM horizon_meta WHERE key = 'pii_key_fingerprint'"
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            return
+        if row[0] != key_fingerprint():
+            raise RestoreError("database built with another key")
+    except (sqlite3.Error, RuntimeError):
+        return
 
 
 def _size(path: str) -> int:
@@ -228,7 +256,9 @@ def _replace(source: str, destination: str) -> None:
     shutil.move(source, destination)
 
 
-def place(source_root: str, target: str, run: Optional[dict]) -> Outcome:
+def place(
+    source_root: str, target: str, run: Optional[dict], format: Optional[str] = None
+) -> Outcome:
     """Moves the restored items into the target (contract "Behaviour" 3-5).
     ``data/raw`` and ``cache/`` are placed even when the database is not: a
     bad database does not make the raw downloads wrong."""
@@ -253,8 +283,8 @@ def place(source_root: str, target: str, run: Optional[dict]) -> Outcome:
                 os.remove(destination + suffix)
         sizes["db_bytes"] = _size(os.path.join(source_root, DATABASE))
         _replace(os.path.join(source_root, DATABASE), destination)
-        return Outcome(RESTORED, None, run, sizes)
-    return Outcome(REBUILT, database_error, run, sizes)
+        return Outcome(RESTORED, None, run, sizes, format=format)
+    return Outcome(REBUILT, database_error, run, sizes, format=format)
 
 
 # ----------------------------------------------------------------------------
@@ -330,6 +360,25 @@ def report(
 # ----------------------------------------------------------------------------
 
 
+def _open_state_bundle(work: str) -> None:
+    """Spec 029: the state travels in one encrypted bundle. It is opened into
+    the work folder, where ``place`` finds the three items as before. Any
+    failure ends as a rebuild with its reason, and nothing is placed."""
+    from src.scripts.weekly_state_bundle import open_bundle
+
+    keys = [os.environ.get(STATE_KEY_ENV), os.environ.get(STATE_KEY_PREVIOUS_ENV)]
+    bundle = os.path.join(work, BUNDLE)
+    try:
+        open_bundle(bundle, work, keys)
+    except RestoreError:
+        raise
+    except Exception as exc:  # cryptography, tarfile or memory errors
+        raise RestoreError(f"state bundle: {type(exc).__name__}")
+    finally:
+        if os.path.exists(bundle):
+            os.remove(bundle)
+
+
 def restore(args: argparse.Namespace) -> Outcome:
     target = os.path.abspath(args.target)
     if args.disabled:
@@ -350,8 +399,12 @@ def restore(args: argparse.Namespace) -> Outcome:
         else:
             # A copy: the simulation's artifact folder must stay as it was.
             shutil.copytree(args.from_dir, work, dirs_exist_ok=True)
+        placed_format = "legacy"
+        if os.path.isfile(os.path.join(work, BUNDLE)):
+            placed_format = "bundle"
+            _open_state_bundle(work)
         try:
-            return place(work, target, run)
+            return place(work, target, run, format=placed_format)
         except OSError as exc:
             raise RestoreError(f"restore failed: {exc}")
     except RestoreError as exc:

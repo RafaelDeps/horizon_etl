@@ -68,6 +68,9 @@ def _apply_merges(layer: List[IdDecision], merges: List[dict]) -> int:
         if d is None:
             continue
         pool = [c for c in merge["loser_candidate_ids"] if c not in used]
+        # Spec 029: an id with a collision suffix ("~...") is never chosen over
+        # a bare candidate; without a bare one the choice is as it was.
+        pool = [c for c in pool if "~" not in c] or pool
         best = min(pool + [d.horizon_id], key=id_priority)
         if best == d.horizon_id:
             continue

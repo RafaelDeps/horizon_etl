@@ -139,7 +139,8 @@ def test_absent_categories_are_noop(tmp_path):
     zip_exports_task.fn(str(tmp_path))
 
     with zipfile.ZipFile(tmp_path / "exports_canonical.zip") as zf:
-        assert zf.namelist() == ["initiatives_canonical.json"]
+        # Spec 029: the manifest is always the last member.
+        assert zf.namelist() == ["initiatives_canonical.json", "export_manifest.json"]
 
 
 def test_skip_list_is_explicit():

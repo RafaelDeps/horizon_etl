@@ -36,6 +36,7 @@ from src.core.logic.horizon_identity import (
     lattes_article_key,
     lattes_education_key,
     lattes_id_from_cv_path,
+    normalize_doi,
 )
 from src.core.logic.initiative_identity import normalize_text
 from src.core.logic.pii_anonymizer import scrub_pii_deep
@@ -456,6 +457,46 @@ def _fill_missing_article_fields(session, paper_id, art, source_record_id) -> No
     )
 
 
+def _find_article(session, title, year, doi) -> Optional[int]:
+    """Id of the stored article that is this work, or None (spec 029, D4).
+
+    A DOI that matches after ``normalize_doi`` (case, doi.org prefix) is the
+    same article whatever the title. Otherwise the same ``normalize_text``
+    title in the same year, unless both records carry a DOI and the DOIs differ.
+    Blank titles never match. The lowest id wins. Column-only SQL, as the
+    lookups it replaces (no ORM joins)."""
+    wanted = normalize_doi(doi)
+    if wanted:
+        pattern = "%" + wanted.replace("\\", "\\\\").replace("%", "\\%").replace(
+            "_", "\\_"
+        )
+        rows = session.execute(
+            text(
+                "SELECT id, doi FROM articles "
+                "WHERE lower(doi) LIKE :pattern ESCAPE '\\' ORDER BY id"
+            ),
+            {"pattern": pattern},
+        ).fetchall()
+        for row in rows:
+            if normalize_doi(row[1]) == wanted:
+                return row[0]
+    name = normalize_text(title)
+    if not name:
+        return None
+    rows = session.execute(
+        text("SELECT id, title, doi FROM articles WHERE year = :y ORDER BY id"),
+        {"y": year},
+    ).fetchall()
+    for row in rows:
+        if normalize_text(row[1]) != name:
+            continue
+        other = normalize_doi(row[2])
+        if wanted and other and other != wanted:
+            continue
+        return row[0]
+    return None
+
+
 def ingest_articles_task(
     articles: List[Dict],
     target_researcher: Researcher,
@@ -482,26 +523,13 @@ def ingest_articles_task(
                 source_path=source_file,
             )
 
-            # Column-only lookups. The Article.authors relationship is
-            # lazy="joined" and Researcher carries several more lazy="joined"
-            # relationships, so an ORM query collapses into a combinatorial
-            # LEFT OUTER JOIN that crashes native psycopg2/libpq with SIGSEGV
-            # on PostgreSQL (see export_canonical for the same root cause).
-            # Fetch only the row id so the author graph is never materialized.
-            paper_id = None
-            if doi:
-                paper_id = session.execute(
-                    text("SELECT id FROM articles WHERE doi = :doi LIMIT 1"),
-                    {"doi": doi},
-                ).scalar()
-            if paper_id is None:
-                paper_id = session.execute(
-                    text(
-                        "SELECT id FROM articles "
-                        "WHERE title = :t AND year = :y LIMIT 1"
-                    ),
-                    {"t": title, "y": year},
-                ).scalar()
+            # Column-only lookups (see _find_article): the Article.authors
+            # relationship is lazy="joined" and Researcher carries several more
+            # lazy="joined" relationships, so an ORM query collapses into a
+            # combinatorial LEFT OUTER JOIN that crashes native psycopg2/libpq
+            # with SIGSEGV on PostgreSQL (see export_canonical for the same
+            # root cause). Only the row id is fetched.
+            paper_id = _find_article(session, title, year, doi)
 
             if paper_id is None:
                 paper = article_ctrl.create_article(

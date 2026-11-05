@@ -384,3 +384,22 @@ def test_collision_suffix_does_not_depend_on_the_lattes_list_position():
 
     assert pair(219, 220) == pair(1, 435)
     assert pair(219, 220)[0] != pair(219, 220)[1]
+
+
+def test_merge_candidates_of_an_article_are_its_decision_candidates():
+    """Spec 029: a merged article's old content id must stay resolvable."""
+    from src.core.logic.horizon_identity import article_decision, merge_candidates
+
+    row = {
+        "id": 3,
+        "title": "Some Work",
+        "year": 2020,
+        "type": "journal",
+        "journal_conference": "A Journal",
+        "doi": "10.1000/x",
+    }
+
+    candidates = merge_candidates("article", row)
+
+    assert candidates == article_decision(row).candidates
+    assert any(c.startswith("article:h:") for c in candidates)

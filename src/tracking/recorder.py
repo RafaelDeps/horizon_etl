@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 from sqlalchemy.exc import IntegrityError
 
 from src.core.logic.horizon_identity import canonical
-from src.core.logic.pii_anonymizer import scrub_source_record_payload
+from src.core.logic.pii_anonymizer import scrub_pii_deep, scrub_source_record_payload
 from src.tracking.context import current_ingestion_run_id, current_source_system
 from src.tracking.controllers import (
     AttributeAssertionController,
@@ -251,6 +251,9 @@ class TrackingRecorder:
             return
 
         for attribute_name, value in selected_attributes.items():
+            # Spec 029: the stored value is scrubbed and the hash follows the
+            # stored value (a clean value keeps the hash it always had).
+            value = scrub_pii_deep(value)
             with self._controller(
                 getattr(
                     self,
@@ -290,6 +293,8 @@ class TrackingRecorder:
         if not run_id:
             return
 
+        before = scrub_pii_deep(before)
+        after = scrub_pii_deep(after)
         with self._controller(
             getattr(
                 self,

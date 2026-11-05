@@ -100,6 +100,11 @@ _PHASES = [
     ("knowledge_areas_mart", ["ka_mart"], 900, False, "app"),
     ("initiatives_analytics_mart", ["analytics_mart"], 900, False, "app"),
     ("people_relationship_graph", ["people_graph"], 1800, False, "app"),
+    # Spec 029: the archive is built from the files the phases above wrote, so
+    # it holds the current marts and graph. Critical, but only run when they
+    # all passed (_ARCHIVE_GATE): a skipped build leaves the checked-out
+    # archive untouched, so nothing is published and the run stays usable.
+    ("zip_exports", ["zip_exports"], 900, True, "app"),
     # --- docentes / OpenAlex analytics (read-only wrt DB; run as modules) ---
     (
         "openalex_citations",
@@ -135,7 +140,29 @@ _PHASES = [
 ]
 
 
+# Spec 029: phases whose failure keeps the archive from being built, besides
+# any earlier critical phase.
+_ARCHIVE_GATE = (
+    "export_canonical",
+    "knowledge_areas_mart",
+    "initiatives_analytics_mart",
+    "people_relationship_graph",
+)
+SKIPPED = "skipped"
+
+
+def _archive_blockers(results) -> list:
+    """Names of the earlier phases that stop the archive from being built."""
+    return [
+        r["name"]
+        for r in results
+        if not r["ok"] and (r["critical"] or r["name"] in _ARCHIVE_GATE)
+    ]
+
+
 def _describe_rc(rc: Optional[int]) -> str:
+    if rc == SKIPPED:
+        return "skipped"
     if rc is None:
         return "timeout"
     if rc < 0:
@@ -161,6 +188,8 @@ def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
             argv.append(output_dir)
             if campus:
                 argv.append(campus)
+        elif argv_tail[0] == "zip_exports":
+            argv.append(output_dir)
     logger.info("▶ phase '{}': {}", name, " ".join(argv[1:]))
     rc = _run_phase_subprocess(argv, timeout, name)
     log = logger.info if rc == 0 else logger.error
@@ -365,6 +394,17 @@ def run_weekly(
     clear_portal_stops()
     results = []
     for name, argv_tail, timeout, _crit, mode in _PHASES:
+        if name == "zip_exports":
+            blockers = _archive_blockers(results)
+            if blockers:
+                # Recorded as a non-critical failure, not run (spec 029).
+                logger.error(
+                    "phase 'zip_exports' skipped: {} failed", ", ".join(blockers)
+                )
+                results.append(
+                    {"name": name, "ok": False, "rc": SKIPPED, "critical": False}
+                )
+                continue
         results.append(_run_phase(name, argv_tail, timeout, campus, output_dir, mode))
 
     # Every phase subprocess has exited, so no connection holds the file: move

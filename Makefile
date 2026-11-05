@@ -27,7 +27,7 @@ PREFECT_SERVER_SERVICE ?= server
 PREFECT_DB_SERVICE ?= database
 
 .PHONY: help setup logs-dir \
-	db-clean db-init db-ensure db-reset db-save-ids restore-weekly \
+	db-clean db-init db-ensure db-reset db-save-ids restore-weekly seal-weekly purge-history-plan purge-history-verify \
 	prefect-server prefect-stop prefect-status \
 	pipeline pipeline-log weekly-flows full-refresh \
 	ingest-sigpesq extract-project-files \
@@ -82,6 +82,22 @@ restore-weekly: ## Restore db/horizon.db, data/raw and cache/ from the last succ
 	else \
 		$(PYTHON) -m src.scripts.restore_weekly_artifact --github; \
 	fi
+
+seal-weekly: ## Seal the weekly state into artifact_out/ (encrypted bundle + clean public text; never fails the run)
+	@$(REPORT_PYTHON) -m src.scripts.weekly_state_bundle seal --out artifact_out
+
+# Spec 029: history purge tooling. Only the read-only modes have a target; the
+# rewrite is run by hand, by the procedure in
+# specs/029-pii-safe-exports/contracts/history-purge.md.
+PY ?= $(HOME)/.local/share/uv/tools/git-filter-repo/bin/python
+
+purge-history-plan: ## List refs and the personal data found in a mirror clone (REPO=/path/mirror.git); writes nothing
+	@test -n "$(REPO)" || { echo "REPO=/path/mirror.git is required"; exit 2; }
+	@$(PY) src/scripts/purge_history_pii.py plan --repo "$(REPO)"
+
+purge-history-verify: ## Check that a mirror clone's branches and tags hold no personal data (REPO=/path/mirror.git)
+	@test -n "$(REPO)" || { echo "REPO=/path/mirror.git is required"; exit 2; }
+	@$(PY) src/scripts/purge_history_pii.py verify --repo "$(REPO)"
 
 # --- Prefect Server ---
 

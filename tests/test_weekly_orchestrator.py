@@ -344,3 +344,131 @@ def test_a_time_budget_line():
 def test_no_report_means_no_extra_line():
     rc, sent = _run_with_telegram(_fake_run_factory())
     assert rc == 0 and "⚠️" not in sent[0]
+
+
+# --- Spec 029: the archive is its own critical phase, gated on earlier ones ---
+
+
+def _run_weekly_with(fail=(), timeout=(), seen=None):
+    """Runs the weekly with these phase commands failing (exit 1) or timing out."""
+
+    def fake(argv, timeout=None):
+        cmd = argv[2]
+        if seen is not None:
+            seen.append(cmd)
+        if cmd in timeout_cmds:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return MagicMock(returncode=1 if cmd in fail else 0)
+
+    timeout_cmds = set(timeout)
+    with (
+        patch("src.notifications.telegram.send_telegram_message", return_value=True),
+        patch.object(wo.subprocess, "run", side_effect=fake),
+    ):
+        return wo.run_weekly()
+
+
+def test_zip_exports_phase_follows_the_graph_and_is_critical():
+    names = [p[0] for p in wo._PHASES]
+    assert names.index("zip_exports") == names.index("people_relationship_graph") + 1
+    entry = next(p for p in wo._PHASES if p[0] == "zip_exports")
+    assert entry[1] == ["zip_exports"]
+    assert entry[2] == 900
+    assert entry[3] is True
+    assert entry[4] == "app"
+
+
+def test_zip_exports_receives_the_output_folder():
+    captured = []
+
+    def fake(argv, timeout=None):
+        captured.append(argv)
+        return MagicMock(returncode=0)
+
+    with (
+        patch("src.notifications.telegram.send_telegram_message", return_value=True),
+        patch.object(wo.subprocess, "run", side_effect=fake),
+    ):
+        assert wo.run_weekly(output_dir="somewhere") == 0
+
+    zip_call = next(a for a in captured if a[2] == "zip_exports")
+    assert zip_call[-1] == "somewhere"
+
+
+def test_zip_exports_runs_when_everything_before_it_passed():
+    seen = []
+    assert _run_weekly_with(seen=seen) == 0
+    assert "zip_exports" in seen
+
+
+@pytest.mark.parametrize(
+    "failing",
+    ["knowledge_areas_mart", "initiatives_analytics_mart", "people_relationship_graph"],
+)
+def test_a_failed_mart_or_graph_skips_the_archive_but_the_run_stays_green(failing):
+    command = {
+        "knowledge_areas_mart": "ka_mart",
+        "initiatives_analytics_mart": "analytics_mart",
+        "people_relationship_graph": "people_graph",
+    }[failing]
+    seen = []
+
+    rc = _run_weekly_with(fail=[command], seen=seen)
+
+    assert rc == 0
+    assert "zip_exports" not in seen
+    assert "anonymize_backfill" in seen  # later phases still run
+
+
+def test_a_failed_export_canonical_skips_the_archive_and_fails_the_run():
+    seen = []
+
+    rc = _run_weekly_with(fail=["export_canonical"], seen=seen)
+
+    assert rc == 1
+    assert "zip_exports" not in seen
+
+
+def test_an_earlier_critical_failure_skips_the_archive():
+    seen = []
+
+    rc = _run_weekly_with(timeout=["sigpesq"], seen=seen)
+
+    assert rc == 1
+    assert "zip_exports" not in seen
+
+
+def test_a_failed_archive_fails_the_run():
+    assert _run_weekly_with(fail=["zip_exports"]) == 1
+
+
+def test_a_noncritical_failure_after_the_archive_leaves_exit_zero():
+    seen = []
+
+    rc = _run_weekly_with(fail=["src.scripts.analyze_venues"], seen=seen)
+
+    assert rc == 0
+    assert "zip_exports" in seen
+
+
+def test_a_portal_early_stop_does_not_block_the_archive():
+    seen = []
+    stop = {"lattes": {"reason": "failures_in_a_row", "counts": {}}}
+    with patch.object(wo, "read_portal_stops", return_value=stop):
+        rc = _run_weekly_with(seen=seen)
+
+    assert rc == 0
+    assert "zip_exports" in seen
+
+
+def test_the_skipped_archive_is_reported_as_skipped():
+    from loguru import logger
+
+    messages = []
+    sink = logger.add(lambda m: messages.append(str(m)))
+    try:
+        _run_weekly_with(fail=["ka_mart"])
+    finally:
+        logger.remove(sink)
+
+    assert any("zip_exports" in m and "skipped" in m for m in messages)

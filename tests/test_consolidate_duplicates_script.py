@@ -61,3 +61,84 @@ def test_build_report_and_execute_for_references(tmp_path: Path):
     assert report["knowledge_area_duplicate_groups"] == 1
     assert result["teams_merged"] == 1
     assert result["knowledge_areas_merged"] == 1
+
+
+# --- Spec 029: the weekly consolidation also merges duplicate articles ---
+
+
+class _FakePersonConsolidator:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def find_all_groups(self):
+        return []
+
+    def build_report(self, groups=None):
+        return {"refused_groups": 0}
+
+    def consolidate_all(self):
+        return 0
+
+
+def _articles_db(tmp_path: Path) -> str:
+    path = tmp_path / "weekly.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE articles (
+            id INTEGER PRIMARY KEY, title TEXT NOT NULL, doi TEXT, year INTEGER NOT NULL,
+            type TEXT NOT NULL, journal_conference TEXT, volume TEXT, pages TEXT);
+        INSERT INTO articles (id, title, year, type) VALUES
+            (1, 'Same Work', 2020, 'journal'), (2, 'same work', 2020, 'journal'),
+            (3, 'Another Work', 2020, 'journal');
+        """
+    )
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def test_weekly_consolidation_merges_duplicate_articles_and_writes_the_report(
+    tmp_path: Path, monkeypatch
+):
+    from src.scripts import consolidate_duplicates
+
+    monkeypatch.setattr(
+        consolidate_duplicates, "PersonConsolidator", _FakePersonConsolidator
+    )
+    db = _articles_db(tmp_path)
+    reports = tmp_path / "reports"
+
+    result = consolidate_duplicates.run_person_dedup(db, str(reports))
+
+    conn = sqlite3.connect(db)
+    assert [r[0] for r in conn.execute("SELECT id FROM articles ORDER BY id")] == [1, 3]
+    conn.close()
+    assert result["articles"]["rows_merged"] == 1
+    assert (reports / "article_consolidation_report.json").exists()
+    assert (reports / "dedup_report.json").exists()
+
+
+def test_a_failing_article_consolidation_does_not_crash_the_weekly_phase(
+    tmp_path: Path, monkeypatch
+):
+    from src.core.logic.reference_consolidator import ReferenceConsolidator
+    from src.scripts import consolidate_duplicates
+
+    monkeypatch.setattr(
+        consolidate_duplicates, "PersonConsolidator", _FakePersonConsolidator
+    )
+
+    def boom(self, *args, **kwargs):
+        raise sqlite3.OperationalError("boom")
+
+    monkeypatch.setattr(ReferenceConsolidator, "consolidate_articles", boom)
+    reports = tmp_path / "reports"
+
+    result = consolidate_duplicates.run_person_dedup(
+        _articles_db(tmp_path), str(reports)
+    )
+
+    assert result["records_merged"] == 0
+    assert "error" in result["articles"]
+    assert (reports / "dedup_report.json").exists()

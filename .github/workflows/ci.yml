@@ -46,6 +46,27 @@ jobs:
         fi
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
         
+    # Spec 029: a pushed or proposed export archive must carry the official
+    # manifest, stay under the size limit and keep the anonymization key of the
+    # archive it replaces. CI holds no key; the check reads the manifest only.
+    - name: Check the export archive
+      run: |
+        if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+        else
+          BASE_SHA="${{ github.event.before }}"
+        fi
+
+        if ! git rev-parse --verify "$BASE_SHA" >/dev/null 2>&1 || echo "$BASE_SHA" | grep -Eq '^0+$'; then
+          BASE_SHA="HEAD~1"
+        fi
+
+        if [ -n "$(git diff --name-only "$BASE_SHA"...HEAD -- data/exports/exports_canonical.zip)" ]; then
+          python -m src.scripts.check_publishable_archive data/exports/exports_canonical.zip --ref "$BASE_SHA"
+        else
+          echo "The export archive did not change; nothing to check."
+        fi
+
     - name: Run Tests
       run: |
         python -m pytest tests/test_team_management.py

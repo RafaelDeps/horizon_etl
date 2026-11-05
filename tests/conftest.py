@@ -51,6 +51,14 @@ def _no_rule_version_reset(monkeypatch, tmp_path_factory):
         "PORTAL_STOPS_PATH",
         str(tmp_path_factory.mktemp("stops") / "portal_stops.json"),
     )
+    # Spec 029: the archive build's scan report goes to the test's own folder.
+    import src.flows.exports.canonical_data as canonical_data
+
+    monkeypatch.setattr(
+        canonical_data,
+        "SCAN_REPORT_PATH",
+        str(tmp_path_factory.mktemp("scan") / "export_scan_report.json"),
+    )
     # Spec 025: the spec 023 and spec 024 tests describe the Lattes download
     # without the second try for access check pages (research R7); the tests
     # of spec 025 turn it on themselves.
