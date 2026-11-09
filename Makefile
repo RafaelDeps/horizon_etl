@@ -156,11 +156,20 @@ PORTAL_STOP_ENV = $(if $(EARLY_STOP),HORIZON_PORTAL_EARLY_STOP="$(EARLY_STOP)") 
 	$(if $(LATTES_RETRY_WORKERS),HORIZON_LATTES_RETRY_WORKERS="$(LATTES_RETRY_WORKERS)") \
 	$(if $(LATTES_RETRY_PAUSE_MIN),HORIZON_LATTES_RETRY_PAUSE_MIN="$(LATTES_RETRY_PAUSE_MIN)")
 
-weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; REFRESH_SHARE=0.25 / FULL_REFRESH=1 tune the raw download rotation; EARLY_STOP=0 / CNPQ_STOP_AFTER / CNPQ_BUDGET_MIN / LATTES_STOP_AFTER tune the portal early stop; LATTES_RETRY_WORKERS / LATTES_RETRY_PAUSE_MIN tune the second try of access check pages)
+# Spec 031: paced retry of the project PDFs refused by the Mistral rate limit
+# (blank = 3 retries, 2 s between calls, first wait 30 s doubling, 20 min of
+# waits per run; EXTRACT_RETRIES=0 turns the retry off).
+EXTRACT_ENV = $(if $(EXTRACT_RETRIES),HORIZON_EXTRACT_RETRIES="$(EXTRACT_RETRIES)") \
+	$(if $(EXTRACT_PAUSE_S),HORIZON_EXTRACT_PAUSE_S="$(EXTRACT_PAUSE_S)") \
+	$(if $(EXTRACT_FIRST_WAIT_S),HORIZON_EXTRACT_FIRST_WAIT_S="$(EXTRACT_FIRST_WAIT_S)") \
+	$(if $(EXTRACT_WAIT_BUDGET_MIN),HORIZON_EXTRACT_WAIT_BUDGET_MIN="$(EXTRACT_WAIT_BUDGET_MIN)")
+
+weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; REFRESH_SHARE=0.25 / FULL_REFRESH=1 tune the raw download rotation; EARLY_STOP=0 / CNPQ_STOP_AFTER / CNPQ_BUDGET_MIN / LATTES_STOP_AFTER tune the portal early stop; LATTES_RETRY_WORKERS / LATTES_RETRY_PAUSE_MIN tune the second try of access check pages; EXTRACT_RETRIES / EXTRACT_PAUSE_S / EXTRACT_FIRST_WAIT_S / EXTRACT_WAIT_BUDGET_MIN tune the retry of project PDFs refused by the Mistral rate limit)
 	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" \
 		$(if $(REFRESH_SHARE),HORIZON_REFRESH_SHARE="$(REFRESH_SHARE)") \
 		$(if $(FULL_REFRESH),HORIZON_FULL_REFRESH="$(FULL_REFRESH)") \
 		$(PORTAL_STOP_ENV) \
+		$(EXTRACT_ENV) \
 		$(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
 
 # --- Ingestion ---
@@ -175,8 +184,8 @@ ingest-sigpesq: prefect-server ## Ingest all SigPesq reports (groups, projects, 
 # pulam o que já existe, então uma nova execução só paga pelo que falta.
 # Exige MISTRAL_KEY no .env.
 # Use PROJECT_FILES_LIMIT=5 para um teste barato.
-extract-project-files: prefect-server ## Baixa os PDFs dos projetos e extrai PJ_*.json via Mistral (sob demanda)
-	@$(FLOW_PYTHON) app.py extract_project_files "$(PROJECT_FILES_LIMIT)"
+extract-project-files: prefect-server ## Baixa os PDFs dos projetos e extrai PJ_*.json via Mistral (sob demanda; EXTRACT_RETRIES / EXTRACT_PAUSE_S / EXTRACT_FIRST_WAIT_S / EXTRACT_WAIT_BUDGET_MIN)
+	@$(EXTRACT_ENV) $(FLOW_PYTHON) app.py extract_project_files "$(PROJECT_FILES_LIMIT)"
 
 ingest-lattes-download: prefect-server ## Download Lattes curricula via scriptLattes (EARLY_STOP / LATTES_STOP_AFTER / LATTES_RETRY_WORKERS / LATTES_RETRY_PAUSE_MIN)
 	@$(PORTAL_STOP_ENV) $(FLOW_PYTHON) -m src.flows.lattes.download

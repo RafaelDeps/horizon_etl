@@ -21,6 +21,7 @@ import json
 import os
 import time
 import zipfile
+from typing import Callable, Optional
 
 from loguru import logger
 
@@ -28,6 +29,14 @@ from src.adapters.sources.sigpesq.adapter import (
     _SIGPESQ_429_WAIT_SECONDS,
     _SIGPESQ_MAX_RETRIES,
     SigPesqAdapter,
+)
+from src.core.logic.extraction_pacing import (
+    ExtractionPacingSettings,
+    WaitBudget,
+    backoff_s,
+    extraction_pacing_settings,
+    is_rate_limit,
+    retry_after_s,
 )
 
 DEFAULT_PDF_ROOT = "data/raw/sigpesq_project_files"
@@ -126,7 +135,15 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
         return stats
 
     # ------------------------------------------------------------------ stage 2
-    def extract_json(self, force: bool = False, limit=None) -> dict:
+    def extract_json(
+        self,
+        force: bool = False,
+        limit=None,
+        *,
+        settings: Optional[ExtractionPacingSettings] = None,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> dict:
         """Extracts each PDF into ``PJ_<code>.json``, skipping existing ones.
 
         Skipping is what keeps this affordable: only documents without a JSON
@@ -135,6 +152,11 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
         corpus): an archived copy is restored locally instead of re-extracting.
         ``force=True`` re-extracts everything, bypassing both the local skip
         and the archive reuse.
+
+        Spec 031: the calls are paced, and a document refused by the service's
+        rate limit (HTTP 429) is tried again after a growing wait, within a
+        wait budget for the whole stage (``settings``, read from the
+        environment when ``None``). ``sleep`` and ``clock`` are test seams.
         """
         pdfs = sorted(glob.glob(os.path.join(self.pdf_dir, "*.pdf")))
         if limit is not None:
@@ -142,11 +164,21 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
 
         stats = {
             "pdfs": len(pdfs),
-            "extracted": 0,
-            "skipped": 0,
+            "present": 0,
+            "skipped": 0,  # same as "present", kept for older readers
             "reused": 0,
+            "to_extract": 0,
+            "extracted": 0,
+            "recovered": 0,
+            "retried": 0,
+            "retries": 0,
+            "failed_rate_limit": 0,
+            "failed_other": 0,
             "errors": 0,
+            "left": 0,
+            "waited_s": 0.0,
         }
+        self.pacing_settings = None
         if not pdfs:
             logger.warning("No PDFs in {} — run the download stage first", self.pdf_dir)
             return stats
@@ -161,11 +193,11 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
                 )
             )
         ]
-        stats["skipped"] = len(pdfs) - len(pending)
+        stats["present"] = stats["skipped"] = len(pdfs) - len(pending)
         logger.info(
-            "{} PDFs | {} already extracted (skipped) | {} to extract",
+            "{} PDFs | {} already present | {} pending",
             len(pdfs),
-            stats["skipped"],
+            stats["present"],
             len(pending),
         )
         if not pending:
@@ -184,6 +216,12 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
                 finally:
                     archive.close()
 
+        stats["to_extract"] = len(still_pending)
+        logger.info(
+            "{} restored from the archive | {} to extract",
+            stats["reused"],
+            len(still_pending),
+        )
         if not still_pending:
             logger.info("Extraction finished: {}", stats)
             return stats
@@ -192,34 +230,92 @@ class SigPesqProjectFilesAdapter(SigPesqAdapter):
         # optional [extract] dependencies, and it raises without MISTRAL_KEY. A
         # machine with neither can still run this phase as a no-op.
         extractor = self._build_extractor()
+        settings = settings or extraction_pacing_settings()
+        self.pacing_settings = settings
 
-        for index, pdf in enumerate(still_pending, 1):
-            stem = os.path.splitext(os.path.basename(pdf))[0]
-            out_path = os.path.join(self.json_dir, f"{stem}.json")
-            try:
-                projeto = extractor.extract_project(pdf)
-            except Exception as exc:  # one bad PDF must not sink the batch
-                logger.warning(
-                    "[{}/{}] {} FAILED: {}", index, len(still_pending), stem, exc
-                )
-                stats["errors"] += 1
-                continue
-            data = projeto.model_dump(by_alias=True)
-            with open(out_path, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2)
-            stats["extracted"] += 1
-            missing = (data.get("_meta") or {}).get("campos_ausentes") or []
-            logger.info(
-                "[{}/{}] {} -> {}{}",
-                index,
-                len(still_pending),
-                stem,
-                os.path.basename(out_path),
-                f" (campos ausentes: {', '.join(missing)})" if missing else "",
-            )
-
+        self._extract_paced(extractor, still_pending, stats, settings, sleep, clock)
+        stats["errors"] = stats["failed_rate_limit"] + stats["failed_other"]
         logger.info("Extraction finished: {}", stats)
         return stats
+
+    def _extract_paced(self, extractor, queue, stats, settings, sleep, clock) -> None:
+        """Spec 031 (contracts A2-A7): one document after the other, spaced by
+        ``pause_s``; a rate limit refusal waits and tries again, other failures
+        do not; once the wait budget is spent the rest is left for next run."""
+        budget = WaitBudget(settings.wait_budget_s)
+        last_end = None
+        total = len(queue)
+        for index, pdf in enumerate(queue, 1):
+            stem = os.path.splitext(os.path.basename(pdf))[0]
+            tries = 0
+            while True:
+                if tries == 0 and last_end is not None and settings.pause_s > 0:
+                    gap = settings.pause_s - (clock() - last_end)
+                    if gap > 0:
+                        sleep(gap)
+                tries += 1
+                try:
+                    projeto = extractor.extract_project(pdf)
+                except Exception as exc:  # one bad PDF must not sink the batch
+                    last_end = clock()
+                    if not is_rate_limit(exc):
+                        logger.warning("[{}/{}] {} FAILED: {}", index, total, stem, exc)
+                        stats["failed_other"] += 1
+                        break
+                    if tries > settings.retries:
+                        logger.warning("[{}/{}] {} FAILED: {}", index, total, stem, exc)
+                        stats["failed_rate_limit"] += 1
+                        break
+                    wait = backoff_s(tries, settings, retry_after_s(exc))
+                    if not budget.allows(wait):
+                        logger.warning("[{}/{}] {} FAILED: {}", index, total, stem, exc)
+                        stats["failed_rate_limit"] += 1
+                        stats["left"] = total - index
+                        logger.warning(
+                            "Wait budget of {:g} min used up; {} PDF(s) left for "
+                            "the next run",
+                            settings.wait_budget_s / 60,
+                            stats["left"],
+                        )
+                        return
+                    if tries == 1:
+                        stats["retried"] += 1
+                    stats["retries"] += 1
+                    logger.warning(
+                        "[{}/{}] {} rate limited (try {}/{}); waiting {:g} s",
+                        index,
+                        total,
+                        stem,
+                        tries,
+                        settings.retries + 1,
+                        wait,
+                    )
+                    budget.spend(wait)
+                    stats["waited_s"] += wait
+                    sleep(wait)
+                    continue
+                last_end = clock()
+                self._write_document(projeto, stem, index, total, tries, stats)
+                break
+
+    def _write_document(self, projeto, stem, index, total, tries, stats) -> None:
+        out_path = os.path.join(self.json_dir, f"{stem}.json")
+        data = projeto.model_dump(by_alias=True)
+        with open(out_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+        stats["extracted"] += 1
+        if tries > 1:
+            stats["recovered"] += 1
+        missing = (data.get("_meta") or {}).get("campos_ausentes") or []
+        logger.info(
+            "[{}/{}] {} -> {}{}{}",
+            index,
+            total,
+            stem,
+            os.path.basename(out_path),
+            f" (after {tries} tries)" if tries > 1 else "",
+            f" (campos ausentes: {', '.join(missing)})" if missing else "",
+        )
 
     # --------------------------------------------------- archive reuse helpers
     def _open_previous_archive(self):

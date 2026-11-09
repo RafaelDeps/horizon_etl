@@ -41,6 +41,7 @@ from src.adapters.database.sqlite_settings import finalize_sqlite_database
 from src.flows.portal_stops import (
     clear_portal_stops,
     read_access_check_retries,
+    read_extractions,
     read_portal_stops,
 )
 
@@ -306,12 +307,47 @@ def _access_check_retry_lines(retries: dict, portuguese: bool = False) -> list:
     return lines
 
 
+def _extraction_lines(extractions: dict, portuguese: bool = False) -> list:
+    """One line per extraction stage that had documents to extract in this
+    weekly (spec 031)."""
+    lines = []
+    for source, entry in sorted(extractions.items()):
+        try:
+            to_extract = entry.get("to_extract", 0)
+            if not to_extract:
+                continue
+            extracted = entry.get("extracted", 0)
+            recovered = entry.get("recovered", 0)
+            rate_limit = entry.get("failed_rate_limit", 0)
+            other = entry.get("failed_other", 0)
+            left = entry.get("left", 0)
+            waited = f"{(entry.get('waited_s') or 0) / 60:.1f} min"
+            if portuguese:
+                lines.append(
+                    f"✎ {source}: {to_extract} para extrair; {extracted} extraídos "
+                    f"({recovered} após nova tentativa), {rate_limit + other} "
+                    f"falharam ({rate_limit} limite, {other} outros), {left} para "
+                    f"a próxima; espera {waited}"
+                )
+            else:
+                lines.append(
+                    f"✎ {source}: {to_extract} to extract; {extracted} extracted "
+                    f"({recovered} after a retry), {rate_limit + other} failed "
+                    f"({rate_limit} rate limit, {other} other), {left} left; "
+                    f"waited {waited}"
+                )
+        except Exception as exc:  # a report problem never changes the run
+            logger.warning("Extraction entry of {} not shown: {}", source, exc)
+    return lines
+
+
 def _notify(
     results,
     crit_failed,
     finalize: Optional[dict] = None,
     stops: Optional[dict] = None,
     retries: Optional[dict] = None,
+    extractions: Optional[dict] = None,
 ):
     from src.notifications.telegram import send_telegram_message
 
@@ -330,6 +366,7 @@ def _notify(
         lines.append(f"⚠️ SQLite finalize falhou: {finalize.get('reason')}")
     stop_lines = _portal_stop_lines(stops or {}, portuguese=True)
     stop_lines += _access_check_retry_lines(retries or {}, portuguese=True)
+    stop_lines += _extraction_lines(extractions or {}, portuguese=True)
     if stop_lines:
         lines.append("")
         lines.extend(stop_lines)
@@ -427,9 +464,19 @@ def run_weekly(
     retries = read_access_check_retries()
     for line in _access_check_retry_lines(retries):
         logger.info("  {}", line)
+    extractions = read_extractions()
+    for line in _extraction_lines(extractions):
+        logger.info("  {}", line)
 
     try:
-        _notify(results, crit_failed, finalize=finalize, stops=stops, retries=retries)
+        _notify(
+            results,
+            crit_failed,
+            finalize=finalize,
+            stops=stops,
+            retries=retries,
+            extractions=extractions,
+        )
     except Exception as exc:  # notification must never change the run outcome
         logger.warning("Telegram summary failed: {}", exc)
 

@@ -472,3 +472,53 @@ def test_the_skipped_archive_is_reported_as_skipped():
         logger.remove(sink)
 
     assert any("zip_exports" in m and "skipped" in m for m in messages)
+
+
+EXTRACTION = {
+    "to_extract": 25,
+    "extracted": 24,
+    "recovered": 23,
+    "failed_rate_limit": 1,
+    "failed_other": 0,
+    "left": 0,
+    "waited_s": 372.0,
+}
+
+
+def test_an_extraction_shows_in_the_summary_and_keeps_the_exit_code():
+    # Spec 031: one line for the project PDF extraction, in the log and Telegram.
+    import src.flows.portal_stops as portal_stops
+
+    def fake(cmd, **kwargs):
+        if "extract_project_files" in cmd:
+            portal_stops.record_extraction("sigpesq_project_files", EXTRACTION)
+        return _fake_run_factory()(cmd, **kwargs)
+
+    lines = []
+    from loguru import logger
+
+    sink = logger.add(lambda m: lines.append(m.record["message"]), level="INFO")
+    try:
+        rc, sent = _run_with_telegram(fake)
+    finally:
+        logger.remove(sink)
+    assert rc == 0
+    expected = (
+        "✎ sigpesq_project_files: 25 to extract; 24 extracted (23 after a retry), "
+        "1 failed (1 rate limit, 0 other), 0 left; waited 6.2 min"
+    )
+    assert any(expected in line for line in lines)
+    assert (
+        "✎ sigpesq_project_files: 25 para extrair; 24 extraídos (23 após nova "
+        "tentativa), 1 falharam (1 limite, 0 outros), 0 para a próxima; "
+        "espera 6.2 min"
+    ) in sent[0]
+
+
+def test_an_extraction_with_nothing_to_extract_shows_no_line():
+    assert wo._extraction_lines({"x": dict(EXTRACTION, to_extract=0)}) == []
+    assert wo._extraction_lines({}) == []
+
+
+def test_a_broken_extraction_entry_is_skipped():
+    assert wo._extraction_lines({"x": "not a dict"}) == []

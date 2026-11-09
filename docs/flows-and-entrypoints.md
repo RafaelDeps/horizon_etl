@@ -370,6 +370,58 @@ advisorship is renamed to the disambiguated title a rebuild gives it, and a
 
 The rule version is 2. A database kept from version 1 is rebuilt once.
 
+## Project PDF extraction and the Mistral rate limit (spec 031)
+
+Phase `extract_project_files` turns each SigPesq project PDF into
+`data/exports/project_sigpesq_files_json/PJ_<code>.json`, the documents that
+`enrich_projects` reads. A PDF with no JSON is first restored from the
+previous `exports_canonical.zip` (feature 013), at no cost. Only the rest call
+Mistral, which is paid per document and refuses calls that come too fast
+(HTTP 429).
+
+- **Pacing**: the calls are spaced by a pause (2 s by default), measured from
+  the end of the previous call.
+- **Retry**: a document refused by the rate limit is sent again after a wait
+  that doubles on each try (30, 60, 120 s), or after the `Retry-After` the
+  service sends, when longer. The wait is capped at 5 min, and a document gets
+  at most 3 retries.
+- **Other failures**: an unreadable PDF, an invalid result or another HTTP
+  error are not retried. They are logged and counted, and the batch goes on.
+- **Wait budget**: the retry waits of one run may add up to 20 min. Once it
+  is used up, the stage stops sending documents. The rest count as `left`,
+  and the next run tries them again.
+- **Never fails the run**: a document that still fails writes no JSON and is
+  tried again in the next weekly, as before.
+
+The log opens with `<pdfs> PDFs | <present> already present | <pending>
+pending`. After the archive pass it says `<reused> restored from the archive
+| <to_extract> to extract`, and it ends with `Extraction finished: {…}`. That
+last line holds every count: `present`, `reused`, `extracted`, `recovered`
+(extracted after a retry), `retried`, `failed_rate_limit`, `failed_other`,
+`left` and `waited_s`.
+
+The counts also go to `data/reports/portal_stops.json` under `extractions`.
+When something had to be extracted, the weekly summary and its Telegram
+message add one line:
+
+```
+✎ sigpesq_project_files: 25 to extract; 24 extracted (23 after a retry), 1 failed (1 rate limit, 0 other), 0 left; waited 6.2 min
+```
+
+**Tuning**: a blank value means the default; an invalid value is logged and
+replaced by the default.
+
+| Variable | Make | Dispatch input | Default |
+|---|---|---|---|
+| `HORIZON_EXTRACT_RETRIES` (`0` = no retry) | `EXTRACT_RETRIES` | `extract_retries` | 3 |
+| `HORIZON_EXTRACT_PAUSE_S` (`0` = no pause) | `EXTRACT_PAUSE_S` | `extract_pause_s` | 2 |
+| `HORIZON_EXTRACT_FIRST_WAIT_S` | `EXTRACT_FIRST_WAIT_S` | `extract_first_wait_s` | 30 |
+| `HORIZON_EXTRACT_WAIT_BUDGET_MIN` (`0` = stop at the first refusal) | `EXTRACT_WAIT_BUDGET_MIN` | `extract_wait_budget_min` | 20 |
+
+The Make variables work for `weekly-flows` and `extract-project-files`. With
+`EXTRACT_RETRIES=0` and `EXTRACT_PAUSE_S=0`, the stage calls Mistral exactly as
+before spec 031.
+
 ## SQLite connection settings (spec 018)
 
 `libbase` commits after every record it adds, so a Lattes phase issues

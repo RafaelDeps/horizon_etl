@@ -245,3 +245,30 @@ def test_ci_refuses_a_changed_archive_that_fails_the_check():
     # CI never holds a key.
     assert "HORIZON_STATE_KEY" not in str(ci)
     assert "HORIZON_PII_HMAC_KEY" not in str(ci)
+
+
+def test_the_extraction_retry_can_be_tuned_on_dispatch():
+    # Spec 031: four blank inputs reach the weekly as environment; blank means
+    # the defaults, so scheduled runs use them.
+    workflow, steps = _steps()
+    trigger = workflow.get("on") or workflow.get(True)
+    inputs = trigger["workflow_dispatch"]["inputs"]
+    env = _step(steps, "Run weekly flows")["env"]
+    for name, var in [
+        ("extract_retries", "HORIZON_EXTRACT_RETRIES"),
+        ("extract_pause_s", "HORIZON_EXTRACT_PAUSE_S"),
+        ("extract_first_wait_s", "HORIZON_EXTRACT_FIRST_WAIT_S"),
+        ("extract_wait_budget_min", "HORIZON_EXTRACT_WAIT_BUDGET_MIN"),
+    ]:
+        assert inputs[name]["type"] == "string"
+        assert inputs[name]["default"] == ""
+        assert env[var] == "${{ github.event.inputs.%s }}" % name
+    # GitHub accepts at most 25 dispatch inputs.
+    assert len(inputs) <= 25
+
+
+def test_the_makefile_passes_the_extraction_settings_only_when_set():
+    makefile = Path("Makefile").read_text()
+    assert "EXTRACT_ENV = $(if $(EXTRACT_RETRIES)," in makefile
+    assert "$(EXTRACT_ENV) \\\n\t\t$(FLOW_PYTHON) app.py weekly" in makefile
+    assert "@$(EXTRACT_ENV) $(FLOW_PYTHON) app.py extract_project_files" in makefile

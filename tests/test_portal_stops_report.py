@@ -7,8 +7,10 @@ from src.core.logic.portal_stop import PortalStop
 from src.flows.portal_stops import (
     clear_portal_stops,
     read_access_check_retries,
+    read_extractions,
     read_portal_stops,
     record_access_check_retry,
+    record_extraction,
     record_portal_stop,
 )
 
@@ -132,3 +134,43 @@ def test_the_retried_ids_stay_out_of_the_stop_entry(tmp_path):
     record_portal_stop("lattes", _stopped("lattes"), counts, path=path)
     entry = read_portal_stops(path)["lattes"]["counts"]
     assert "retried_ids" not in entry and entry["retried"] == 2
+
+
+# Spec 031: the extraction counts of the project PDFs.
+EXTRACTION = {
+    "to_extract": 25,
+    "extracted": 24,
+    "recovered": 23,
+    "failed_rate_limit": 1,
+    "failed_other": 0,
+    "left": 0,
+    "waited_s": 372.0,
+}
+
+
+def test_an_extraction_entry_keeps_the_stops_and_the_retries(tmp_path):
+    path = str(tmp_path / "portal_stops.json")
+    record_portal_stop("cnpq", _stopped("cnpq"), COUNTS, path=path)
+    record_access_check_retry("lattes", RETRY, path=path)
+    record_extraction("sigpesq_project_files", EXTRACTION, path=path)
+    assert read_extractions(path) == {"sigpesq_project_files": EXTRACTION}
+    assert read_access_check_retries(path) == {"lattes": RETRY}
+    assert set(read_portal_stops(path)) == {"cnpq"}
+
+
+def test_extractions_missing_or_unreadable(tmp_path):
+    path = tmp_path / "portal_stops.json"
+    assert read_extractions(str(path)) == {}
+    path.write_text("{broken")
+    assert read_extractions(str(path)) == {}
+
+
+def test_an_extraction_write_error_is_logged_not_raised(tmp_path, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(
+        portal_stops.logger, "warning", lambda *a, **k: warnings.append(a)
+    )
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    record_extraction("x", EXTRACTION, path=str(blocker / "sub" / "x.json"))
+    assert warnings

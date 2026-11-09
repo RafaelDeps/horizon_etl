@@ -9,6 +9,7 @@ when a new batch of projects lands. The weekly pipeline stays a pure consumer:
 Both stages skip what already exists, so a re-run only pays for what is new.
 """
 
+from dataclasses import asdict
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -19,6 +20,7 @@ from src.adapters.sources.sigpesq.project_files import (
     DEFAULT_PDF_ROOT,
     SigPesqProjectFilesAdapter,
 )
+from src.flows.portal_stops import record_extraction
 from src.notifications.telegram import telegram_flow_state_handlers
 
 load_dotenv()
@@ -34,6 +36,14 @@ def extract_project_json_task(
     adapter: SigPesqProjectFilesAdapter, force: bool, limit
 ) -> dict:
     return adapter.extract_json(force=force, limit=limit)
+
+
+def _record_extraction(adapter: SigPesqProjectFilesAdapter, counts) -> None:
+    """Spec 031: the extraction counts go to the weekly summary report."""
+    entry = dict(counts or {})
+    settings = getattr(adapter, "pacing_settings", None)
+    entry["settings"] = asdict(settings) if settings is not None else None
+    record_extraction("sigpesq_project_files", entry)
 
 
 @flow(name="Extract SigPesq Project Files", **telegram_flow_state_handlers())
@@ -65,6 +75,7 @@ def extract_project_files_flow(
         logger.info("Extraction stage skipped by request")
     else:
         stats["extraction"] = extract_project_json_task(adapter, force, limit)
+        _record_extraction(adapter, stats["extraction"])
 
     outcomes = (stats.get("download") or {}).get("outcomes")
     if outcomes:

@@ -4,7 +4,9 @@ Each phase that stops downloading from a portal adds its entry to
 ``data/reports/portal_stops.json``; the weekly orchestrator clears the file
 before the first phase and reads it for its summary. Spec 025 adds the
 ``retries`` key: the second try of the Lattes access check pages, written
-only when it ran. A report, never an input: no phase reads it.
+only when it ran. Spec 031 adds the ``extractions`` key: the counts of the
+project PDF extraction, written when that stage ran. A report, never an
+input: no phase reads it.
 """
 
 import json
@@ -45,6 +47,11 @@ def read_portal_stops(path: Optional[str] = None) -> dict:
 def read_access_check_retries(path: Optional[str] = None) -> dict:
     """``source -> entry`` of spec 025; ``{}`` when missing or unreadable."""
     return _section(path, "retries")
+
+
+def read_extractions(path: Optional[str] = None) -> dict:
+    """``source -> entry`` of spec 031; ``{}`` when missing or unreadable."""
+    return _section(path, "extractions")
 
 
 def _write_entry(path: Optional[str], key: str, source: str, entry: dict) -> None:
@@ -88,6 +95,17 @@ def record_access_check_retry(
         _write_entry(path, "retries", source, dict(entry))
     except Exception as exc:
         logger.warning("Access check retry report not written: {}", exc)
+
+
+def record_extraction(
+    source: str, entry: Mapping[str, object], path: Optional[str] = None
+) -> None:
+    """Spec 031: adds or replaces ``extractions[source]``, keeping the other
+    keys of the file. Never raises."""
+    try:
+        _write_entry(path, "extractions", source, dict(entry))
+    except Exception as exc:
+        logger.warning("Extraction report not written: {}", exc)
 
 
 def clear_portal_stops(path: Optional[str] = None) -> None:

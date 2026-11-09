@@ -59,6 +59,26 @@ on:
         required: false
         default: ""
         type: string
+      extract_retries:
+        description: "Retries of a project PDF refused by the Mistral rate limit (blank = 3; 0 turns them off)."
+        required: false
+        default: ""
+        type: string
+      extract_pause_s:
+        description: "Seconds between two Mistral extraction calls (blank = 2; 0 = no pause)."
+        required: false
+        default: ""
+        type: string
+      extract_first_wait_s:
+        description: "Seconds before the first retry; doubles on each retry (blank = 30)."
+        required: false
+        default: ""
+        type: string
+      extract_wait_budget_min:
+        description: "Minutes of retry waits allowed per run; the rest waits for next week (blank = 20; 0 = stop at the first refusal)."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -150,6 +170,11 @@ jobs:
           # Spec 025: second try of the Lattes access check pages (defaults when blank).
           HORIZON_LATTES_RETRY_WORKERS: ${{ github.event.inputs.lattes_retry_workers }}
           HORIZON_LATTES_RETRY_PAUSE_MIN: ${{ github.event.inputs.lattes_retry_pause_min }}
+          # Spec 031: paced retry of the project PDFs refused by the Mistral rate limit (defaults when blank).
+          HORIZON_EXTRACT_RETRIES: ${{ github.event.inputs.extract_retries }}
+          HORIZON_EXTRACT_PAUSE_S: ${{ github.event.inputs.extract_pause_s }}
+          HORIZON_EXTRACT_FIRST_WAIT_S: ${{ github.event.inputs.extract_first_wait_s }}
+          HORIZON_EXTRACT_WAIT_BUDGET_MIN: ${{ github.event.inputs.extract_wait_budget_min }}
         run: make weekly-flows
 
       - name: Commit exports_canonical.zip if changed
