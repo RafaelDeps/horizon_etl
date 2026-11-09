@@ -19,7 +19,9 @@ from src.core.logic.initiative_identity import normalize_text
 
 # Bump on any change to a key, hash or id rule (FR-024): a database recorded
 # with another version is rebuilt, and the history turns old ids into aliases.
-HORIZON_RULE_VERSION = 1
+# 2 (branch 030): shared fields come from the claims of every document, so a
+# database written by "the last document wins" is rebuilt once.
+HORIZON_RULE_VERSION = 2
 
 # Similarity (rapidfuzz token_sort_ratio, 0-100) at which two names or titles
 # are the same thing: PersonMatcher's fuzzy threshold, and the "key corrected"

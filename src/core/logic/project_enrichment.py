@@ -11,8 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from rapidfuzz import fuzz, process
 from sqlalchemy import text
 
+from src.core.logic.field_merge import FieldMergeApplier, project_file_source
 from src.core.logic.horizon_identity import canonical
 from src.core.logic.initiative_identity import normalize_text
+from src.core.ports.field_claim_store import FieldClaim
 from src.db.migrations import run_migrations
 from src.tracking.recorder import tracking_recorder
 
@@ -313,10 +315,19 @@ class ProjectEnrichmentLoader:
 
     SOURCE_SYSTEM = "sigpesq_project_files"
 
-    def __init__(self, overwrite: bool = False, dry_run: bool = False):
+    def __init__(
+        self,
+        overwrite: bool = False,
+        dry_run: bool = False,
+        field_merge: Optional[FieldMergeApplier] = None,
+    ):
         self.controller = InitiativeController()
         self.overwrite = overwrite
         self.dry_run = dry_run
+        # Branch 030: the PDF's description is a claim, ranked after the
+        # Lattes CVs and the SigPesq report row of the project. Without it
+        # (or with ``overwrite``) the PDF fills an empty description, as before.
+        self.field_merge = field_merge
 
     @property
     def _session(self):
@@ -591,7 +602,12 @@ class ProjectEnrichmentLoader:
             )
             new_desc = compose_description(cand.pj)
             current = descriptions.get(init_id, "").strip()
-            write_desc = bool(new_desc) and (self.overwrite or not current)
+            merged = (
+                getattr(self, "field_merge", None) is not None and not self.overwrite
+            )
+            write_desc = (
+                False if merged else bool(new_desc) and (self.overwrite or not current)
+            )
 
             if self.dry_run:
                 logger.info(
@@ -605,6 +621,14 @@ class ProjectEnrichmentLoader:
                         init_id, enrichment, new_desc if write_desc else None
                     )
                 )
+                if written and merged:
+                    written = self._write_row(
+                        lambda: self._merge_description(
+                            init_id, code or os.path.basename(cand.path), new_desc
+                        )
+                    )
+                    after = self._stored_description(init_id)
+                    write_desc = bool(new_desc) and after == new_desc != current
                 if not written:
                     stats["errors"] += 1
                     continue
@@ -733,6 +757,12 @@ class ProjectEnrichmentLoader:
 
         if not self._write_row(_do):
             return False
+        if getattr(self, "field_merge", None) is not None and not self.overwrite:
+            self._write_row(
+                lambda: self._merge_description(
+                    new_id_box["id"], code or os.path.basename(cand.path), description
+                )
+            )
 
         self._record_tracking(
             init_id=new_id_box["id"],
@@ -875,6 +905,32 @@ class ProjectEnrichmentLoader:
                 text("UPDATE initiatives SET enrichment_json = :j WHERE id = :id"),
                 {"j": payload, "id": init_id},
             )
+
+    def _merge_description(
+        self, init_id: int, document_key: str, description: Optional[str]
+    ) -> None:
+        doc_date, rank, tie = project_file_source(document_key)
+        claims = [
+            FieldClaim(
+                source_system=self.SOURCE_SYSTEM,
+                document_key=document_key,
+                entity_type="initiative",
+                entity_id=init_id,
+                field="description",
+                value=description,
+                doc_date=doc_date,
+                source_rank=rank,
+                tie_key=tie,
+            )
+        ]
+        touched = self.field_merge.store.replace_document_claims(
+            self.SOURCE_SYSTEM, document_key, claims
+        )
+        self.field_merge.apply(touched)
+
+    def _stored_description(self, init_id: int) -> str:
+        stored = self.field_merge.writer.read("initiative", init_id, ["description"])
+        return (stored.get("description") or "").strip()
 
     def _record_tracking(
         self,

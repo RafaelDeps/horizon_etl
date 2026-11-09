@@ -3,6 +3,7 @@ import os
 from contextlib import ExitStack
 from unittest.mock import patch
 
+from src.core.logic.horizon_identity import HORIZON_RULE_VERSION
 from src.flows.exports.canonical_data import export_canonical_data_flow
 
 
@@ -170,7 +171,7 @@ def test_horizon_ids_file_is_written_stable_and_zipped(tmp_path, monkeypatch):
     assert first == second
 
     aliases = json.loads((out / "horizon_id_aliases_canonical.json").read_text())
-    assert aliases["aliases"] == [] and aliases["rule_version"] == 1
+    assert aliases["aliases"] == [] and aliases["rule_version"] == HORIZON_RULE_VERSION
 
     zip_exports_task.fn(str(out))
     with zipfile.ZipFile(out / "exports_canonical.zip") as zf:

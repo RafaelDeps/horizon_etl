@@ -3,6 +3,7 @@
 import json
 import sqlite3
 
+from src.core.logic.horizon_identity import HORIZON_RULE_VERSION
 from src.flows.maintenance.horizon_ids import assign_horizon_ids_flow
 from tests.test_horizon_id_assigner import _build
 
@@ -38,7 +39,7 @@ def test_flow_assigns_ids_and_writes_the_report(tmp_path, monkeypatch):
     con.close()
     report = json.loads((report_dir / "horizon_ids_report.json").read_text())
     assert report["counts"]["person"] == {"lattes_id": 1, "name": 3}
-    assert report["rule_version"] == 1
+    assert report["rule_version"] == HORIZON_RULE_VERSION
 
 
 def test_a_second_assignment_on_unchanged_data_writes_nothing(tmp_path, monkeypatch):

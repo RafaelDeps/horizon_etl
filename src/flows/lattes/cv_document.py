@@ -4,6 +4,7 @@ import json
 import os
 from typing import List, Optional
 
+from src.core.logic.field_merge import lattes_document_date, lattes_source
 from src.core.logic.horizon_identity import lattes_id_from_cv_path
 from src.core.ports.document_state_store import DocumentFailed
 
@@ -32,6 +33,16 @@ def read_cv(json_file: str) -> dict:
     if json_name and UNIDENTIFIED_NAME in json_name:
         raise DocumentFailed("unidentified", name)
     return data
+
+
+def set_cv_claim_source(doc, data: dict, lattes_id: str) -> None:
+    """Branch 030: the CV's claims carry its last update date and its id;
+    a CV without a readable date counts as undated."""
+    doc_date = lattes_document_date(data)
+    doc.claim_source = lattes_source(doc_date, lattes_id)
+    merge = getattr(doc._skip, "field_merge", None)
+    if doc_date is None and merge is not None:
+        merge.stats.dates_missing += 1
 
 
 LATTES_LIST = os.path.join("data", "lattes_run", "lattes.list")

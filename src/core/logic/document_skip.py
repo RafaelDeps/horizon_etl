@@ -30,6 +30,7 @@ from rapidfuzz import fuzz as rapid_fuzz
 from rapidfuzz import process as rapid_process
 from thefuzz import utils as fuzz_utils
 
+from src.core.logic.field_merge import ClaimSource, FieldMergeApplier
 from src.core.logic.horizon_identity import (
     FUZZY_MATCH_THRESHOLD,
     HORIZON_RULE_VERSION,
@@ -45,6 +46,7 @@ from src.core.ports.document_state_store import (
     IDocumentStateStore,
     Reference,
 )
+from src.core.ports.field_claim_store import FieldClaim, IFieldClaimStore
 from src.tracking.context import current_document, current_ingestion_run_id
 from src.tracking.recorder import stable_hash, tracking_recorder
 
@@ -74,6 +76,10 @@ class Document:
         self.partial_reason: Optional[str] = None
         # Spec 023: when the content being read was downloaded (set by the phase).
         self.downloaded_at: Optional[str] = None
+        # Branch 030: what the document says about the fields several
+        # documents write, and its (date, source rank, tie key).
+        self.claims: List[FieldClaim] = []
+        self.claim_source: Optional[ClaimSource] = None
 
     def unchanged(self, content) -> bool:
         """True when the stored state says this exact content was already
@@ -105,6 +111,32 @@ class Document:
     def carry(self, item_type: str, item_ref, is_subject: bool = False) -> None:
         key = (item_type, str(item_ref))
         self.items[key] = self.items.get(key, False) or is_subject
+
+    def claim(
+        self,
+        entity_type: str,
+        entity_id: int,
+        field: str,
+        value,
+        source: Optional[ClaimSource] = None,
+    ) -> None:
+        source = source or self.claim_source
+        if source is None or entity_id is None:
+            return
+        doc_date, source_rank, tie_key = source
+        self.claims.append(
+            FieldClaim(
+                source_system=self._skip.source_system,
+                document_key=self.key,
+                entity_type=entity_type,
+                entity_id=int(entity_id),
+                field=field,
+                value=value,
+                doc_date=doc_date,
+                source_rank=source_rank,
+                tie_key=tie_key,
+            )
+        )
 
     def mark_partial(self, detail: str = "") -> None:
         """A section or row of the document failed: it must not be committed,
@@ -158,6 +190,9 @@ class DocumentSkip:
         self.listing_complete: Optional[bool] = None
         # Spec 023: download counts of the phase, when it downloads its documents.
         self.downloads: Optional[dict] = None
+        # Branch 030: set by document_phase; None keeps the phase as before.
+        self.claim_store: Optional[IFieldClaimStore] = None
+        self.field_merge: Optional[FieldMergeApplier] = None
 
     @contextmanager
     def document(self, key: str, downloaded_at: Optional[str] = None):
@@ -235,7 +270,23 @@ class DocumentSkip:
             return False
         return True
 
+    def _merge_fields(self, doc: Document) -> None:
+        """Branch 030: stores the document's claims and resolves the fields it
+        claims now or claimed before, from the claims of all documents."""
+        if self.claim_store is None or self.field_merge is None:
+            return
+        touched = self.claim_store.replace_document_claims(
+            self.source_system, doc.key, doc.claims
+        )
+        self.field_merge.apply(touched)
+
     def _commit(self, doc: Document) -> None:
+        try:
+            self._merge_fields(doc)
+        except Exception as exc:
+            logger.exception("Field merge of {} {} failed", self.source_system, doc.key)
+            self._fail(doc, "partial", f"field merge: {type(exc).__name__}: {exc}")
+            return
         outcome = doc.outcome()
         try:
             deletions = self.store.commit_processed(outcome) or []
@@ -449,6 +500,46 @@ def file_download_date(path: Optional[str]) -> Optional[str]:
     if stamp is None:
         return None
     return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def claim(
+    entity_type: str,
+    entity_id,
+    field: str,
+    value,
+    source: Optional[ClaimSource] = None,
+) -> None:
+    """For writers: records the value the current document gives a field
+    that several documents write (branch 030)."""
+    doc = current()
+    if doc is not None:
+        doc.claim(entity_type, entity_id, field, value, source)
+
+
+def note_collision_resolved() -> None:
+    """For the loader: a title collision was resolved (TD-029, FR-013)."""
+    doc = current()
+    merge = getattr(getattr(doc, "_skip", None), "field_merge", None)
+    if merge is not None:
+        merge.stats.collisions_resolved += 1
+
+
+def merging_fields() -> bool:
+    """True when the current document's claims decide the merged fields, so
+    a writer must not set them itself (branch 030)."""
+    doc = current()
+    return bool(
+        doc is not None
+        and doc.claim_source is not None
+        and doc._skip.field_merge is not None
+    )
+
+
+def set_claim_source(source: Optional[ClaimSource]) -> None:
+    """For phases: the (date, source rank, tie key) of the current document."""
+    doc = current()
+    if doc is not None:
+        doc.claim_source = source
 
 
 def mark_partial(detail: str = "") -> None:

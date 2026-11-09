@@ -20,6 +20,7 @@ from research_domain.controllers.controllers import (
 )
 from sqlalchemy import text
 
+from src.core.logic.document_skip import claim, merging_fields
 from src.research_domain_compat import (
     Advisorship,
     AdvisorshipRole,
@@ -70,7 +71,8 @@ class StandardProjectHandler(BaseInitiativeHandler):
             self.initiative_controller.update_initiative(
                 initiative_id=existing_initiative.id,
                 name=title,
-                status=project_data.get("status", "Unknown"),
+                # Branch 030: no status is not "Unknown" over a stored one.
+                status=project_data.get("status"),
                 description=project_data.get("description"),
                 start_date=project_data.get("start_date"),
                 end_date=project_data.get("end_date"),
@@ -179,7 +181,8 @@ class AdvisorshipHandler(BaseInitiativeHandler):
             self.initiative_controller.update_initiative(
                 initiative_id=existing_initiative.id,
                 name=persisted_title,
-                status=project_data.get("status", "Unknown"),
+                # Branch 030: no status is not "Unknown" over a stored one.
+                status=project_data.get("status"),
                 description=project_data.get("description"),
                 start_date=project_data.get("start_date"),
                 end_date=project_data.get("end_date"),
@@ -357,6 +360,10 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         else:
             updated = False
             new_value = fellowship_data.get("value", 0.0)
+            # Branch 030: a shared fellowship gets its value from every
+            # workplan's claim, not from the last workplan read.
+            if merging_fields():
+                new_value = None
             if new_value and fellowship.value != new_value:
                 logger.debug(
                     f"Updating fellowship '{f_name}' value: {fellowship.value} → {new_value}"
@@ -376,6 +383,12 @@ class AdvisorshipHandler(BaseInitiativeHandler):
                     sponsor_id=sponsor_id or fellowship.sponsor_id,
                 )
 
+        claim(
+            "fellowship",
+            getattr(fellowship, "id", None),
+            "value",
+            fellowship_data.get("value"),
+        )
         return fellowship
 
     def _cache_fellowship(

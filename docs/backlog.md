@@ -395,7 +395,11 @@ Mapping Epics -> User Stories -> Tasks status.
   nothing). A fix would merge these values by a rule that does not depend on
   order, as spec 020 did for article fields (`_fill_missing_article_fields`):
   for example the most recent source date, or the value of the highest-priority
-  source. Status: Ready.
+  source. Status: Done (branch 030). Every document records a claim for each
+  shared field in `source_field_claims`, and the winner is picked from all the
+  claims by a fixed rule: most recent CV date first, then Lattes > SigPesq >
+  CNPq, then the lowest Lattes id / highest SigPesq Id
+  (`src/core/logic/field_merge.py`).
 
 - **TD-029 — A Lattes project whose title collides with another initiative's
   name fails its whole CV**: on the 2026-10-29 CI run 40952053776, CV
@@ -406,7 +410,11 @@ Mapping Epics -> User Stories -> Tasks status.
   back, keeps its previous data, and is tried again every run. A fix would
   resolve such a project to the existing initiative of that name (the loader
   already does it for names that differ only in spelling,
-  `_process_row`). Status: Ready.
+  `_process_row`). Status: Done (branch 030). The reproduction on the run's
+  database showed 6 project titles held by advisorships of the same
+  researcher. The project now keeps the title and the advisorship gets the
+  disambiguated title a rebuild gives it ("<title> | Orientacao <student> |
+  <year>").
 
 ## Follow-ups — origin: `specs/024-portal-early-stop` (2026-10-30)
 
@@ -419,3 +427,70 @@ Mapping Epics -> User Stories -> Tasks status.
   nothing, as in run 40966298828. Closing the browser of an attempt in flight
   would need a change in `dgp_cnpq_lib`, which stays unchanged. Status:
   Watch (no occurrence).
+
+## Follow-ups — origin: branch `030-deterministic-field-merge` (2026-11-05)
+
+- **TD-031 — Six tests are out of date with the code**: they failed before
+  branch 028 (spec 025) and still fail on `main`. The program is right in each
+  case; the test expects an old behaviour:
+  - `test_download_lattes_flow.py` ×3: the fake chromedriver uses the old
+    signature, so it fails with `missing 1 required positional argument:
+    '_chromedriver'`;
+  - `test_loader_mapping.py::test_research_group_loader_mapping`: it expects
+    an old research group mapping;
+  - `test_sigpesq_adapter.py::test_sigpesq_adapter_logs_http_429_during_login`:
+    the log message of a 429 changed;
+  - `test_weekly_etl_workflow.py::test_weekly_etl_workflow_runs_weekly_flows_with_notifications`:
+    it expects the cron `"0 6 * * 6"`; the workflow has `"0 2 * * 6"`.
+
+  Fix them in a change of their own, after branch 030. Status: Ready.
+
+- **TD-032 — `lattes_projects` slows down CV after CV on a database without
+  SigPesq data**: on 2026-11-06 the SigPesq login failed (Infisical 401), so
+  the rebuild had no SigPesq groups or researchers, and CNPq had no groups to
+  sync. `lattes_projects` then took 3.9 s for CV 1 and 35.6 s for CV 206, and
+  hit its 3,600 s limit at CV 258 of 435. The rebuild of 2026-11-03, with
+  SigPesq first, took 416 s for 397 CVs. The same 150 CVs on an empty database
+  behave the same with the code of 2026-11-03 (`eeeda3c`), with branch 029
+  alone and with branch 030 (762 s, 786 s and 509 s), so no recent change
+  causes it. It comes from resolving each CV's people against every
+  researcher created so far (`researcher_resolution`, `_score_candidate`).
+  A weekly with the SigPesq data does not show it. Status: Watch.
+
+The replay of branch 030 (2026-11-06) compared the incremental database with
+a rebuild from the same inputs. The four merged fields and `cancelled` agree;
+these differences remain, none of them in a field the merge decides:
+
+- **TD-033 — The enrichment records how a PDF matched, and that changes after
+  the first run**: 37 initiatives created from a project PDF keep
+  `match_strategy = new_from_document` in a rebuild, but `title_exact` in the
+  incremental database, because the next run finds the initiative it created
+  by title. The values of the initiative are the same; only the
+  `enrichment_json` note differs. Keep the first strategy, or leave the note
+  out of the comparison. Status: Ready.
+- **TD-034 — A duplicate fellowship in the incremental database**: two
+  fellowships "JTC" with value 0 exist in the incremental database
+  (`fellowship:jtc:0~e3b0c4` and `~2`), one in the rebuild, and one
+  advisorship points to the copy. Find which run created the second one.
+  Status: Investigate.
+- **TD-035 — `recalculate_parent_projects` only extends a parent's dates**:
+  it moves the start earlier and the end later, never back. A parent keeps a
+  date from an earlier state once a child changes or leaves (parent 288: end
+  2022 incremental, 2021 rebuild). A document that claims the parent's dates
+  also sets them before the recalculation runs again, so the row is written
+  twice in that weekly. Decide with the maintainer which rule sets a parent's
+  dates and status: its sources (the merge) or its children. Status:
+  Decision needed.
+- **TD-036 — Two isolated identity differences**: initiative 289 points to
+  another parent (`initiative:sigpesq-pj:5991` incremental,
+  `initiative:lattes:h:94a88523e758` rebuild), and the advisorship "A dimensão
+  Ambiental na Educação: perspectiva e desafios da sustentabilidade" (2016)
+  has another horizon id (`advisorship:h:fb16cfe336dd` incremental,
+  `advisorship:lattes:h:b2d5d5635c9f` rebuild). Not investigated yet.
+  Status: Investigate.
+- **TD-037 — A replaced student shares the advisorship of the cancelled one**:
+  when a SigPesq workplan changes student, the cancelled row and the new row
+  (e.g. workplan PT 8732, Ids 3961 and 4145) write the same advisorship.
+  Branch 030 makes the result fixed (the highest Id decides `cancelled`), but
+  the two students may deserve two advisorships. Decide with the maintainer.
+  Status: Decision needed.

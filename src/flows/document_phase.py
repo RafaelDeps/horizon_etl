@@ -16,12 +16,28 @@ from loguru import logger
 
 from src.adapters.database.document_state_store import SqliteDocumentStateStore
 from src.adapters.database.document_transaction import DocumentTransaction
+from src.adapters.database.field_claim_store import (
+    SqliteFieldClaimStore,
+    SqliteFieldWriter,
+)
 from src.core.logic.document_skip import DocumentSkip
+from src.core.logic.field_merge import FieldMergeApplier, FieldMergeStats
 from src.core.logic.horizon_identity import HORIZON_RULE_VERSION
 
 
 def _database_url() -> str:
     return os.getenv("DATABASE_URL", "sqlite:///db/horizon.db")
+
+
+def _with_field_merge(skip: DocumentSkip, transaction: DocumentTransaction):
+    """Branch 030: the claims and the resolved values go through the
+    document's transaction, so a failed document keeps both as they were."""
+    store = SqliteFieldClaimStore(lambda: transaction.connection)
+    skip.claim_store = store
+    skip.field_merge = FieldMergeApplier(
+        store, SqliteFieldWriter(lambda: transaction.connection), FieldMergeStats()
+    )
+    return skip
 
 
 @contextmanager
@@ -35,10 +51,11 @@ def document_phase(source_system: str, database_url: Optional[str] = None):
     transaction = DocumentTransaction(url)
     try:
         store = SqliteDocumentStateStore(transaction, HORIZON_RULE_VERSION)
-        skip = DocumentSkip(store, source_system)
+        skip = _with_field_merge(DocumentSkip(store, source_system), transaction)
         logger.info("Document states for {}: {} known", source_system, len(skip.states))
         yield skip
         skip.log_summary()
+        skip.field_merge.stats.log(source_system)
     finally:
         transaction.close()
 
@@ -54,10 +71,14 @@ def document_phases(*source_systems: str, database_url: Optional[str] = None):
     transaction = DocumentTransaction(url)
     try:
         store = SqliteDocumentStateStore(transaction, HORIZON_RULE_VERSION)
-        skips = {s: DocumentSkip(store, s) for s in source_systems}
+        skips = {
+            s: _with_field_merge(DocumentSkip(store, s), transaction)
+            for s in source_systems
+        }
         yield skips
-        for skip in skips.values():
+        for source_system, skip in skips.items():
             skip.log_summary()
+            skip.field_merge.stats.log(source_system)
     finally:
         transaction.close()
 

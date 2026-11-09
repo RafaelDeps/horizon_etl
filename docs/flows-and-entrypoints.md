@@ -328,6 +328,48 @@ and the run finishes from the stored copies above.
   The Make variables work for `weekly-flows`, `sync-cnpq` and
   `ingest-lattes-download`.
 
+## Fields written by several documents (branch 030)
+
+One project can be listed in the CV of each participant, in a SigPesq row and
+in its PDF. One fellowship can be shared by many workplans. Each document now
+records what it says about the shared fields as a claim, in
+`source_field_claims`:
+- for initiatives and advisorships: status, description, start date and end
+  date;
+- for advisorships, also whether it was cancelled (only SigPesq says it; when
+  a workplan changes student, the newest row, the highest Id, decides);
+- for fellowships: the value.
+
+At the end of each document, inside its transaction, the winner of each field
+is picked from the claims of every document. The rule is
+`src/core/logic/field_merge.py`:
+1. an empty value never wins (blank, status `Unknown`, value 0);
+2. the most recent document wins. A Lattes CV is dated by its last update
+   (`informacoes_pessoais.atualizacao_cv`). SigPesq rows and PDFs are undated,
+   so a dated CV beats them;
+3. then the source order Lattes > SigPesq > CNPq;
+4. then a fixed tie: the lowest Lattes id, the highest SigPesq Id, a report row
+   before the PDF of the same project.
+
+The claims of documents that a run does not reprocess stay stored. So an
+incremental run gives the same values as a rebuild (TD-028).
+
+A document resolves only the fields it claims. A project PDF claims only the
+description, so it leaves alone the dates and status that
+`recalculate_parent_projects` derives for a parent project from its children.
+
+Each writing phase logs one line:
+
+```
+field merge lattes_projects: fields=… by_date=… by_source=… by_tiebreak=… collisions_resolved=… collisions_reported=…
+```
+
+A project whose title is the name of an advisorship keeps the title. The
+advisorship is renamed to the disambiguated title a rebuild gives it, and a
+`title collision` warning names both (TD-029).
+
+The rule version is 2. A database kept from version 1 is rebuilt once.
+
 ## SQLite connection settings (spec 018)
 
 `libbase` commits after every record it adds, so a Lattes phase issues

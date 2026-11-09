@@ -38,6 +38,7 @@ SKIP_TABLES = {
     "source_document_states",
     "source_document_items",
     "source_document_references",
+    "source_field_claims",
 }
 REFERENCE_TABLES = {
     "knowledge_areas",

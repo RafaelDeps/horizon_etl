@@ -6,6 +6,7 @@ import sqlite3
 
 from src.adapters.database.horizon_id_store import SqliteHorizonIdStore
 from src.core.logic.horizon_id_assigner import HorizonIdAssigner
+from src.core.logic.horizon_identity import HORIZON_RULE_VERSION
 from src.scripts.save_horizon_id_history import save_history
 from tests.test_horizon_id_assigner import (
     CARLOS_NAME_ID,
@@ -35,7 +36,7 @@ def test_snapshot_has_ids_candidates_aliases_and_merge_log(tmp_path):
     assert save_history(f"sqlite:///{db}", str(snapshot)) is True
 
     data = json.loads(snapshot.read_text())
-    assert data["rule_version"] == 1
+    assert data["rule_version"] == HORIZON_RULE_VERSION
     assert {"entity_type", "horizon_id", "rule", "natural_key"} <= set(data["ids"][0])
     assert data["candidates"] and data["aliases"][0]["reason"] == "merge"
     assert data["merge_log"][0]["winner_horizon_id"] == (

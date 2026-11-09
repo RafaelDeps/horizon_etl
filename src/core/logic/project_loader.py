@@ -1,3 +1,6 @@
+import json
+import re
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -17,7 +20,9 @@ from research_domain.controllers.controllers import (
 from research_domain.domain.entities import Advisorship
 from sqlalchemy import text
 
+from src.core.logic.document_skip import claim, note_collision_resolved
 from src.core.logic.entity_manager import EntityManager
+from src.core.logic.field_merge import MERGED_FIELDS
 from src.core.logic.horizon_identity import (
     canonical,
     initiative_reference_key,
@@ -198,6 +203,9 @@ class ProjectLoader:
     # Spec 021: set by the SigPesq flows, where each report row is one source
     # document. The Lattes flows leave it None: their document is the CV.
     document_skip = None
+    # Branch 030: row -> (date, source rank, tie key) of a report row's claims;
+    # set by the SigPesq flows. The Lattes flows set it on the CV document.
+    claim_source_for_row = None
 
     def _row_document_key(self, row_dict, source_file) -> str:
         project_data = self.mapping_strategy.map_row(row_dict)
@@ -341,6 +349,8 @@ class ProjectLoader:
                     stats["skipped_unchanged"] = stats.get("skipped_unchanged", 0) + 1
                     continue
                 doc.begin()
+                if self.claim_source_for_row is not None:
+                    doc.claim_source = self.claim_source_for_row(row_dict)
                 if not self._process_row_safely(
                     row_dict,
                     existing_by_name,
@@ -665,6 +675,13 @@ class ProjectLoader:
             existing_by_norm_name=existing_by_norm_name,
         )
 
+        # TD-029 (branch 030): a project whose title is held by an advisorship
+        # keeps the plain name, as in a rebuild (projects load first there).
+        if existing is None and model_class is not Advisorship and title:
+            self._free_name_held_by_advisorship(
+                title, existing_by_name, existing_by_norm_name
+            )
+
         # Casou com uma linha cujo nome é o mesmo escrito de outra forma:
         # atualiza o resto, mas NÃO renomeia. Renomear é exatamente o que
         # disparava `UNIQUE constraint failed: initiatives.name` — a linha
@@ -751,6 +768,23 @@ class ProjectLoader:
             canonical_entity_type = (
                 "advisorship" if model_class is Advisorship else "initiative"
             )
+            # Branch 030: the fields several documents write are decided from
+            # every document's claim at the end of the document.
+            for claimed_field in MERGED_FIELDS:
+                claim(
+                    canonical_entity_type,
+                    getattr(initiative, "id", None),
+                    claimed_field,
+                    project_data.get(claimed_field),
+                )
+            if canonical_entity_type == "advisorship" and "cancelled" in project_data:
+                # Only SigPesq workplans say whether an advisorship was cancelled.
+                claim(
+                    "advisorship",
+                    getattr(initiative, "id", None),
+                    "cancelled",
+                    project_data["cancelled"],
+                )
             tracking_recorder.record_entity_match(
                 source_record_id=getattr(source_record, "id", None),
                 canonical_entity_type=canonical_entity_type,
@@ -873,6 +907,92 @@ class ProjectLoader:
                 return candidate
 
         return None
+
+    def _advisorship_title_data(self, session, advisorship_id: int) -> Dict[str, Any]:
+        """The values the advisorship's own loader used for its title: its
+        latest tracked student names and start date, and the workplan Id of a
+        SigPesq advisorship."""
+        data: Dict[str, Any] = {}
+        rows = session.execute(
+            text(
+                "SELECT aa.attribute_name, aa.value_json, sr.source_system, "
+                "sr.raw_payload_json FROM attribute_assertions aa "
+                "JOIN source_records sr ON sr.id = aa.source_record_id "
+                "WHERE aa.canonical_entity_type = 'advisorship' "
+                "AND aa.canonical_entity_id = :id "
+                "AND aa.attribute_name IN ('student_names', 'start_date') "
+                "ORDER BY sr.id DESC"
+            ),
+            {"id": advisorship_id},
+        ).fetchall()
+        for name, value_json, system, payload in rows:
+            if name in data:
+                continue
+            value = (
+                json.loads(value_json) if isinstance(value_json, str) else value_json
+            )
+            if name == "start_date":
+                match = re.match(r"^(\d{4})-(\d{2})-(\d{2})", str(value or ""))
+                value = datetime(*map(int, match.groups())) if match else None
+            data[name] = value
+            if system == "sigpesq_advisorships" and "metadata" not in data:
+                raw = json.loads(payload) if isinstance(payload, str) else payload
+                if isinstance(raw, dict) and raw.get("Id") is not None:
+                    data["metadata"] = {"sigpesq_id": raw.get("Id")}
+        return data
+
+    def _free_name_held_by_advisorship(
+        self, title: str, existing_by_name, existing_by_norm_name
+    ) -> None:
+        session = self.controller._service._repository._session
+        row = session.execute(
+            text("SELECT id FROM initiatives WHERE name = :name LIMIT 1"),
+            {"name": title},
+        ).fetchone()
+        if not row:
+            return
+        advisorship_id = row[0]
+        try:
+            if self.adv_controller.get_by_id(advisorship_id) is None:
+                return
+        except Exception:
+            return
+        new_name = AdvisorshipHandler._build_disambiguated_advisorship_title(
+            None, title, self._advisorship_title_data(session, advisorship_id)
+        )
+        session.execute(
+            text("UPDATE initiatives SET name = :n WHERE id = :id"),
+            {"n": new_name, "id": advisorship_id},
+        )
+        tracking_recorder.record_change(
+            source_record_id=None,
+            canonical_entity_type="advisorship",
+            canonical_entity_id=advisorship_id,
+            operation="update",
+            changed_fields=["name"],
+            before={"name": title},
+            after={"name": new_name},
+            reason="TD-029: a project keeps its title; advisorship renamed",
+        )
+        logger.warning(
+            "title collision: project '{}' kept its title; advisorship {} renamed "
+            "to '{}'",
+            title[:80],
+            advisorship_id,
+            new_name[:120],
+        )
+        held = existing_by_name.pop(title, None)
+        if held is not None:
+            existing_by_name[new_name] = held
+            try:
+                held.name = new_name
+            except Exception:
+                pass
+        if existing_by_norm_name is not None:
+            key = normalize_text(title)
+            if getattr(existing_by_norm_name.get(key), "id", None) == advisorship_id:
+                existing_by_norm_name.pop(key, None)
+        note_collision_resolved()
 
     def _candidate_matches_model(self, candidate: Optional[Any], model_class) -> bool:
         if candidate is None:

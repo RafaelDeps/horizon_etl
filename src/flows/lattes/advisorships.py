@@ -29,7 +29,11 @@ from src.core.logic.strategies.lattes_advisorships import (
     LattesAdvisorshipMappingStrategy,
 )
 from src.flows.document_phase import document_phase
-from src.flows.lattes.cv_document import finish_lattes_listing, read_cv
+from src.flows.lattes.cv_document import (
+    finish_lattes_listing,
+    read_cv,
+    set_cv_claim_source,
+)
 from src.flows.lattes.cv_timing import log_cv_duration
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
@@ -189,6 +193,7 @@ def _ingest_lattes_advisorships(json_files: List[str], skip, logger) -> None:
                 if doc.unchanged(data):
                     continue
                 doc.begin()
+                set_cv_claim_source(doc, data, key)
                 ingest_advisorships_file_task(
                     json_file,
                     quote(researcher_index),

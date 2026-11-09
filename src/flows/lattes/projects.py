@@ -56,6 +56,7 @@ from src.flows.lattes.cv_document import (
     finish_lattes_listing,
     read_cv,
     retry_unidentified,
+    set_cv_claim_source,
 )
 from src.flows.lattes.cv_timing import log_cv_duration
 from src.notifications.telegram import telegram_flow_state_handlers
@@ -1108,6 +1109,7 @@ def _ingest_lattes_projects(json_files: List[str], skip) -> None:
                 if doc.unchanged(data):
                     continue
                 doc.begin()
+                set_cv_claim_source(doc, data, key)
                 # quote(): Prefect would otherwise walk these large objects
                 # (the ~7.6k-entry researcher index above all) on every call.
                 ingest_researcher_data(

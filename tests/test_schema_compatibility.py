@@ -24,9 +24,11 @@ NEW_TABLES = {
     "source_document_states",
     "source_document_items",
     "source_document_references",
+    # branch 030
+    "source_field_claims",
 }
 # Migrations that create an index on a new table rather than a table.
-NEW_INDEXES = {"0010_source_document_items_index"}
+NEW_INDEXES = {"0010_source_document_items_index", "0014_source_field_claims_index"}
 # Migrations that add a column to a new (ETL-owned) table (spec 023).
 NEW_COLUMNS = {"0012_source_document_downloaded_at"}
 # Shipped before spec 020; the base schema is taken after it.

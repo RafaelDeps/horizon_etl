@@ -132,6 +132,27 @@ MIGRATIONS: List[Tuple[str, str]] = [
         "0012_source_document_downloaded_at",
         "ALTER TABLE source_document_states ADD COLUMN downloaded_at TEXT",
     ),
+    (
+        # Branch 030: what each document says about the fields several
+        # documents write, so the winner never depends on processing order.
+        "0013_source_field_claims",
+        "CREATE TABLE IF NOT EXISTS source_field_claims ("
+        " source_system TEXT NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " entity_type TEXT NOT NULL,"
+        " entity_id INTEGER NOT NULL,"
+        " field TEXT NOT NULL,"
+        " value_json TEXT,"
+        " doc_date TEXT,"
+        " source_rank INTEGER NOT NULL,"
+        " tie_key TEXT NOT NULL,"
+        " PRIMARY KEY (source_system, document_key, entity_type, entity_id, field))",
+    ),
+    (
+        "0014_source_field_claims_index",
+        "CREATE INDEX IF NOT EXISTS ix_source_field_claims_entity"
+        " ON source_field_claims (entity_type, entity_id, field)",
+    ),
 ]
 
 

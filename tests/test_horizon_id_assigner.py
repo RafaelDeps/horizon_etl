@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from src.adapters.database.horizon_id_store import SqliteHorizonIdStore
 from src.core.logic.horizon_id_assigner import HorizonIdAssigner
+from src.core.logic.horizon_identity import HORIZON_RULE_VERSION
 from src.db.migrations import run_migrations
 
 # The columns the store reads, nothing else (the eo_lib schema is much larger).
@@ -281,7 +282,7 @@ def test_candidates_and_meta_are_written(db_a):
     assert len(cands) == 2  # the lattes id and the name-based one
     assert con.execute(
         "SELECT value FROM horizon_meta WHERE key='rule_version'"
-    ).fetchone() == ("1",)
+    ).fetchone() == (str(HORIZON_RULE_VERSION),)
     con.close()
 
 

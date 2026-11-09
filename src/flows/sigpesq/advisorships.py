@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from prefect import flow, get_run_logger, task
 
 from src.adapters.sources.sigpesq.adapter import SigPesqAdapter
+from src.core.logic.field_merge import sigpesq_source
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.strategies.sigpesq_advisorships import (
     SigPesqAdvisorshipMappingStrategy,
@@ -45,6 +46,8 @@ def persist_advisorships():
     with document_phase("sigpesq_advisorship") as skip:
         loader = ProjectLoader(mapping_strategy=SigPesqAdvisorshipMappingStrategy())
         loader.document_skip = skip
+        # Branch 030: an undated SigPesq row; the highest Id wins a tie.
+        loader.claim_source_for_row = lambda row: sigpesq_source(row.get("Id"))
         skip.on_rollback = loader.reset_caches
 
         # Ensure "Advisorship" initiative type exists once
