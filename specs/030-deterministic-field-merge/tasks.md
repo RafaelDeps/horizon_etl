@@ -348,7 +348,7 @@ the same title that the identity lookup does not find. The CV is not partial.
   the `field merge` log line.
 - [X] T036 Run `make ci-check` (flake8, black, isort, mypy, pytest). Fix new
   findings only. The failures of T001 are allowed.
-- [ ] T037 Replay on the real database (quickstart §3, SC-001, SC-003). **Only
+- [X] T037 Replay on the real database (quickstart §3, SC-001, SC-003). **Only
   when the maintainer asks for it** (decision of 2026-11-05: on
   `db/horizon.db`, not on copies; never started on our own). It rebuilds the
   database, so back up `db/horizon.db` and `data/` first, in
@@ -385,12 +385,23 @@ the same title that the identity lookup does not find. The CV is not partial.
   was replaced; it was added to the merged fields (highest SigPesq Id wins).
   The rest is in `docs/backlog.md` (TD-033 to TD-037). The comparison runs
   again after this change, on a database rebuilt with it. Restore the backup at the end if the maintainer asks.
-- [ ] T038 Ask the maintainer before dispatching. Then run the fork run of
+- [X] T038 Ask the maintainer before dispatching. Then run the fork run of
   `weekly-etl.yml` on `030-deterministic-field-merge` (quickstart §6). It is
   the first run of the branch, so it starts from scratch. Check:
   - every phase exits 0;
   - the `field merge` lines appear;
   - the line `SQLite finalize: {'finalized': True, …}` appears.
+
+  Done on 2026-11-09. Run 42616860871 started from scratch and run
+  42634852240 restored its state. Both ended with every phase at exit 0,
+  the `field merge` lines, rule version 2 and `finalized: True`. Comparing
+  both databases by horizon_id: no entity type lost rows, `cancelled` was
+  equal everywhere (46), and only 3 initiative fields changed, each with a
+  known cause. Most documents processed by the second run had the same
+  content; their references to projects created later in the first run went
+  from not found to found, once. The id of PJ 4911 became PJ 4742, kept as
+  an alias: the PDF of PJ 4742 failed to download in the first run, and the
+  lower code wins.
 - [ ] T039 Write `docs/reports/2026-11-XX-deterministic-field-merge-validation.md`
   with:
   - the baseline;
