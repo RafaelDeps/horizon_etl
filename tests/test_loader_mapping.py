@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
+from src.core.logic.pii_anonymizer import anonymize_email
 from src.core.logic.research_group_loader import ResearchGroupLoader
 from src.core.logic.strategies.sigpesq_excel import (
     SigPesqCampusStrategy,
@@ -74,10 +75,11 @@ def test_research_group_loader_mapping():
         knowledge_area_ids=[1],
     )
 
+    # SigPesq e-mails are pseudonymized before they reach the database (LGPD).
     loader.researcher_ctrl.create_researcher.assert_called_with(
         name="Carlos Campos",
-        emails=["carlos@ifes.edu.br"],
-        identification_id="carlos@ifes.edu.br",
+        emails=[anonymize_email("carlos@ifes.edu.br")],
+        identification_id=None,
     )
     loader.rg_ctrl.add_leader.assert_called()
 

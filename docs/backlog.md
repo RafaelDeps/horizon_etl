@@ -431,19 +431,21 @@ Mapping Epics -> User Stories -> Tasks status.
 ## Follow-ups — origin: branch `030-deterministic-field-merge` (2026-11-05)
 
 - **TD-031 — Six tests are out of date with the code**: they failed before
-  branch 028 (spec 025) and still fail on `main`. The program is right in each
-  case; the test expects an old behaviour:
-  - `test_download_lattes_flow.py` ×3: the fake chromedriver uses the old
-    signature, so it fails with `missing 1 required positional argument:
-    '_chromedriver'`;
-  - `test_loader_mapping.py::test_research_group_loader_mapping`: it expects
-    an old research group mapping;
+  branch 028 (spec 025). The program was right in each case; the tests
+  expected an old behaviour. Fixed on branch `fix-stale-tests`:
+  - `test_download_lattes_flow.py`: the two runtime tests checked the
+    chromedriver and Chrome versions, but scriptLattes now runs on Playwright.
+    They now check the Playwright Chromium check, and the unused version
+    helpers were removed from `src/flows/lattes/download.py`. The flow test
+    now fakes the spec 023 rotation and the one-argument scriptLattes call;
+  - `test_loader_mapping.py::test_research_group_loader_mapping`: SigPesq
+    leader e-mails are pseudonymized (LGPD), so it expects the pseudonym and
+    no `identification_id`;
   - `test_sigpesq_adapter.py::test_sigpesq_adapter_logs_http_429_during_login`:
-    the log message of a 429 changed;
-  - `test_weekly_etl_workflow.py::test_weekly_etl_workflow_runs_weekly_flows_with_notifications`:
-    it expects the cron `"0 6 * * 6"`; the workflow has `"0 2 * * 6"`.
+    compares the 429 message without case;
+  - `test_weekly_etl_workflow.py`: expects the current cron `"0 2 * * 6"`.
 
-  Fix them in a change of their own, after branch 030. Status: Ready.
+  Status: Done (2026-11-09; full suite 1027 passed).
 
 - **TD-032 — `lattes_projects` slows down CV after CV on a database without
   SigPesq data**: on 2026-11-06 the SigPesq login failed (Infisical 401), so

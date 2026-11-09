@@ -2,7 +2,6 @@ import contextlib
 import os
 import re
 import shutil
-import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -149,43 +148,6 @@ def _check_playwright_chromium() -> bool:
         return True
     except Exception:
         return False
-
-
-def _read_command_version(command: List[str]) -> str:
-    try:
-        result = subprocess.run(command, capture_output=True, check=False, text=True)
-    except OSError:
-        return ""
-
-    return "\n".join(part for part in [result.stdout, result.stderr] if part)
-
-
-def _major_version(version_output: str) -> str:
-    match = re.search(r"\b(\d{2,3})\.\d+", version_output)
-    return match.group(1) if match else ""
-
-
-def _candidate_chrome_binaries(chrome_binary: str | None = None) -> List[str]:
-    candidates = []
-    if chrome_binary:
-        candidates.append(chrome_binary)
-
-    env_binary = os.environ.get("CHROME_BINARY")
-    if env_binary and env_binary not in candidates:
-        candidates.append(env_binary)
-
-    for command in [
-        "google-chrome",
-        "google-chrome-stable",
-        "chrome",
-        "chromium",
-        "chromium-browser",
-    ]:
-        path = shutil.which(command)
-        if path and path not in candidates:
-            candidates.append(path)
-
-    return candidates
 
 
 def validate_script_lattes_runtime(
