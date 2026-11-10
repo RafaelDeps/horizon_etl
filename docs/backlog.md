@@ -476,7 +476,9 @@ these differences remain, none of them in a field the merge decides:
   title, the note keeps `new_from_document`; a code match or another document
   records its own strategy, and `entity_matches` keeps the real match of each
   run. Notes that already drifted are repaired by the next run. An unchanged
-  note is no longer rewritten. Status: Done (2026-11-09).
+  note is no longer rewritten. Validated on the fork on 2026-11-10 (rebuild,
+  then restored run: 34 notes kept `new_from_document`, 0 of 267 notes
+  changed). Status: Done (2026-11-09).
 - **TD-034 — A duplicate fellowship in the incremental database**: two
   fellowships "JTC" with value 0 exist in the incremental database
   (`fellowship:jtc:0~e3b0c4` and `~2`), one in the rebuild, and one
@@ -503,3 +505,17 @@ these differences remain, none of them in a field the merge decides:
   Branch 030 makes the result fixed (the highest Id decides `cancelled`), but
   the two students may deserve two advisorships. Decide with the maintainer.
   Status: Decision needed.
+- **TD-038 — A project PDF is matched to an advisorship with the same title**:
+  the enrichment looks for a research project by title and finds an
+  advisorship (a student's workplan) whose title is the same as the project's
+  (PJ 2449 -> advisorship 140, PJ 3879 -> advisorship 170). The project's note
+  and description are written on the advisorship; 4 advisorships carry a
+  project note on the local database of 2026-11-10. The description is then
+  written twice in every run: the advisorship flow sets "Programa: ..." and
+  the enrichment sets the PDF text back, because the two claims are stored
+  under different entity types (`advisorship` and `initiative`) for the same
+  row and the merge of branch 030 never compares them. The final value is the
+  same in every run, but 2 changes are logged over unchanged inputs (found in
+  the spec 032 fork runs, reproduced locally). A project PDF should only match
+  a research project, and the claims of one row should be merged together.
+  Not checked on main. Status: Investigate.
