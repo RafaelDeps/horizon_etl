@@ -25,6 +25,7 @@ from src.core.logic.project_enrichment import (
     origin_from_prior,
     parse_sql_datetime,
     resolve_claims,
+    strategy_from_prior,
 )
 
 
@@ -336,7 +337,11 @@ def test_build_enrichment_carries_origin_and_review_forward():
     title. The flag must NOT flip to False just because the match got confident.
     """
     pj = {"titulo": "P", "descricao": "d", "objetivos": {"geral": "g"}}
-    prior = {"origin": ORIGIN_NEW_FROM_DOCUMENT, "match_strategy": "new_from_document"}
+    prior = {
+        "origin": ORIGIN_NEW_FROM_DOCUMENT,
+        "match_strategy": "new_from_document",
+        "project_code": "1",
+    }
 
     payload = build_enrichment(
         pj, code="1", strategy="title_exact", match_uncertain=False, prior=prior
@@ -344,7 +349,36 @@ def test_build_enrichment_carries_origin_and_review_forward():
 
     assert payload["origin"] == ORIGIN_NEW_FROM_DOCUMENT
     assert payload["needs_review"] is True
-    assert payload["match_strategy"] == "title_exact", "current run is still recorded"
+    # Spec 032 (TD-033): the creating document keeps its strategy.
+    assert payload["match_strategy"] == "new_from_document"
+
+
+def test_document_finding_its_own_initiative_keeps_the_note():
+    """Spec 032 (TD-033): the second run builds the same payload as the first,
+    so it writes nothing and matches a rebuild."""
+    pj = {"titulo": "P", "descricao": "d", "objetivos": {"geral": "g"}}
+    first = build_enrichment(
+        pj, code="1", strategy="new_from_document", match_uncertain=True
+    )
+
+    second = build_enrichment(
+        pj, code="1", strategy="title_exact", match_uncertain=False, prior=first
+    )
+
+    assert second == first
+
+
+def test_document_without_code_finding_its_own_initiative_keeps_the_note():
+    pj = {"titulo": "P", "descricao": "d", "_meta": {"arquivo": "PJ_x.pdf"}}
+    first = build_enrichment(
+        pj, code="", strategy="new_from_document", match_uncertain=True
+    )
+
+    second = build_enrichment(
+        pj, code="", strategy="title_exact", match_uncertain=False, prior=first
+    )
+
+    assert second == first
 
 
 def test_build_enrichment_keeps_review_record():
@@ -362,3 +396,105 @@ def test_build_enrichment_keeps_review_record():
     assert payload["needs_review"] is False
     assert payload["reviewed_by"] == "MAT-123"
     assert payload["origin"] == ORIGIN_NEW_FROM_DOCUMENT, "review must not erase origin"
+
+
+# ------------------------------------------------------------ strategy_from_prior
+# Spec 032 (TD-033): contracts/enrichment-strategy.md, examples table.
+NEW = ORIGIN_NEW_FROM_DOCUMENT
+OLD = ORIGIN_MATCHED_EXISTING
+
+
+@pytest.mark.parametrize(
+    "prior, origin, strategy, code, source_file, expected",
+    [
+        (
+            {"project_code": "1", "match_strategy": "new_from_document"},
+            NEW,
+            "title_exact",
+            "1",
+            None,
+            "new_from_document",
+        ),
+        (
+            {"project_code": "1", "match_strategy": "title_exact"},
+            NEW,
+            "title_exact",
+            "1",
+            None,
+            "new_from_document",
+        ),
+        ({"project_code": "1"}, NEW, "title_fuzzy", "1", None, "new_from_document"),
+        ({"project_code": "1"}, NEW, "title_exact", "2", None, "title_exact"),
+        (
+            {"project_code": "1"},
+            NEW,
+            "sigpesq_project_code",
+            "1",
+            None,
+            "sigpesq_project_code",
+        ),
+        (
+            {"project_code": None, "source_file": "PJ_x.pdf"},
+            NEW,
+            "title_exact",
+            None,
+            "PJ_x.pdf",
+            "new_from_document",
+        ),
+        (
+            {"project_code": None, "source_file": "PJ_x.pdf"},
+            NEW,
+            "title_exact",
+            None,
+            "PJ_y.pdf",
+            "title_exact",
+        ),
+        (
+            {"project_code": None, "source_file": None},
+            NEW,
+            "title_exact",
+            None,
+            None,
+            "title_exact",
+        ),
+        ({"project_code": "1"}, OLD, "title_exact", "1", None, "title_exact"),
+        (None, NEW, "new_from_document", "1", None, "new_from_document"),
+        (None, NEW, "title_exact", "1", None, "title_exact"),
+    ],
+)
+def test_strategy_from_prior(prior, origin, strategy, code, source_file, expected):
+    assert strategy_from_prior(prior, origin, strategy, code, source_file) == expected
+
+
+def test_another_document_records_its_own_strategy():
+    """Spec 032 US2: only the creating document keeps its strategy."""
+    pj = {"titulo": "P", "descricao": "d"}
+    prior = build_enrichment(
+        pj, code="1", strategy="new_from_document", match_uncertain=True
+    )
+
+    payload = build_enrichment(
+        pj, code="2", strategy="title_exact", match_uncertain=False, prior=prior
+    )
+
+    assert payload["match_strategy"] == "title_exact"
+    assert payload["origin"] == ORIGIN_NEW_FROM_DOCUMENT
+    assert payload["needs_review"] is True
+
+
+def test_creating_document_matched_by_code_records_the_code():
+    """Spec 032 R3: a code match means the project is in the SigPesq report."""
+    pj = {"titulo": "P", "descricao": "d"}
+    prior = build_enrichment(
+        pj, code="1", strategy="new_from_document", match_uncertain=True
+    )
+
+    payload = build_enrichment(
+        pj,
+        code="1",
+        strategy="sigpesq_project_code",
+        match_uncertain=False,
+        prior=prior,
+    )
+
+    assert payload["match_strategy"] == "sigpesq_project_code"

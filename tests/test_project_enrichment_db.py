@@ -16,7 +16,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session
 
 from src.core.logic.project_enrichment import ProjectEnrichmentLoader
@@ -385,6 +385,7 @@ def test_rerun_does_not_shrink_the_review_backlog(loader, session, tmp_path):
                     "match_strategy": "new_from_document",
                     "origin": "new_from_document",
                     "needs_review": True,
+                    "source_file": "PJ_1.json",
                 }
             ),
         },
@@ -402,7 +403,9 @@ def test_rerun_does_not_shrink_the_review_backlog(loader, session, tmp_path):
     _, enrichment = read_initiative(session, 2)
     assert enrichment["needs_review"] is True
     assert enrichment["origin"] == "new_from_document"
-    assert enrichment["match_strategy"] == "title_exact", "current run recorded"
+    # Spec 032 (TD-033): the creating document keeps its strategy, as a rebuild
+    # writes it; the run still counts the title match (FR-008).
+    assert enrichment["match_strategy"] == "new_from_document"
 
 
 def test_reviewed_initiative_stays_reviewed_across_reruns(loader, session, tmp_path):
@@ -489,3 +492,148 @@ def test_backfill_restores_origin_from_the_audit_trail(loader, session):
     _, enrichment = read_initiative(session, 7)
     assert enrichment["origin"] == "new_from_document"
     assert enrichment["needs_review"] is True, "restored origin re-raises the flag"
+
+
+# --------------------------------------------------------------------------- #
+# Spec 032 (TD-033): a second run over unchanged documents writes nothing
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def enrichment_updates(session):
+    """Counts the UPDATEs of enrichment_json the session runs."""
+    statements = []
+
+    def _count(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("UPDATE initiatives SET") and (
+            "enrichment_json" in statement
+        ):
+            statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", _count)
+    yield statements
+    event.remove(engine, "before_cursor_execute", _count)
+
+
+@pytest.fixture
+def tracked(loader, monkeypatch):
+    """Records the ``changed`` flag of each tracking call."""
+    calls = []
+    monkeypatch.setattr(
+        loader, "_record_tracking", lambda **kwargs: calls.append(kwargs)
+    )
+    return calls
+
+
+def test_second_run_rewrites_no_unchanged_note(
+    loader, session, tmp_path, enrichment_updates, tracked
+):
+    add_initiative(session, 1, "Estudo sobre redes neurais")
+    write_pj(
+        tmp_path,
+        "PJ_1.json",
+        titulo="Estudo sobre redes neurais",
+        descricao="Investiga arquiteturas profundas.",
+        objetivos={"geral": "Avaliar desempenho", "especificos": []},
+    )
+    loader.run(str(tmp_path), ingest_new=False)
+    assert len(enrichment_updates) == 1
+    enrichment_updates.clear()
+    tracked.clear()
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 1
+    assert enrichment_updates == [], "an unchanged note is not rewritten"
+    assert [c["changed"] for c in tracked] == [False]
+
+
+def insert_created_initiative(session, init_id, name, strategy, code=None):
+    """An initiative created by a document, with the note that run wrote."""
+    session.execute(
+        text(
+            "INSERT INTO initiatives (id, name, description, initiative_type_id, "
+            "enrichment_json) VALUES (:id, :n, :d, 1, :j)"
+        ),
+        {
+            "id": init_id,
+            "n": name,
+            "d": "Descricao rica o suficiente.",
+            "j": json.dumps(
+                {
+                    "source": "sigpesq_project_files",
+                    "project_code": code,
+                    "match_strategy": strategy,
+                    "origin": "new_from_document",
+                    "needs_review": True,
+                    "source_file": "PJ_7.json",
+                }
+            ),
+        },
+    )
+    session.commit()
+
+
+def test_per_run_tracking_records_the_real_strategy(
+    loader, session, tmp_path, monkeypatch
+):
+    """Spec 032 FR-005: the note keeps new_from_document, the per-run match
+    records how the document really matched."""
+    from src.core.logic import project_enrichment
+
+    matches = []
+    fake = SimpleNamespace(
+        has_active_run=lambda: True,
+        record_source_record=lambda **kwargs: SimpleNamespace(id=1),
+        record_entity_match=lambda **kwargs: matches.append(kwargs),
+        record_attribute_assertions=lambda **kwargs: None,
+        record_change=lambda **kwargs: None,
+    )
+    monkeypatch.setattr(project_enrichment, "tracking_recorder", fake)
+    loader.ensure_schema()
+    insert_created_initiative(session, 7, "Projeto do documento", "new_from_document")
+    write_pj(
+        tmp_path,
+        "PJ_7.json",
+        titulo="Projeto do documento",
+        descricao="Descricao rica o suficiente.",
+        objetivos={"geral": "g", "especificos": []},
+    )
+
+    loader.run(str(tmp_path), ingest_new=False)
+
+    assert [m["match_strategy"] for m in matches] == ["title_exact"]
+    _, enrichment = read_initiative(session, 7)
+    assert enrichment["match_strategy"] == "new_from_document"
+
+
+def test_drifted_note_is_repaired_once(
+    loader, session, tmp_path, enrichment_updates, tracked
+):
+    """Spec 032 US3: a note that already moved to title_exact goes back once,
+    then the next run writes nothing."""
+    loader.ensure_schema()
+    insert_created_initiative(
+        session, 7, "Projeto do documento", "title_exact", code="7"
+    )
+    write_pj(
+        tmp_path,
+        "PJ_7.json",
+        codigo="7",
+        titulo="Projeto do documento",
+        descricao="Descricao rica o suficiente.",
+        objetivos={"geral": "g", "especificos": []},
+    )
+
+    loader.run(str(tmp_path), ingest_new=False)
+
+    _, enrichment = read_initiative(session, 7)
+    assert enrichment["match_strategy"] == "new_from_document"
+    assert len(enrichment_updates) == 1
+    assert [c["changed"] for c in tracked] == [True]
+
+    enrichment_updates.clear()
+    tracked.clear()
+    loader.run(str(tmp_path), ingest_new=False)
+
+    assert enrichment_updates == []
+    assert [c["changed"] for c in tracked] == [False]

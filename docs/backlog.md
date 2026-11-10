@@ -469,7 +469,14 @@ these differences remain, none of them in a field the merge decides:
   incremental database, because the next run finds the initiative it created
   by title. The values of the initiative are the same; only the
   `enrichment_json` note differs. Keep the first strategy, or leave the note
-  out of the comparison. Status: Ready.
+  out of the comparison. The second run also rewrote those notes and logged a
+  change for each over unchanged inputs. Fixed by spec 032
+  (`032-stable-enrichment-strategy`): when the document that created an
+  initiative (same code, or same file without a code) matches it again by
+  title, the note keeps `new_from_document`; a code match or another document
+  records its own strategy, and `entity_matches` keeps the real match of each
+  run. Notes that already drifted are repaired by the next run. An unchanged
+  note is no longer rewritten. Status: Done (2026-11-09).
 - **TD-034 — A duplicate fellowship in the incremental database**: two
   fellowships "JTC" with value 0 exist in the incremental database
   (`fellowship:jtc:0~e3b0c4` and `~2`), one in the rebuild, and one

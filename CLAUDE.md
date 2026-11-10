@@ -1,5 +1,5 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/030-deterministic-field-merge/plan.md
+at specs/032-stable-enrichment-strategy/plan.md
 <!-- SPECKIT END -->

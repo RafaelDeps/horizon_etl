@@ -131,6 +131,39 @@ def origin_from_prior(prior: Optional[Dict[str, Any]], strategy: str) -> str:
     )
 
 
+TITLE_STRATEGIES = frozenset({"title_exact", "title_fuzzy"})
+
+
+def strategy_from_prior(
+    prior: Optional[Dict[str, Any]],
+    origin: str,
+    strategy: str,
+    code: Optional[str],
+    source_file: Optional[str],
+) -> str:
+    """The strategy to store in the payload (spec 032, TD-033).
+
+    The document that created an initiative finds it by title on the next run.
+    For that document the payload keeps ``new_from_document``, as a rebuild
+    writes it, so a run over unchanged documents writes nothing; a payload that
+    already drifted is repaired, since the rule reads the permanent origin
+    (research R4). A match by code, or any other document, records its own
+    strategy (R3). The document is the same when the code matches, or, without
+    a code, when the source file does (R2).
+    """
+    if (
+        origin != ORIGIN_NEW_FROM_DOCUMENT
+        or not isinstance(prior, dict)
+        or strategy not in TITLE_STRATEGIES
+    ):
+        return strategy
+    if code:
+        same_document = prior.get("project_code") == code
+    else:
+        same_document = bool(source_file) and prior.get("source_file") == source_file
+    return NEW_FROM_DOCUMENT if same_document else strategy
+
+
 def build_enrichment(
     pj: Dict[str, Any],
     *,
@@ -155,7 +188,9 @@ def build_enrichment(
     payload = EnrichmentPayload(
         source=ProjectEnrichmentLoader.SOURCE_SYSTEM,
         project_code=code or None,
-        match_strategy=strategy,
+        match_strategy=strategy_from_prior(
+            prior, origin, strategy, code or None, meta.get("arquivo")
+        ),
         origin=origin,
         reviewed_at=reviewed_at,
         reviewed_by=(prior or {}).get("reviewed_by"),
@@ -616,7 +651,12 @@ class ProjectEnrichmentLoader:
                     f"review={enrichment['needs_review']} (code={code or '-'})"
                 )
             else:
-                written = self._write_row(
+                unchanged = not write_desc and canonical(enrichment) == canonical(
+                    current_enrichment.get(init_id)
+                )
+                # Spec 032: an unchanged note is not rewritten; the description
+                # merge and the tracking below still run.
+                written = unchanged or self._write_row(
                     lambda: self._apply(
                         init_id, enrichment, new_desc if write_desc else None
                     )
