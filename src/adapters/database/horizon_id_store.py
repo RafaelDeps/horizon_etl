@@ -58,8 +58,9 @@ _ENTITY_SQL = {
         "LEFT JOIN education_types et ON et.id = ae.education_type_id"
     ),
     "professional_activity": (
-        "SELECT id, researcher_id AS parent_id, institution_name, start_year, "
-        "end_year, role_function, bond FROM professional_activities"
+        "SELECT id, researcher_id AS parent_id, institution, period, start_year, "
+        "end_year, bond, classification, work_regime, role_function, current "
+        "FROM professional_activities"
     ),
     "award": "SELECT id, researcher_id AS parent_id, title, year FROM awards",
     "proficiency": (

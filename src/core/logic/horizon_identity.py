@@ -24,7 +24,10 @@ from src.core.logic.initiative_identity import normalize_text
 # database written by "the last document wins" is rebuilt once.
 # 3 (branch 033): only a value in DOI form is a DOI, so articles merged under
 # a link or an ISSN are split by one rebuild.
-HORIZON_RULE_VERSION = 3
+# 4 (branch 034): a professional activity is identified by every stored field
+# and by the full institution text, so activities collapsed by institution
+# and start year are split by one rebuild.
+HORIZON_RULE_VERSION = 4
 
 # Similarity (rapidfuzz token_sort_ratio, 0-100) at which two names or titles
 # are the same thing: PersonMatcher's fuzzy threshold, and the "key corrected"
@@ -386,12 +389,39 @@ def research_production_decision(
 
 _CHILD_PARTS = {
     "academic_education": ("education", ("type_name", "title", "start_year")),
+    # Spec 034: every field that can tell two activities of one person apart,
+    # and the full institution text instead of the name cut at the first comma.
     "professional_activity": (
         "activity",
-        ("institution_name", "start_year", "end_year", "role_function", "bond"),
+        (
+            "institution",
+            "period",
+            "start_year",
+            "end_year",
+            "bond",
+            "classification",
+            "work_regime",
+            "role_function",
+            "current",
+        ),
     ),
     "award": ("award", ("title", "year")),
 }
+
+
+def _activity_tail_before_spec_034(row: dict) -> str:
+    """The id tail of a professional activity under rule versions 1 to 3: the
+    institution name as the curriculum data gave it (the text up to the first
+    comma), start year, end year, role and bond."""
+    name = str(row.get("institution") or "").split(",")[0].strip()
+    parts = (
+        name,
+        row.get("start_year"),
+        row.get("end_year"),
+        row.get("role_function"),
+        row.get("bond"),
+    )
+    return f"activity:h:{hash12(*parts)}"
 
 
 def child_decision(
@@ -400,7 +430,9 @@ def child_decision(
     """Children of a person: the parent's id, the kind, and a hash of the
     fields that distinguish the item (a slug for proficiencies). Candidates are
     built from every parent candidate, so a parent upgrade carries its
-    children's old ids along."""
+    children's old ids along. A professional activity also keeps as candidates
+    the ids it had before spec 034, so an old id that one activity owns
+    becomes its alias (FR-010)."""
     parents = parent.candidates if parent else ["person:unknown"]
     if entity_type == "proficiency":
         tail, natural = f"proficiency:{slug(row.get('language'))}", None
@@ -410,6 +442,10 @@ def child_decision(
         parts = tuple(row.get(f) for f in fields)
         tail, natural = f"{kind}:h:{hash12(*parts)}", _name_key(*parts)
         rule = "parent+" + "+".join(fields)
+    candidates = [f"{p}/{tail}" for p in parents]
+    if entity_type == "professional_activity":
+        old_tail = _activity_tail_before_spec_034(row)
+        candidates += [f"{p}/{old_tail}" for p in parents]
     return IdDecision(
         entity_type,
         row["id"],
@@ -417,7 +453,7 @@ def child_decision(
         rule,
         natural,
         parent_horizon_id=parents[0],
-        candidates=[f"{p}/{tail}" for p in parents],
+        candidates=candidates,
         content_hash=_content_hash(row),
     )
 

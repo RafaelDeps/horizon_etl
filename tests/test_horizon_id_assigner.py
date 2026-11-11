@@ -31,7 +31,8 @@ CREATE TABLE education_types (id INTEGER PRIMARY KEY, name TEXT);
 CREATE TABLE academic_educations (id INTEGER PRIMARY KEY, researcher_id INTEGER,
                                   education_type_id INTEGER, title TEXT, start_year TEXT);
 CREATE TABLE professional_activities (id INTEGER PRIMARY KEY, researcher_id INTEGER,
-    institution_name TEXT, start_year TEXT, end_year TEXT, role_function TEXT, bond TEXT);
+    institution TEXT, institution_name TEXT, period TEXT, start_year TEXT, end_year TEXT,
+    bond TEXT, classification TEXT, work_regime TEXT, role_function TEXT, current INTEGER);
 CREATE TABLE awards (id INTEGER PRIMARY KEY, researcher_id INTEGER, title TEXT, year TEXT);
 CREATE TABLE languages (id INTEGER PRIMARY KEY, name TEXT);
 CREATE TABLE proficiencies (id INTEGER PRIMARY KEY, researcher_id INTEGER, language_id INTEGER);
@@ -619,3 +620,66 @@ def test_merge_without_a_bare_candidate_keeps_the_existing_behaviour():
 def test_merge_with_bare_ids_is_unchanged():
     assert _merge_case("article:h:M", ["article:h:B"]) == "article:h:B"
     assert _merge_case("article:h:B", ["article:h:M"]) == "article:h:B"
+
+
+# --- spec 034: old ids of professional activities ---
+
+KARIN_ID = "person:lattes:9860697624155451"
+OLD_ACTIVITY_ID = f"{KARIN_ID}/activity:h:" + hash12(
+    "Instituto Federal de Educação", "2010", None, "Professor", "Servidor"
+)
+IFES_TEXT = "Instituto Federal de Educação, Ciência e Tecnologia do Espírito Santo, IFES, Brasil"
+
+
+def _activity_history(tmp_path, db, periods):
+    """A database whose activities of Karin are the given periods at IFES, and
+    a history that holds the id those activities had before spec 034."""
+    pid = _person_id(db, "Karin Satie Komati")
+    _sql(
+        db,
+        *[
+            (
+                "INSERT INTO professional_activities (id, researcher_id, institution, "
+                "institution_name, period, start_year, role_function, bond, current) "
+                "VALUES (?, ?, ?, 'x', ?, '2010', 'Professor', 'Servidor', 0)",
+                (9200 + n, pid, IFES_TEXT, period),
+            )
+            for n, period in enumerate(periods)
+        ],
+    )
+    snapshot = tmp_path / "horizon_id_history.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "rule_version": 3,
+                "ids": [
+                    {
+                        "entity_type": "professional_activity",
+                        "horizon_id": OLD_ACTIVITY_ID,
+                        "rule": "parent+institution_name+start_year+end_year"
+                        "+role_function+bond",
+                        "natural_key": "instituto federal de educacao|2010||professor"
+                        "|servidor",
+                        "parent_horizon_id": KARIN_ID,
+                    }
+                ],
+            }
+        )
+    )
+    store = SqliteHorizonIdStore(str(db), snapshot_path=str(snapshot), zip_path="")
+    HorizonIdAssigner(store).assign()
+    return [h for h, kind in _current(db).items() if kind == "professional_activity"]
+
+
+def test_an_old_activity_id_becomes_an_alias_of_the_one_row_that_owns_it(
+    tmp_path, db_a
+):
+    (new_id,) = _activity_history(tmp_path, db_a, ["2010 - 2012"])
+    assert new_id != OLD_ACTIVITY_ID
+    assert _aliases(db_a)[OLD_ACTIVITY_ID] == (new_id, "rebuild")
+
+
+def test_an_old_activity_id_shared_by_two_rows_is_retired(tmp_path, db_a):
+    current = _activity_history(tmp_path, db_a, ["2010 - 2012", "2010 - 2015"])
+    assert len(set(current)) == 2 and not any("~" in h for h in current)
+    assert _aliases(db_a)[OLD_ACTIVITY_ID] == (None, "retired")

@@ -315,6 +315,25 @@ def test_production():
     assert d.horizon_id == f"production:h:{hash12('Livro', '2020', 'Book')}"
 
 
+# Spec 034: the fields that tell two professional activities apart.
+_ACTIVITY = {
+    "institution": "Instituto Federal do Espírito Santo, IFES, Brasil",
+    "period": "2010 - Atual",
+    "start_year": "2010",
+    "end_year": None,
+    "bond": "Servidor",
+    "classification": None,
+    "work_regime": None,
+    "role_function": "Professor",
+    "current": True,
+}
+
+
+def _activity_decision(parent=None, **fields):
+    row = {"id": 1, "parent_id": 7, **_ACTIVITY, **fields}
+    return child_decision("professional_activity", row, parent)
+
+
 def test_children_follow_every_parent_candidate():
     parent = person_decision(
         {"id": 7, "name": "Karin", "cnpq_url": "http://lattes.cnpq.br/9860697624155451"}
@@ -339,11 +358,7 @@ def test_children_follow_every_parent_candidate():
         {
             "id": 1,
             "parent_id": 7,
-            "institution_name": "IFES",
-            "start_year": "2010",
-            "end_year": None,
-            "role_function": "Professor",
-            "bond": "Servidor",
+            **_ACTIVITY,
         },
         parent,
     )
@@ -494,3 +509,66 @@ def test_valid_doi_spellings_keep_the_same_article_id():
         )
     }
     assert ids == {f"article:doi:{doi}"}
+
+
+# --- spec 034: the id of a professional activity ---
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "period",
+        "end_year",
+        "bond",
+        "classification",
+        "work_regime",
+        "role_function",
+        "current",
+    ],
+)
+def test_activity_id_tells_two_activities_apart(field):
+    other = False if field == "current" else "another value"
+    assert (
+        _activity_decision().horizon_id
+        != _activity_decision(**{field: other}).horizon_id
+    )
+
+
+def test_activity_id_uses_the_full_institution():
+    campus = "Instituto Federal do Espírito Santo, IFES SERRA, Brasil"
+    assert (
+        _activity_decision().horizon_id
+        != _activity_decision(institution=campus).horizon_id
+    )
+    # The derived name is not part of the id: only the full text is.
+    assert (
+        _activity_decision().horizon_id
+        == _activity_decision(institution_name="Another name").horizon_id
+    )
+
+
+def test_activity_rule_label():
+    assert _activity_decision().rule == (
+        "parent+institution+period+start_year+end_year+bond+classification"
+        "+work_regime+role_function+current"
+    )
+
+
+def test_activity_keeps_the_old_rule_id_as_a_candidate():
+    parent = person_decision(
+        {"id": 7, "name": "Karin", "cnpq_url": "http://lattes.cnpq.br/9860697624155451"}
+    )
+    act = _activity_decision(parent)
+    # What the id was before spec 034: the first comma part of the institution
+    # (the name the curriculum data gave), start year, end year, role and bond.
+    old_tail = "activity:h:" + hash12(
+        "Instituto Federal do Espírito Santo", "2010", None, "Professor", "Servidor"
+    )
+    assert len(parent.candidates) == 2 and len(act.candidates) == 4
+    assert act.candidates[0] == act.horizon_id
+    assert act.candidates[2:] == [f"{p}/{old_tail}" for p in parent.candidates]
+    assert old_tail not in act.horizon_id
+    award = child_decision(
+        "award", {"id": 1, "parent_id": 7, "title": "Prêmio", "year": "2020"}, parent
+    )
+    assert len(award.candidates) == 2

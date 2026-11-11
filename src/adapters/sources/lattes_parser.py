@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from src.core.logic.professional_activity_rules import (
+    distinct_activities,
+    split_institution,
+)
+
 
 @dataclass
 class LattesProject:
@@ -251,15 +256,21 @@ class LattesParser:
 
         Maps to the `professional_activities` entity. `ano_fim` == 'Atual'
         marks a current bond (end_year left null, current=True).
+
+        Spec 034: the curriculum data cuts the institution text at every
+        comma, so name, acronym and country are read again from the full text
+        (FR-003 to FR-005). Exact repeats are returned once, and an item that
+        carries only the institution is returned only when the curriculum has
+        no filled activity there (FR-001, FR-002a).
         """
         items = data.get("atuacao_profissional") or []
         parsed = []
         for item in items:
             if not isinstance(item, dict):
                 continue
-            institution = (
-                item.get("instituicao") or item.get("instituicao_nome") or ""
-            ).strip()
+            institution, name, acronym, country = split_institution(
+                item.get("instituicao") or item.get("instituicao_nome")
+            )
             if not institution:
                 continue
             end_raw = item.get("ano_fim")
@@ -269,10 +280,10 @@ class LattesParser:
             )
             parsed.append(
                 {
-                    "institution": institution[:500],
-                    "institution_name": (item.get("instituicao_nome") or None),
-                    "institution_acronym": (item.get("instituicao_sigla") or None),
-                    "institution_country": (item.get("instituicao_pais") or None),
+                    "institution": institution,
+                    "institution_name": name,
+                    "institution_acronym": acronym,
+                    "institution_country": country,
                     "period": (item.get("periodo") or None),
                     "start_year": self._to_int(item.get("ano_inicio")),
                     "end_year": None if is_current else self._to_int(end_raw),
@@ -284,7 +295,7 @@ class LattesParser:
                     "current": is_current,
                 }
             )
-        return parsed
+        return distinct_activities(parsed)
 
     def parse_technical_productions(self, data: Dict) -> List[Dict[str, Any]]:
         """Parses 'producao_tecnica' and 'patentes_registros' from JSON.

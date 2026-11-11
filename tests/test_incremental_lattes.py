@@ -382,7 +382,10 @@ COMPARED = {
     "persons": "SELECT name FROM persons",
     "awards": "SELECT title, year FROM awards",
     "academic_educations": "SELECT title, start_year FROM academic_educations",
-    "professional_activities": "SELECT institution, start_year, activity_type "
+    # Spec 034: every stored field of an activity.
+    "professional_activities": "SELECT institution, institution_name, "
+    "institution_acronym, institution_country, period, start_year, end_year, bond, "
+    "classification, work_regime, role_function, activity_type, current "
     "FROM professional_activities",
 }
 

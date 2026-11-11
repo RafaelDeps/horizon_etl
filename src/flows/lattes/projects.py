@@ -40,6 +40,7 @@ from src.core.logic.horizon_identity import (
 )
 from src.core.logic.initiative_identity import normalize_text
 from src.core.logic.pii_anonymizer import scrub_pii_deep
+from src.core.logic.professional_activity_rules import activity_key
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
     ResearcherRef,
@@ -925,10 +926,12 @@ def ingest_languages_task(languages, target_researcher, session):
 def ingest_professional_activities_task(activities, target_researcher, session):
     """Ingests Lattes professional activities (atuacao_profissional).
 
-    Deduped by (researcher_id, institution, start_year, activity_type).
+    An item is a repeat only when it equals a stored activity of the
+    researcher in every stored field (spec 034, FR-001); the parser already
+    returns each different item of the curriculum once.
     """
     ctrl = ProfessionalActivityController()
-    seen = {}  # natural key -> row id
+    seen = {}  # stored fields -> row id
     if session is not None:
         from research_domain.domain.entities.professional_activity import (
             ProfessionalActivity,
@@ -939,11 +942,11 @@ def ingest_professional_activities_task(activities, target_researcher, session):
             .filter_by(researcher_id=target_researcher.id)
             .all()
         ):
-            seen[(e.institution, e.start_year, e.activity_type)] = e.id
+            seen[activity_key(e)] = e.id
 
     created = 0
     for act in activities:
-        key = (act["institution"], act["start_year"], act["activity_type"])
+        key = activity_key(act)
         if key in seen:
             carry("professional_activity", seen[key])
             continue

@@ -245,3 +245,79 @@ def test_project_status_inference(parser):
     assert by_name["Projeto Ano Corrente"]["status"] == "Active"
     assert by_name["Projeto Futuro"]["status"] == "Active"
     assert by_name["Projeto Passado"]["status"] == "Concluded"
+
+
+# --- spec 034: every different activity is parsed, with the right institution ---
+
+IFES_NAME = "Instituto Federal de Educação, Ciência e Tecnologia do Espírito Santo"
+
+
+def _activity(**fields):
+    item = {"instituicao": "Universidade X, UX, Brasil", "tipo": "Atuação profissional"}
+    item.update(fields)
+    return item
+
+
+def _activities(parser, *items):
+    return parser.parse_professional_activities({"atuacao_profissional": list(items)})
+
+
+def test_activities_that_differ_only_in_the_period_are_both_parsed(parser):
+    r = _activities(
+        parser,
+        _activity(ano_inicio="2010", ano_fim="2012", periodo="2010 - 2012"),
+        _activity(ano_inicio="2010", ano_fim="2015", periodo="2010 - 2015"),
+    )
+    assert [a["period"] for a in r] == ["2010 - 2012", "2010 - 2015"]
+
+
+def test_an_exact_repeat_is_parsed_once(parser):
+    item = _activity(ano_inicio="2010", periodo="2010 - 2012", vinculo="Servidor")
+    assert len(_activities(parser, item, dict(item))) == 1
+
+
+def test_institution_only_items_give_one_item(parser):
+    r = _activities(parser, _activity(), _activity(), _activity())
+    assert len(r) == 1 and r[0]["period"] is None
+
+
+def test_an_institution_only_item_beside_a_filled_one_is_dropped(parser):
+    r = _activities(parser, _activity(), _activity(ano_inicio="2010", vinculo="CLT"))
+    assert len(r) == 1 and r[0]["bond"] == "CLT"
+
+
+def test_an_institution_only_item_at_another_institution_is_kept(parser):
+    r = _activities(
+        parser,
+        _activity(ano_inicio="2010"),
+        _activity(instituicao="Empresa Y, EY, Brasil"),
+    )
+    assert [a["institution_acronym"] for a in r] == ["UX", "EY"]
+
+
+def test_institution_fields_come_from_the_full_text(parser):
+    r = _activities(
+        parser,
+        _activity(
+            instituicao=f"{IFES_NAME}, IFES, Brasil",
+            instituicao_nome="Instituto Federal de Educação",
+            instituicao_sigla="Ciência e Tecnologia do Espírito Santo",
+            instituicao_pais="IFES",
+            periodo="2014 - Atual",
+            ano_inicio="2014",
+            ano_fim="Atual",
+        ),
+    )
+    assert r[0]["institution"] == f"{IFES_NAME}, IFES, Brasil"
+    assert r[0]["institution_name"] == IFES_NAME
+    assert r[0]["institution_acronym"] == "IFES"
+    assert r[0]["institution_country"] == "Brasil"
+
+
+def test_a_final_full_stop_does_not_make_another_activity(parser):
+    r = _activities(
+        parser,
+        _activity(instituicao="Universidade X, UX, Brasil.", ano_inicio="2010"),
+        _activity(instituicao="Universidade X, UX, Brasil", ano_inicio="2010"),
+    )
+    assert len(r) == 1 and r[0]["institution"] == "Universidade X, UX, Brasil"

@@ -539,3 +539,41 @@ these differences remain, none of them in a field the merge decides:
   articles 7,979 to 8,053, the two old ids kept as retired aliases); second
   local run wrote no article change; validated on the fork on 2026-11-11
   (two runs, the second over the restored database, no article change). Done.
+- **TD-040 — Different professional activities stored as one, and institution
+  fields swapped**: two defects in the professional activities of a Lattes
+  curriculum. (1) An activity was taken for a repeat when the researcher, the
+  institution and the start year were the same, so the first item was kept and
+  the others dropped. (2) The curriculum data arrives with the institution
+  text cut at every comma, so a name with commas gave a wrong name, acronym
+  and country ("Instituto Federal de Educação" / "Ciência e Tecnologia do
+  Espírito Santo" / "IFES"). Measured on 2026-11-11 over 435 curricula: 13,420
+  items with an institution, 7,855 rows, 2,923 different activities dropped,
+  2,260 rows with "IFES" as the country. Fixed by spec 034
+  (`034-keep-professional-activities`): an item is a repeat only when it
+  equals a stored activity of the researcher in every stored field; name,
+  acronym and country are read from the full institution text, from the end
+  (`src/core/logic/professional_activity_rules.py`). An item that carries only
+  the institution is stored only when the curriculum has no filled activity at
+  that institution (clarification of 2026-11-11). The permanent id hashes the
+  full institution text and the fields that tell two activities apart, and
+  keeps the old id as a candidate, so an old id that one activity owns becomes
+  its alias and the others are recorded as retired. The identity rule version
+  is 4, so a database written before is rebuilt once. Expected after the
+  rebuild: about 9,555 rows. Status: Implemented (2026-11-11); local rebuild
+  validated the same day (9,555 rows, 0 curriculum items missing, 0 rows with
+  an acronym as the country, 5,871 old ids kept as aliases and 1,984 retired);
+  the second local run changed no activity of an unchanged curriculum. Fork
+  validation deferred to the end of the batch (with the next branch).
+- **TD-041 — Tasks and courses of a professional activity are not stored**:
+  3,580 activity items of the curricula carry a list of tasks (`atividades`,
+  for example "Direção e administração, IFES, Campus Colati, Regime:
+  Dedicação exclusiva.") and 54 carry a list of courses taught (`disciplinas`).
+  The parser ignores both and the `professional_activities` table of the
+  domain library has no column for them. Needs a field in `research-domain`
+  first. Status: Ready.
+- **TD-042 — Institution texts that arrive already cut**: 480 activity items
+  arrive with the institution text cut by the third-party curriculum library
+  ("Universidade Federal de", "Prefeitura Municipal de"), and some acronyms
+  arrive cut too ("MULTI", "E"). The missing part is not in the
+  curriculum JSON, so it cannot be recovered in the ETL; the text is stored as
+  it arrives. Status: Open, depends on the library.
