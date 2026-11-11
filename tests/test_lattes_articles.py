@@ -110,3 +110,53 @@ def test_a_doi_with_like_wildcards_is_matched_literally(session):
     _add(session, 2, "U", 2020, "10.1000/axb")
 
     assert _find_article(session, "V", 2021, "10.1000/a_b") == 1
+
+
+# Spec 033: a value that is not a DOI is no DOI.
+SCOPUS_NO_DOI = (
+    "http://www.scopus.com/scopus/inward/citedby.url?partnerID=bb5nvXTn"
+    "&rel=R6.0.0&doi=null&md5=f8a2d9f8af7e0fb17f9968fbbee28b49"
+)
+ISSN_AS_DOI = "http://dx.doi.org/1982-9434"
+
+
+def test_a_scopus_link_without_a_doi_does_not_match_another_title(session):
+    _add(session, 1, "Work A", 2013, SCOPUS_NO_DOI)
+
+    assert _find_article(session, "Work B", 2013, SCOPUS_NO_DOI) is None
+
+
+def test_an_issn_in_the_doi_field_does_not_match_another_title(session):
+    _add(session, 1, "Work A", 2013, ISSN_AS_DOI)
+
+    assert _find_article(session, "Work B", 2013, ISSN_AS_DOI) is None
+
+
+def test_same_title_and_year_still_match_with_a_non_doi_value(session):
+    _add(session, 1, "Work A", 2013, SCOPUS_NO_DOI)
+
+    assert _find_article(session, "work a", 2013, SCOPUS_NO_DOI) == 1
+
+
+def test_a_non_doi_value_matches_an_article_with_a_real_doi_by_title(session):
+    _add(session, 1, "Same", 2020, "10.1000/abc")
+
+    assert _find_article(session, "Same", 2020, SCOPUS_NO_DOI) == 1
+
+
+def test_a_link_carrying_the_doi_matches_the_plain_doi(session):
+    _add(session, 1, "Some Title", 2019, "10.1186/1753-6561-8-s4-p29")
+    link = (
+        "http://www.scopus.com/scopus/inward/citedby.url?partnerID=x"
+        "&rel=R6.0.0&doi=10.1186/1753-6561-8-s4-p29&md5=abc"
+    )
+
+    assert _find_article(session, "Other", 2020, link) == 1
+
+
+def test_a_doi_with_spaces_or_a_trailing_full_stop_matches(session):
+    _add(session, 1, "Some Title", 2019, "10.3390/fishes6030031")
+
+    spaced = "http://dx.doi.org/10.3390 / fishes6030031"
+    assert _find_article(session, "Other", 2020, spaced) == 1
+    assert _find_article(session, "Other", 2020, "10.3390/fishes6030031.") == 1

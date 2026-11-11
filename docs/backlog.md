@@ -519,3 +519,22 @@ these differences remain, none of them in a field the merge decides:
   the spec 032 fork runs, reproduced locally). A project PDF should only match
   a research project, and the claims of one row should be merged together.
   Not checked on main. Status: Investigate.
+- **TD-039 — A value that is not a DOI merges different articles**: the DOI
+  field of a Lattes article sometimes holds a Scopus link without a DOI
+  (`...citedby.url?...&doi=null&md5=...`) or an ISSN, and any text was taken
+  for a DOI, so every work with the same text became one article. On the
+  from-scratch run of 2026-11-10 (435 curricula): 110 curriculum items
+  attached to an article with another title, 69 works hidden inside 2
+  articles, 45 articles storing a value that is not a DOI; also on main (97
+  items) and branch 022 (85). Fixed by spec 033 (`033-valid-doi-matching`):
+  `normalize_doi` is the single rule and returns a DOI only for a value in DOI
+  form, after taking the DOI out of a `doi=` link parameter and removing the
+  doi.org address, spaces and trailing punctuation; anything else is no DOI
+  and the item is matched by title and year. The article stores the bare DOI
+  (`10.xxxx/...`); the raw value stays in the source record. The identity rule
+  version is 3, so a database written before is rebuilt once. Journal and
+  conference items with the same title and year becoming one article (47
+  cases) is a separate defect, still open. Status: Implemented (2026-11-10);
+  local rebuild validated the same day (0 stored values that are not DOIs,
+  articles 7,979 to 8,053, the two old ids kept as retired aliases); second
+  local run wrote no article change; fork validation pending.

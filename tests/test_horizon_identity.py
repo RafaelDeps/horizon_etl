@@ -2,6 +2,8 @@
 
 import math
 
+import pytest
+
 from src.core.logic.horizon_identity import (
     canonical,
     canonical_hash,
@@ -59,6 +61,62 @@ def test_normalize_doi_strips_url_prefixes_and_case():
         assert normalize_doi(raw) == expected
     assert normalize_doi("") is None
     assert normalize_doi(None) is None
+
+
+_SCOPUS = "http://www.scopus.com/scopus/inward/citedby.url?partnerID=x&rel=R6.0.0"
+
+# Spec 033: the examples of contracts/doi-rule.md, one row each.
+_DOI_EXAMPLES = [
+    (None, None),
+    ("", None),
+    ("   ", None),
+    (
+        "10.1016/j.theriogenology.2018.10.032",
+        "10.1016/j.theriogenology.2018.10.032",
+    ),
+    (
+        "http://dx.doi.org/10.1016/J.Theriogenology.2018.10.032",
+        "10.1016/j.theriogenology.2018.10.032",
+    ),
+    (
+        " https://doi.org/10.1016/j.theriogenology.2018.10.032 ",
+        "10.1016/j.theriogenology.2018.10.032",
+    ),
+    ("doi:10.1590/S0101-20612006000400005", "10.1590/s0101-20612006000400005"),
+    (
+        "http://dx.doi.org/10.1590/S0101-20612006000400005.",
+        "10.1590/s0101-20612006000400005",
+    ),
+    ("http://dx.doi.org/10.3390 / fishes6030031", "10.3390/fishes6030031"),
+    ("http://dx.doi.org/10.5897 /AJAR 2022.16224", "10.5897/ajar2022.16224"),
+    (
+        f"{_SCOPUS}&doi=10.1186/1753-6561-8-s4-p29&md5=abc",
+        "10.1186/1753-6561-8-s4-p29",
+    ),
+    (
+        f"{_SCOPUS}&doi=10.1186%2F1753-6561-8-s4-p29&md5=abc",
+        "10.1186/1753-6561-8-s4-p29",
+    ),
+    (f"{_SCOPUS}&doi=null&md5=f8a2", None),
+    (f"{_SCOPUS}&doi=&md5=f8a2", None),
+    (f"{_SCOPUS}&doi=latin american journal of solids&md5=f8a2", None),
+    ("http://dx.doi.org/1982-9434", None),
+    ("1982-9434", None),
+    ("http://dx.doi.org/10.22410/", None),
+    ("10.1/x", None),
+    ("not a doi", None),
+]
+
+
+@pytest.mark.parametrize("raw, expected", _DOI_EXAMPLES)
+def test_normalize_doi_contract(raw, expected):
+    assert normalize_doi(raw) == expected
+
+
+def test_normalize_doi_is_idempotent():
+    for raw, expected in _DOI_EXAMPLES:
+        if expected is not None:
+            assert normalize_doi(normalize_doi(raw)) == expected
 
 
 def test_id_extractors_on_real_examples():
@@ -245,7 +303,9 @@ def test_article_doi_spellings_give_one_id_and_keep_the_content_candidate():
     assert ids == {"article:doi:10.1016/j.theriogenology.2018.10.032"}
     without = article_decision({**base, "doi": ""})
     assert without.horizon_id.startswith("article:h:")
-    assert without.horizon_id in article_decision({**base, "doi": "10.1/x"}).candidates
+    assert (
+        without.horizon_id in article_decision({**base, "doi": "10.1000/x"}).candidates
+    )
 
 
 def test_production():
@@ -403,3 +463,34 @@ def test_merge_candidates_of_an_article_are_its_decision_candidates():
 
     assert candidates == article_decision(row).candidates
     assert any(c.startswith("article:h:") for c in candidates)
+
+
+def test_article_with_a_non_doi_value_gets_the_content_id():
+    # Spec 033: a Scopus link or an ISSN in the DOI field is no DOI.
+    base = {
+        "id": 1,
+        "title": "T",
+        "year": "2019",
+        "type": "Journal",
+        "journal_conference": "J",
+    }
+    without = article_decision({**base, "doi": ""}).horizon_id
+    assert without.startswith("article:h:")
+    for value in (f"{_SCOPUS}&doi=null&md5=f8a2", "http://dx.doi.org/1982-9434"):
+        assert article_decision({**base, "doi": value}).horizon_id == without
+
+
+def test_valid_doi_spellings_keep_the_same_article_id():
+    # Spec 033 (research R8): ids published for valid DOIs do not change.
+    base = {"id": 1, "title": "T", "year": "2019", "type": "Journal"}
+    doi = "10.1016/j.theriogenology.2018.10.032"
+    ids = {
+        article_decision({**base, "doi": value}).horizon_id
+        for value in (
+            doi,
+            f"http://dx.doi.org/{doi}",
+            f"{doi}.",
+            f"{_SCOPUS}&doi={doi}&md5=abc",
+        )
+    }
+    assert ids == {f"article:doi:{doi}"}

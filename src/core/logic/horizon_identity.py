@@ -14,6 +14,7 @@ import math
 import os
 import re
 from typing import Any, Optional
+from urllib.parse import unquote
 
 from src.core.logic.initiative_identity import normalize_text
 
@@ -21,7 +22,9 @@ from src.core.logic.initiative_identity import normalize_text
 # with another version is rebuilt, and the history turns old ids into aliases.
 # 2 (branch 030): shared fields come from the claims of every document, so a
 # database written by "the last document wins" is rebuilt once.
-HORIZON_RULE_VERSION = 2
+# 3 (branch 033): only a value in DOI form is a DOI, so articles merged under
+# a link or an ISSN are split by one rebuild.
+HORIZON_RULE_VERSION = 3
 
 # Similarity (rapidfuzz token_sort_ratio, 0-100) at which two names or titles
 # are the same thing: PersonMatcher's fuzzy threshold, and the "key corrected"
@@ -33,7 +36,10 @@ _EMPTY_TEXT = {"", "nan", "NaN", "None"}
 _LATTES_URL = re.compile(r"lattes\.cnpq\.br/(\d{16})")
 _CNPQ_GROUP_URL = re.compile(r"espelhogrupo/(\w+)")
 _LATTES_CV_FILE = re.compile(r"(\d{16})\.json$")
-_DOI_PREFIX = re.compile(r"^(https?://)?(dx\.)?doi\.org/")
+_DOI_PREFIX = re.compile(r"^(?:(?:https?://)?(?:dx\.)?doi\.org/|doi\s*:\s*)")
+_DOI_LINK_PARAM = re.compile(r"[?&]doi=([^&#]*)", re.IGNORECASE)
+_DOI_FORM = re.compile(r"^10\.\d{4,9}(\.\d+)*/\S+$")
+_WHITESPACE = re.compile(r"\s+")
 
 
 def canonical(value: Any) -> Any:
@@ -83,11 +89,23 @@ def slug(text: Any) -> str:
 
 
 def normalize_doi(doi: Any) -> Optional[str]:
-    """Lowercased DOI without the doi.org / dx.doi.org URL prefix, or None."""
+    """The cleaned DOI of a value, or None when the value holds no DOI.
+
+    The single DOI rule (spec 033, contracts/doi-rule.md). The Lattes DOI field
+    sometimes holds a Scopus link, an ISSN or a DOI with spaces; a value
+    without DOI form is no DOI, so it never identifies an article. Cleaning:
+    the DOI of a ``doi=`` link parameter, lower case, no doi.org address or
+    ``doi:`` label, no spaces, no trailing punctuation.
+    """
     if doi is None:
         return None
-    text = _DOI_PREFIX.sub("", str(doi).strip().lower()).strip()
-    return text or None
+    text = str(doi).strip()
+    in_link = _DOI_LINK_PARAM.search(text)
+    if in_link:
+        text = unquote(in_link.group(1))
+    text = _DOI_PREFIX.sub("", text.strip().lower())
+    text = _WHITESPACE.sub("", text).rstrip(".,;")
+    return text if _DOI_FORM.match(text) else None
 
 
 def lattes_id_from_url(url: Any) -> Optional[str]:

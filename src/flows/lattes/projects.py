@@ -458,12 +458,22 @@ def _fill_missing_article_fields(session, paper_id, art, source_record_id) -> No
     )
 
 
+def _with_clean_doi(art: dict) -> dict:
+    """A copy of the article item whose ``doi`` is the cleaned DOI, or None
+    (spec 033, FR-006). The CV's DOI field sometimes holds a Scopus link or an
+    ISSN; the article stores a real DOI only. The item itself is left as the
+    CV wrote it: it is the payload of the tracked source record."""
+    return {**art, "doi": normalize_doi(art.get("doi"))}
+
+
 def _find_article(session, title, year, doi) -> Optional[int]:
     """Id of the stored article that is this work, or None (spec 029, D4).
 
     A DOI that matches after ``normalize_doi`` (case, doi.org prefix) is the
     same article whatever the title. Otherwise the same ``normalize_text``
     title in the same year, unless both records carry a DOI and the DOIs differ.
+    A value that is not a DOI after ``normalize_doi`` (a Scopus link, an ISSN:
+    spec 033) counts as no DOI, so the item is matched by title and year.
     Blank titles never match. The lowest id wins. Column-only SQL, as the
     lookups it replaces (no ORM joins)."""
     wanted = normalize_doi(doi)
@@ -513,7 +523,6 @@ def ingest_articles_task(
         try:
             title = art["title"]
             year = art["year"]
-            doi = art.get("doi")
             source_record = tracking_recorder.record_source_record(
                 source_entity_type="article",
                 payload=art,
@@ -523,6 +532,10 @@ def ingest_articles_task(
                 source_file=source_file,
                 source_path=source_file,
             )
+            # Spec 033: the source record above keeps the DOI field as the CV
+            # wrote it; from here on the item carries the cleaned DOI or None.
+            art = _with_clean_doi(art)
+            doi = art["doi"]
 
             # Column-only lookups (see _find_article): the Article.authors
             # relationship is lazy="joined" and Researcher carries several more

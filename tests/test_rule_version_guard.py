@@ -41,6 +41,20 @@ def test_other_or_missing_version_needs_a_reset(tmp_path):
     assert rule_version_requires_reset(str(db)) is True
 
 
+def test_a_database_written_before_spec_033_needs_a_reset(tmp_path):
+    # Spec 033: version 2 took any text of the DOI field for a DOI, so its
+    # articles may be merged under a Scopus link or an ISSN.
+    db = tmp_path / "v2.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE horizon_meta SET value = '2' WHERE key = 'rule_version'")
+    con.commit()
+    con.close()
+    assert HORIZON_RULE_VERSION >= 3
+    assert rule_version_requires_reset(str(db)) is True
+
+
 def test_weekly_resets_once_before_the_phases(
     tmp_path, monkeypatch, _no_rule_version_reset
 ):

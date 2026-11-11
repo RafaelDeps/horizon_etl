@@ -70,9 +70,9 @@ def test_article_key_tells_journal_and_conference_versions_apart():
     )
     assert journal != event
     with_doi = lattes_article_key(
-        CV, {**base, "doi": "https://doi.org/10.1/ABC", "type": "J"}
+        CV, {**base, "doi": "https://doi.org/10.1000/ABC", "type": "J"}
     )
-    assert "|10.1/abc|" in with_doi
+    assert "|10.1000/abc|" in with_doi
 
 
 def test_lattes_initiative_and_advisorship_keys_carry_the_cv():
@@ -110,3 +110,14 @@ def test_same_document_duplicates_keep_one_fixed_version():
         k for k in kept_b if k["title"] == "T"
     ]
     assert other in kept_a and other in kept_b
+
+
+def test_article_key_of_a_non_doi_value_uses_title_and_year():
+    # Spec 033: the Scopus link shared by many works is not their key.
+    link = "http://www.scopus.com/x?partnerID=x&doi=null&md5=f8a2"
+    art = {"title": "Work A", "year": "2013", "type": "Journal"}
+    assert lattes_article_key(CV, {**art, "doi": link}) == lattes_article_key(
+        CV, {**art, "doi": None}
+    )
+    other = {**art, "title": "Work B", "doi": link}
+    assert lattes_article_key(CV, other) != lattes_article_key(CV, {**art, "doi": link})

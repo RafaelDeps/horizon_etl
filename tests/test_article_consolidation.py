@@ -103,10 +103,10 @@ def test_two_different_dois_merge_only_rows_with_the_same_doi(tmp_path):
     db = _db(
         tmp_path,
         [
-            (1, "Same Title", "10.1/x", 2020, None, None),
-            (2, "Same Title", "10.1/y", 2020, None, None),
+            (1, "Same Title", "10.1000/x", 2020, None, None),
+            (2, "Same Title", "10.1000/y", 2020, None, None),
             (3, "Same Title", None, 2020, None, None),
-            (4, "Same Title", "10.1/X", 2020, None, None),
+            (4, "Same Title", "10.1000/X", 2020, None, None),
         ],
     )
 
@@ -121,9 +121,9 @@ def test_a_doi_less_row_joins_the_single_doi_of_its_title_group(tmp_path):
         tmp_path,
         [
             (1, "Same Title", None, 2020, None, None),
-            (2, "Same Title", "10.1/x", 2020, None, None),
+            (2, "Same Title", "10.1000/x", 2020, None, None),
         ],
-        ids={1: "article:h:aaa", 2: "article:doi:10.1/x"},
+        ids={1: "article:h:aaa", 2: "article:doi:10.1000/x"},
     )
 
     ReferenceConsolidator(db).consolidate_articles()
@@ -170,7 +170,7 @@ def test_survivor_empty_fields_are_filled_and_nothing_is_overwritten(tmp_path):
         tmp_path,
         [
             (1, "Work", None, 2020, "Journal A", None),
-            (2, "work", "10.1/x", 2020, "Journal B", "12"),
+            (2, "work", "10.1000/x", 2020, "Journal B", "12"),
         ],
         ids={1: "article:h:aaa", 2: "article:h:bbb"},
     )
@@ -183,7 +183,7 @@ def test_survivor_empty_fields_are_filled_and_nothing_is_overwritten(tmp_path):
 
     survivor = _row(db, 1)
     assert survivor["journal_conference"] == "Journal A"  # kept
-    assert survivor["doi"] == "10.1/x"  # filled
+    assert survivor["doi"] == "10.1000/x"  # filled
     assert survivor["volume"] == "12"  # filled
     assert survivor["pages"] == "1-9"  # filled
 
@@ -210,8 +210,8 @@ def test_stats_count_groups_and_rows(tmp_path):
             (1, "A", None, 2020, None, None),
             (2, "a", None, 2020, None, None),
             (3, "a.", None, 2020, None, None),
-            (4, "B", "10.1/b", 2019, None, None),
-            (5, "C", "10.1/B", 2018, None, None),
+            (4, "B", "10.1000/b", 2019, None, None),
+            (5, "C", "10.1000/B", 2018, None, None),
         ],
     )
 
@@ -497,3 +497,21 @@ def test_a_second_pass_changes_nothing_in_the_log(tmp_path, report_dir):
     assert _ids(db) == articles
     report = json.loads((report_dir / "article_consolidation_report.json").read_text())
     assert report["groups"] == 0 and report["rows_merged"] == 0
+
+
+def test_a_shared_non_doi_value_does_not_group_articles(tmp_path):
+    # Spec 033: a Scopus link without a DOI is no DOI.
+    link = "http://www.scopus.com/x?partnerID=x&doi=null&md5=f8a2"
+    db = _db(
+        tmp_path,
+        [
+            (1, "Work A", link, 2013, None, None),
+            (2, "Work B", link, 2007, None, None),
+            (3, "Work C", link, 2013, None, None),
+        ],
+    )
+
+    stats = ReferenceConsolidator(db).consolidate_articles()
+
+    assert _ids(db) == [1, 2, 3]
+    assert stats.merged == 0
