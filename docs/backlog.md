@@ -537,4 +537,5 @@ these differences remain, none of them in a field the merge decides:
   cases) is a separate defect, still open. Status: Implemented (2026-11-10);
   local rebuild validated the same day (0 stored values that are not DOIs,
   articles 7,979 to 8,053, the two old ids kept as retired aliases); second
-  local run wrote no article change; fork validation pending.
+  local run wrote no article change; validated on the fork on 2026-11-11
+  (two runs, the second over the restored database, no article change). Done.
