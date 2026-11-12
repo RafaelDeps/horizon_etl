@@ -483,7 +483,11 @@ these differences remain, none of them in a field the merge decides:
   fellowships "JTC" with value 0 exist in the incremental database
   (`fellowship:jtc:0~e3b0c4` and `~2`), one in the rebuild, and one
   advisorship points to the copy. Find which run created the second one.
-  Status: Investigate.
+  Seen again on 2026-11-11/12 in the local runs of branches 034 and 035 and
+  in the fork runs of branch 035: a rebuild stores one "JTC" (id 15) and the
+  second run stores it again (id 21), moves one advisorship to the new row
+  and changes the collision suffix of that fellowship id. So the copy is
+  created by the first incremental run after a rebuild. Status: Investigate.
 - **TD-035 — `recalculate_parent_projects` only extends a parent's dates**:
   it moves the start earlier and the end later, never back. A parent keeps a
   date from an earlier state once a child changes or leaves (parent 288: end
@@ -628,10 +632,3 @@ these differences remain, none of them in a field the merge decides:
   changes: 44 advisorships between the two local runs of branch 035, 61
   between the two runs of branch 034; 132 advisorships are fed by more than
   one curriculum. The co-advisor is not stored as such. Status: Open.
-- **TD-048 — A fellowship with value 0 and no sponsor is stored again by a
-  second run**: seen on 2026-11-11/12 in the local runs of branches 034
-  and 035 and in the fork runs of branch 035: the fellowship "JTC" (value 0, no sponsor) gets a
-  second row in the second run (ids 15 and 21), one advisorship moves to the
-  new row, and the collision suffix of that fellowship id changes. One
-  fellowship of 21; no advisorship is lost. Cause not investigated. Status:
-  Open.
