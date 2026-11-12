@@ -628,3 +628,10 @@ these differences remain, none of them in a field the merge decides:
   changes: 44 advisorships between the two local runs of branch 035, 61
   between the two runs of branch 034; 132 advisorships are fed by more than
   one curriculum. The co-advisor is not stored as such. Status: Open.
+- **TD-048 — A fellowship with value 0 and no sponsor is stored again by a
+  second run**: seen on 2026-11-11/12 in the local runs of branches 034
+  and 035 and in the fork runs of branch 035: the fellowship "JTC" (value 0, no sponsor) gets a
+  second row in the second run (ids 15 and 21), one advisorship moves to the
+  new row, and the collision suffix of that fellowship id changes. One
+  fellowship of 21; no advisorship is lost. Cause not investigated. Status:
+  Open.
