@@ -20,7 +20,9 @@ from research_domain.controllers.controllers import (
 )
 from sqlalchemy import text
 
+from src.core.logic.advisorship_matching import base_title
 from src.core.logic.document_skip import claim, merging_fields
+from src.core.logic.initiative_identity import normalize_text
 from src.research_domain_compat import (
     Advisorship,
     AdvisorshipRole,
@@ -165,11 +167,18 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         metadata = project_data.get("metadata", {}).copy()
         if project_data.get("identity_key"):
             metadata["source_identity"] = project_data["identity_key"]
-        persisted_title = self._resolve_persisted_title(
-            title,
-            project_data,
-            current_id=getattr(existing_initiative, "id", None),
-        )
+        stored_name = getattr(existing_initiative, "name", None)
+        if isinstance(stored_name, str) and base_title(stored_name) == title:
+            # Spec 035: a matched advisorship keeps its name. Another item of
+            # the same work (co-advisor's curriculum, the other source) would
+            # build another suffix and rename the row back and forth.
+            persisted_title = stored_name
+        else:
+            persisted_title = self._resolve_persisted_title(
+                title,
+                project_data,
+                current_id=getattr(existing_initiative, "id", None),
+            )
         if not existing_initiative:
             existing_initiative = self._find_existing_advisorship_by_title(
                 persisted_title
@@ -291,17 +300,7 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         student_person = None
         supervisor_person = None
 
-        student_names = project_data.get("student_names") or [None]
-        student_emails = project_data.get("student_emails") or [None]
-        student_name = student_names[0]
-        student_email = student_emails[0]
-        if student_name or student_email:
-            student_person = self.person_matcher.match_or_create(
-                student_name,
-                email=student_email,
-                strict_match=strict,
-            )
-            student_person = self._coerce_to_person(student_person)
+        student_person = self._student_person(project_data)
 
         supervisor_name = project_data.get("coordinator_name")
         supervisor_email = project_data.get("coordinator_email")
@@ -314,6 +313,28 @@ class AdvisorshipHandler(BaseInitiativeHandler):
             supervisor_person = self._coerce_to_person(supervisor_person)
 
         return student_person, supervisor_person
+
+    def _student_person(self, project_data: Dict[str, Any]) -> Optional[Any]:
+        """The person the item's student resolves to (first name and e-mail)."""
+        student_names = project_data.get("student_names") or [None]
+        student_emails = project_data.get("student_emails") or [None]
+        student_name = student_names[0]
+        student_email = student_emails[0]
+        if not (student_name or student_email):
+            return None
+        student_person = self.person_matcher.match_or_create(
+            student_name,
+            email=student_email,
+            strict_match=True,  # SigPesq requirement
+        )
+        return self._coerce_to_person(student_person)
+
+    def item_student(self, project_data: Dict[str, Any]) -> tuple:
+        """Spec 035: the student of an advisorship item as the matching rule
+        compares it: (person id or None, normalized name or "")."""
+        person = self._student_person(project_data)
+        student_names = project_data.get("student_names") or [None]
+        return getattr(person, "id", None), normalize_text(student_names[0])
 
     def _ensure_fellowship(self, project_data: Dict[str, Any]) -> Optional[Fellowship]:
         fellowship_data = project_data.get("fellowship_data")

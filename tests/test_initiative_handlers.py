@@ -500,3 +500,86 @@ def test_deferred_members_are_written_once_with_the_last_value(
 
     assert advisorship.members == [kept]  # the last value equals the stored one
     assert handler.defer_members is True
+
+
+# --- Spec 035: a matched advisorship keeps its stored name ------------------
+
+
+def _update_name(handler, stored_name, project_data):
+    """The name passed to update_initiative when an item is written over a
+    matched advisorship named ``stored_name``."""
+    existing = Advisorship(name=stored_name, status="active")
+    existing.id = 41
+    handler.create_or_update(
+        project_data=project_data,
+        existing_initiative=existing,
+        initiative_type_name="Advisorship",
+        initiative_type_id=7,
+        organization_id=9,
+    )
+    return handler.initiative_controller.update_initiative.call_args.kwargs["name"]
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_matched_advisorship_keeps_its_distinct_name(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    # The bare title is held by another row.
+    session = handler.initiative_controller._service._repository._session
+    session.execute.return_value.scalar.return_value = 258
+
+    name = _update_name(
+        handler,
+        "T | Orientacao Ana | 2019",
+        {
+            "title": "T",
+            "status": "active",
+            "student_names": ["Ana Estudante"],
+            "start_date": datetime(2020, 8, 1),
+            "metadata": {"sigpesq_id": 123},
+        },
+    )
+
+    assert name == "T | Orientacao Ana | 2019"
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_matched_advisorship_keeps_its_bare_title(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+
+    name = _update_name(handler, "T", {"title": "T", "status": "active"})
+
+    assert name == "T"
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_matched_advisorship_with_a_new_title_is_renamed_as_before(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    data = {
+        "title": "T",
+        "status": "active",
+        "student_names": ["Ana Estudante"],
+        "start_date": datetime(2020, 8, 1),
+    }
+
+    # The new title is free: the row takes it.
+    assert _update_name(handler, "Old", dict(data)) == "T"
+
+    # The new title is held by another row: the distinct name, as before.
+    session = handler.initiative_controller._service._repository._session
+    session.execute.return_value.scalar.return_value = 258
+    assert (
+        _update_name(handler, "Old", dict(data))
+        == "T | Orientacao Ana Estudante | 2020"
+    )

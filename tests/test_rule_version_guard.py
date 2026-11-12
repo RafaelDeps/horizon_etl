@@ -69,6 +69,21 @@ def test_a_database_written_before_spec_034_needs_a_reset(tmp_path):
     assert rule_version_requires_reset(str(db)) is True
 
 
+def test_a_database_written_before_spec_035_needs_a_reset(tmp_path):
+    # Spec 035: version 4 took every advisorship item with the title of a
+    # stored advisorship for that advisorship, whatever the student, so its
+    # advisorships of different students are merged.
+    db = tmp_path / "v4.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE horizon_meta SET value = '4' WHERE key = 'rule_version'")
+    con.commit()
+    con.close()
+    assert HORIZON_RULE_VERSION >= 5
+    assert rule_version_requires_reset(str(db)) is True
+
+
 def test_weekly_resets_once_before_the_phases(
     tmp_path, monkeypatch, _no_rule_version_reset
 ):

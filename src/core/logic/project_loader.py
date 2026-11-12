@@ -20,6 +20,13 @@ from research_domain.controllers.controllers import (
 from research_domain.domain.entities import Advisorship
 from sqlalchemy import text
 
+from src.core.logic.advisorship_matching import (
+    StoredAdvisorship,
+    base_title,
+    pick_match,
+    widen,
+    year_range,
+)
 from src.core.logic.document_skip import claim, note_collision_resolved
 from src.core.logic.entity_manager import EntityManager
 from src.core.logic.field_merge import MERGED_FIELDS
@@ -103,6 +110,9 @@ class ProjectLoader:
         self._existing_by_name = None
         self._existing_by_norm_name = None
         self._existing_by_identity = None
+        # Spec 035: the stored advisorships of each title, with their student
+        # and years (see ``_ensure_advisorship_index``).
+        self._advisorship_index = None
 
         # Net change log (spec 020, FR-022). The same initiative is written by
         # each CV that lists it, and each CV may carry another description: the
@@ -151,10 +161,145 @@ class ProjectLoader:
         self._existing_by_name = None
         self._existing_by_norm_name = None
         self._existing_by_identity = None
+        self._advisorship_index = None
         self.person_matcher.reset_cache()
         self.team_synchronizer.reset_lookup()
         self.team_synchronizer.roles_cache.clear()
         self.team_synchronizer.roles_cache.update(self.entity_manager.ensure_roles())
+
+    # ------------------------------------------------------------------
+    # Spec 035: advisorships of the same title
+    # ------------------------------------------------------------------
+
+    def _ensure_advisorship_index(self) -> Dict[str, list]:
+        """``base title -> [StoredAdvisorship]``, read once from the database
+        and kept up to date by ``_remember_advisorship``. The index, not the
+        database, answers inside a run: the members of an existing advisorship
+        and its dates are written later (deferred members, field merge).
+
+        The years of a stored advisorship cover its stored dates and every
+        date a source document claimed for it (branch 030 keeps them): the
+        field merge stores the dates of the newest document only, so a SigPesq
+        period of 2015-2016 becomes "2016" once a curriculum says so, and the
+        curriculum's 2015 item of the same work would stop matching."""
+        index = getattr(self, "_advisorship_index", None)
+        if index is not None:
+            return index
+        index = {}
+        session = self.controller._service._repository._session
+        rows = session.execute(
+            text(
+                "SELECT i.id, i.name, i.start_date, i.end_date, m.person_id, p.name "
+                "FROM initiatives i JOIN advisorships a ON a.id = i.id "
+                "LEFT JOIN advisorship_members m ON m.advisorship_id = a.id "
+                "AND m.role_name = 'Student' "
+                "LEFT JOIN persons p ON p.id = m.person_id "
+                "ORDER BY i.id, m.id"
+            )
+        ).fetchall()
+        claimed: Dict[Any, Any] = {}
+        for adv_id, value_json in session.execute(
+            text(
+                "SELECT entity_id, value_json FROM source_field_claims "
+                "WHERE entity_type = 'advisorship' "
+                "AND field IN ('start_date', 'end_date')"
+            )
+        ).fetchall():
+            try:
+                value = json.loads(value_json) if value_json else None
+            except (TypeError, ValueError):
+                value = value_json
+            claimed[adv_id] = widen(claimed.get(adv_id), year_range(value, None))
+        seen = set()
+        for adv_id, name, start, end, person_id, person_name in rows:
+            if adv_id in seen:
+                continue
+            seen.add(adv_id)
+            index.setdefault(base_title(name), []).append(
+                StoredAdvisorship(
+                    id=adv_id,
+                    name=name or "",
+                    student_id=person_id,
+                    student_name=normalize_text(person_name),
+                    years=widen(year_range(start, end), claimed.get(adv_id)),
+                )
+            )
+        self._advisorship_index = index
+        return index
+
+    def _item_student(self, project_data: Dict[str, Any]) -> tuple:
+        """(person id or None, normalized name) of the item's student, asked
+        once per item to the advisorship handler."""
+        if "_item_student" not in project_data:
+            handler = self.handlers[Advisorship]
+            project_data["_item_student"] = tuple(handler.item_student(project_data))
+        return project_data["_item_student"]
+
+    def _load_advisorship(self, advisorship_id: Any) -> Optional[Any]:
+        try:
+            return self.adv_controller.get_by_id(advisorship_id)
+        except Exception:
+            return None
+
+    def _match_stored_advisorship(
+        self, title: Optional[str], project_data: Optional[Dict[str, Any]]
+    ) -> Optional[Any]:
+        """The stored advisorship of this title that belongs to the item's
+        student and years, or None (the item is then a new advisorship)."""
+        if not title:
+            return None
+        candidates = self._ensure_advisorship_index().get(base_title(title)) or []
+        if not candidates:
+            return None
+        data = project_data if project_data is not None else {}
+        student_id, student_name = self._item_student(data) if data else (None, "")
+        match = pick_match(
+            student_id,
+            student_name,
+            year_range(data.get("start_date"), data.get("end_date")),
+            candidates,
+        )
+        if match is None:
+            return None
+        found = self._load_advisorship(match.id)
+        if found is None:
+            candidates.remove(match)
+        return found
+
+    def _remember_advisorship(
+        self, initiative: Any, title: Optional[str], project_data: Dict[str, Any]
+    ) -> None:
+        """Puts the advisorship just written in the index, with the item's
+        student and with its years widened by the item's years."""
+        adv_id = getattr(initiative, "id", None)
+        if adv_id is None:
+            return
+        name = getattr(initiative, "name", None)
+        if not isinstance(name, str) or not name:
+            name = title or ""
+        entries = self._ensure_advisorship_index().setdefault(base_title(name), [])
+        student_id, student_name = self._item_student(project_data)
+        years = year_range(project_data.get("start_date"), project_data.get("end_date"))
+        for position, entry in enumerate(entries):
+            if entry.id == adv_id:
+                has_student = student_id is not None or bool(student_name)
+                entries[position] = StoredAdvisorship(
+                    id=adv_id,
+                    name=name,
+                    student_id=student_id if has_student else entry.student_id,
+                    student_name=student_name if has_student else entry.student_name,
+                    years=widen(entry.years, years),
+                )
+                return
+        entries.append(
+            StoredAdvisorship(
+                id=adv_id,
+                name=name,
+                student_id=student_id,
+                student_name=student_name,
+                years=years,
+            )
+        )
 
     def _ensure_person_cache(self) -> None:
         if self.person_matcher._persons_cache:
@@ -673,6 +818,7 @@ class ProjectLoader:
             identity_key=identity_key,
             title=title,
             existing_by_norm_name=existing_by_norm_name,
+            project_data=project_data,
         )
 
         # TD-029 (branch 030): a project whose title is held by an advisorship
@@ -763,6 +909,9 @@ class ProjectLoader:
                 self._register_identity(
                     existing_by_identity, resolved_identity, initiative
                 )
+
+        if initiative and model_class is Advisorship:
+            self._remember_advisorship(initiative, title, project_data)
 
         if initiative:
             canonical_entity_type = (
@@ -870,11 +1019,21 @@ class ProjectLoader:
         identity_key: Optional[str],
         title: Optional[str],
         existing_by_norm_name: Optional[Dict[str, Any]] = None,
+        project_data: Optional[Dict[str, Any]] = None,
     ) -> Optional[Any]:
         if identity_key:
             candidate = existing_by_identity.get(identity_key)
             if self._candidate_matches_model(candidate, model_class):
                 return candidate
+
+        # Spec 035: the title of an advisorship is the title of the work, and
+        # many students share one ("Estágio Supervisionado Obrigatório"). A
+        # stored advisorship of that title is this item's only for the same
+        # student and years; the name alone never decides. The same work in
+        # the advisor's and the co-advisor's curriculum has the same student
+        # and stays one advisorship.
+        if model_class is Advisorship:
+            return self._match_stored_advisorship(title, project_data)
 
         if title:
             candidate = existing_by_name.get(title)
@@ -885,22 +1044,7 @@ class ProjectLoader:
         if exact is not None:
             return exact
 
-        # Última tentativa: mesma coisa escrita de outro jeito. Só depois de o
-        # exato falhar, para que a grafia idêntica sempre tenha precedência.
-        #
-        # NÃO vale para orientações, e a diferença é de significado. No projeto,
-        # o nome identifica o projeto: "PROJETO X" e "Projeto X" são a mesma
-        # coisa e devem virar uma linha só. Na orientação, o nome é o título do
-        # TRABALHO, e o mesmo trabalho aparece legitimamente em mais de um
-        # currículo — o do orientador e o do coorientador —, cada um trazendo
-        # participantes diferentes. Fundir pelo título faz a linha sobrevivente
-        # ficar só com os participantes de quem escreveu por último: medido, 100
-        # orientações fundidas custaram 200 vínculos, um orientador por fusão.
-        # A desambiguação das orientações já é feita pelo AdvisorshipHandler,
-        # por aluno, ano e código.
-        if model_class is Advisorship:
-            return None
-
+        # Last attempt: the same name written another way (projects only).
         if title and existing_by_norm_name:
             candidate = existing_by_norm_name.get(normalize_text(title))
             if self._candidate_matches_model(candidate, model_class):

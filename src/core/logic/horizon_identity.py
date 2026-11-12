@@ -27,7 +27,10 @@ from src.core.logic.initiative_identity import normalize_text
 # 4 (branch 034): a professional activity is identified by every stored field
 # and by the full institution text, so activities collapsed by institution
 # and start year are split by one rebuild.
-HORIZON_RULE_VERSION = 4
+# 5 (branch 035): an advisorship item is a stored advisorship of the same
+# title only for the same student and years, so advisorships of different
+# students merged by their title are split by one rebuild.
+HORIZON_RULE_VERSION = 5
 
 # Similarity (rapidfuzz token_sort_ratio, 0-100) at which two names or titles
 # are the same thing: PersonMatcher's fuzzy threshold, and the "key corrected"

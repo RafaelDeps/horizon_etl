@@ -503,8 +503,9 @@ these differences remain, none of them in a field the merge decides:
   when a SigPesq workplan changes student, the cancelled row and the new row
   (e.g. workplan PT 8732, Ids 3961 and 4145) write the same advisorship.
   Branch 030 makes the result fixed (the highest Id decides `cancelled`), but
-  the two students may deserve two advisorships. Decide with the maintainer.
-  Status: Decision needed.
+  the two students may deserve two advisorships. Decided on 2026-11-11: each
+  student has an advisorship. Fixed by branch 035 (see TD-043).
+  Status: Implemented (2026-11-11); validation pending.
 - **TD-038 — A project PDF is matched to an advisorship with the same title**:
   the enrichment looks for a research project by title and finds an
   advisorship (a student's workplan) whose title is the same as the project's
@@ -577,3 +578,53 @@ these differences remain, none of them in a field the merge decides:
   arrive cut too ("MULTI", "E"). The missing part is not in the
   curriculum JSON, so it cannot be recovered in the ETL; the text is stored as
   it arrives. Status: Open, depends on the library.
+- **TD-043 — Advisorships of different students with the same title stored as
+  one**: an advisorship item whose title equals a stored advisorship's title
+  was written over it whatever the student, and the student was replaced.
+  Two causes: the loader kept, per title, the last advisorship written, and
+  the source identity of an advisorship lives only in memory, so in a later
+  run a changed curriculum or SigPesq report is matched by title alone.
+  Measured on the local database of 2026-11-11: 10,260 advisorships for
+  11,532 Lattes items and 705 SigPesq rows; "Estágio Supervisionado
+  Obrigatório" was one advisorship fed by 49 items of different students.
+  Fixed by branch 035 (`035-one-advisorship-per-student`): an item is a stored
+  advisorship of the same title only for the same student (same person or
+  same name) and when their years share a year or one side has none
+  (`src/core/logic/advisorship_matching.py`); otherwise it is a new
+  advisorship under the existing distinct name. A matched advisorship keeps
+  its stored name. The identity rule version is 5, so a database written
+  before is rebuilt once; the id rules are unchanged. Expected after the
+  rebuild: about 11,890 advisorships. Status: Implemented (2026-11-11);
+  local and fork validation pending.
+- **TD-044 — Advisorship names carry a "| Orientacao ..." suffix**: two
+  initiatives cannot share a name (unique index of the domain library), so
+  every advisorship after the first of a title is stored as
+  `<title> | Orientacao <student> | <year> | sigpesq <Id>` and the exports
+  show that name (652 advisorships before branch 035, more after it).
+  Removing the suffix needs the unique-name rule of the library to change or
+  a separate display title. Status: Open, depends on the library.
+- **TD-045 — The source identity of an initiative is not stored**: the loader
+  sets `metadata["source_identity"]` on the object, but the `initiatives`
+  table has no column for it, so an initiative read from the database is
+  identified by its name. Branch 035 works around it for advisorships
+  (student and years). Projects are still matched by name across runs.
+  Status: Open, depends on the library.
+- **TD-046 — Limits of the advisorship rule of branch 035**: (a) for 7
+  (title, student) pairs present in SigPesq and in Lattes with more than one
+  Lattes year, the result can depend on which source was stored first (the
+  weekly always loads SigPesq first, so a rebuild and an incremental run
+  agree unless the SigPesq row first appears in a later report); (b) 11
+  (title, student) pairs listed by the advisor and by the co-advisor with
+  different years become two advisorships; (c) a student spelled differently
+  in two curricula gives two advisorships; (d) 6 items are attached to an
+  advisorship whose title is written with other case or punctuation, and 2 to
+  an advisorship with a twin created before two persons were merged; when
+  their curriculum is processed again the advisorship can be removed and
+  created again. Status: Open, accepted.
+- **TD-047 — An advisorship keeps one supervisor, the last curriculum read**:
+  the same work listed by the advisor and by the co-advisor is one
+  advisorship with one Supervisor member, and each curriculum writes its
+  owner there. When one of the curricula is processed again the supervisor
+  changes: 44 advisorships between the two local runs of branch 035, 61
+  between the two runs of branch 034; 132 advisorships are fed by more than
+  one curriculum. The co-advisor is not stored as such. Status: Open.

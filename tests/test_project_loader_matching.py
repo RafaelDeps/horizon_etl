@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from eo_lib import Initiative
 from research_domain.domain.entities import Advisorship
 
+from src.core.logic.advisorship_matching import StoredAdvisorship
 from src.core.logic.project_loader import ProjectLoader
 
 
@@ -21,6 +22,9 @@ def test_resolve_existing_initiative_prefers_same_model_when_identity_hits_wrong
         None,
         advisorship,
     ]
+    # Spec 035: advisorships of a title come from the loader's index.
+    title = "Instrumentação de um robô móvel para serviços de vigilância."
+    loader._advisorship_index = {title: [StoredAdvisorship(113, title, None, "", None)]}
 
     existing = loader._resolve_existing_initiative(
         existing_by_name={
@@ -167,6 +171,8 @@ def test_segunda_orientacao_de_mesmo_titulo_e_criada_e_nao_atualizada():
         return nova
 
     handler.create_or_update.side_effect = cria
+    # Spec 035: the loader asks the handler for the item's student.
+    handler.item_student.return_value = (None, "")
     loader.handlers = {Initiative: handler, Advisorship: handler}
     loader.mapping_strategy = MagicMock()
     loader.entity_manager = MagicMock()
@@ -334,3 +340,115 @@ def test_reconhecer_por_grafia_diferente_nao_renomeia_o_registro():
         "o registro seria renomeado para a grafia do que chegou, disputando um "
         "nome que outra linha pode ocupar"
     )
+
+
+# --- Spec 035: an advisorship title is matched only for the same student ----
+
+
+def _loader_com_indice(titulo, aluno, anos=(2020, 2020)):
+    loader = _loader_sem_banco()
+    guardada = _candidato_orientacao(4014)
+    guardada.name = titulo
+    loader._advisorship_index = {
+        titulo: [StoredAdvisorship(4014, titulo, None, aluno, anos)]
+    }
+    loader._load_advisorship = lambda ident: guardada if ident == 4014 else None
+    loader._item_student = lambda dados: (
+        None,
+        " ".join((dados.get("student_names") or [""])[0].lower().split()),
+    )
+    return loader, guardada
+
+
+def test_orientacao_de_outro_aluno_nao_casa_pelo_titulo():
+    titulo = "Estágio Supervisionado Obrigatório"
+    loader, guardada = _loader_com_indice(titulo, "ana estudante")
+
+    existing = loader._lookup_existing_initiative(
+        existing_by_name={titulo: guardada},
+        existing_by_identity={},
+        model_class=Advisorship,
+        identity_key=None,
+        title=titulo,
+        project_data={"title": titulo, "student_names": ["Bia Estudante"]},
+    )
+
+    assert existing is None, (
+        "a orientação de outro aluno foi tomada pela existente só pelo título: "
+        "é a fusão que apagava o aluno anterior (spec 035)"
+    )
+
+
+def test_orientacao_do_mesmo_aluno_casa_pelo_titulo():
+    titulo = "Estágio Supervisionado Obrigatório"
+    loader, guardada = _loader_com_indice(titulo, "ana estudante")
+
+    existing = loader._lookup_existing_initiative(
+        existing_by_name={},
+        existing_by_identity={},
+        model_class=Advisorship,
+        identity_key=None,
+        title=titulo,
+        project_data={"title": titulo, "student_names": ["ANA  Estudante"]},
+    )
+
+    assert existing is guardada
+
+
+def test_orientacao_do_mesmo_aluno_em_outro_ano_nao_casa():
+    from datetime import datetime
+
+    titulo = "Iniciação Científica"
+    loader, _ = _loader_com_indice(titulo, "ana estudante", (2019, 2019))
+
+    existing = loader._lookup_existing_initiative(
+        existing_by_name={},
+        existing_by_identity={},
+        model_class=Advisorship,
+        identity_key=None,
+        title=titulo,
+        project_data={
+            "title": titulo,
+            "student_names": ["Ana Estudante"],
+            "start_date": datetime(2020, 1, 1),
+            "end_date": datetime(2020, 12, 31),
+        },
+    )
+
+    assert existing is None
+
+
+def test_identidade_vista_no_processo_tem_precedencia():
+    titulo = "Estágio Supervisionado Obrigatório"
+    loader, _ = _loader_com_indice(titulo, "ana estudante")
+    pela_identidade = _candidato_orientacao(77)
+
+    existing = loader._lookup_existing_initiative(
+        existing_by_name={},
+        existing_by_identity={"sigpesq workplan|5475|2": pela_identidade},
+        model_class=Advisorship,
+        identity_key="sigpesq workplan|5475|2",
+        title=titulo,
+        project_data={"title": titulo, "student_names": ["Bia Estudante"]},
+    )
+
+    assert existing is pela_identidade
+
+
+def test_projeto_nao_usa_o_indice_de_orientacoes():
+    titulo = "Estágio Supervisionado Obrigatório"
+    loader, _ = _loader_com_indice(titulo, "ana estudante")
+    loader.adv_controller.get_by_id.return_value = None
+    projeto = MagicMock()
+    projeto.id = 9
+
+    existing = loader._lookup_existing_initiative(
+        existing_by_name={titulo: projeto},
+        existing_by_identity={},
+        model_class=Initiative,
+        identity_key=None,
+        title=titulo,
+        project_data={"title": titulo},
+    )
+
+    assert existing is projeto
