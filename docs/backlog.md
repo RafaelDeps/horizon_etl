@@ -487,7 +487,13 @@ these differences remain, none of them in a field the merge decides:
   in the fork runs of branch 035: a rebuild stores one "JTC" (id 15) and the
   second run stores it again (id 21), moves one advisorship to the new row
   and changes the collision suffix of that fellowship id. So the copy is
-  created by the first incremental run after a rebuild. Status: Investigate.
+  created by the first incremental run after a rebuild. Cause found on
+  branch 036 (research R5): the library clears the sponsor of every new
+  fellowship (TD-050) and the ETL only wrote it back when a second row used
+  the same fellowship; "JTC" and "PICTI" are used by one row each, so the
+  next run did not find them by name and sponsor. The handler now writes the
+  sponsor right after creating the fellowship.
+  Status: Implemented (2026-11-12, branch 036); validation pending.
 - **TD-035 — `recalculate_parent_projects` only extends a parent's dates**:
   it moves the start earlier and the end later, never back. A parent keeps a
   date from an earlier state once a child changes or leaves (parent 288: end
@@ -523,7 +529,13 @@ these differences remain, none of them in a field the merge decides:
   same in every run, but 2 changes are logged over unchanged inputs (found in
   the spec 032 fork runs, reproduced locally). A project PDF should only match
   a research project, and the claims of one row should be merged together.
-  Not checked on main. Status: Investigate.
+  Not checked on main. Cause found on branch 036 (research R6): the
+  enrichment already limited its title index to the type "Research Project",
+  but nearly every advisorship is stored with that type (TD-049). The
+  enrichment now leaves out every initiative with a row in `advisorships`,
+  in the title index and in the code index. Measured before the fix: 4
+  advisorships with PDF data (PJ 2449, 3879, 2804, 6020).
+  Status: Implemented (2026-11-12, branch 036); validation pending.
 - **TD-039 — A value that is not a DOI merges different articles**: the DOI
   field of a Lattes article sometimes holds a Scopus link without a DOI
   (`...citedby.url?...&doi=null&md5=...`) or an ISSN, and any text was taken
@@ -632,3 +644,30 @@ these differences remain, none of them in a field the merge decides:
   changes: 44 advisorships between the two local runs of branch 035, 61
   between the two runs of branch 034; 132 advisorships are fed by more than
   one curriculum. The co-advisor is not stored as such. Status: Open.
+- **TD-048 — Person names with extra text outside Lattes advisorship
+  students**: branch 036 cleans only the student of a Lattes advisorship.
+  50 other persons keep extra text (measured on 2026-11-12): 27 with an
+  academic title ("Profª Drª ...", "Professora Dra") and 14 that are not a
+  name ("Ph", "D", "1"), from the advisor and co-advisor fields of academic
+  educations; 9 in project teams (8 not a name, 1 with several people).
+  The rule of `src/core/logic/student_name_rules.py` could be applied
+  there. Status: Open.
+- **TD-049 — Advisorships are stored with the type "Research Project"**:
+  `ProjectLoader` writes every row with its own initiative type, which is
+  always "Research Project"; 11,367 of 11,876 advisorships carry it (509
+  carry "Advisorship"). Anything that needs to tell an advisorship from a
+  project must use the `advisorships` table, as the enrichment does since
+  branch 036. Correcting the stored type may change what the exports and the
+  dashboard show and needs its own spec. Status: Open.
+- **TD-050 — The library's Fellowship constructor clears the sponsor**:
+  `Fellowship.__init__` assigns `sponsor_id` and then the `sponsor`
+  relationship, which is `None` when only the id is given, so a new
+  fellowship is stored without its sponsor
+  (`tests/test_fellowship_sponsor_storage.py`). Worked around in
+  `AdvisorshipHandler._ensure_fellowship` (branch 036).
+  Status: Open, depends on the library.
+- **TD-051 — Student fields with several people**: 317 student texts of the
+  curricula hold several people ("A/B/C", "A; B", "A, B e C", "X
+  Co-orientador: Y") and each is stored as one person with that text.
+  Splitting them needs an advisorship with more than one student, which
+  branch 035 does not allow. Status: Open.

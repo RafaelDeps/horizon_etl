@@ -637,3 +637,133 @@ def test_drifted_note_is_repaired_once(
 
     assert enrichment_updates == []
     assert [c["changed"] for c in tracked] == [False]
+
+
+# --------------------------------------------------------------------------- #
+# A project PDF never matches an advisorship (spec 036)
+# --------------------------------------------------------------------------- #
+ADVISORSHIP_TITLE = "Instrumentação de um robô móvel para serviços de vigilância"
+
+
+@pytest.fixture
+def advisorships_table(session):
+    session.execute(text("CREATE TABLE advisorships (id INTEGER PRIMARY KEY)"))
+    session.commit()
+
+
+def add_stored_advisorship(session, init_id, name, description="Programa: PIBIC"):
+    """An advisorship as the loader stores it: its initiative row carries the
+    type of a research project; the row in ``advisorships`` is what tells."""
+    add_initiative(session, init_id, name, description=description)
+    session.execute(text("INSERT INTO advisorships (id) VALUES (:id)"), {"id": init_id})
+    session.commit()
+
+
+def add_sigpesq_project_record(session, record_id, project_id, init_id):
+    session.execute(
+        text(
+            "INSERT INTO source_records (id, source_system, source_entity_type,"
+            " raw_payload_json) VALUES (:id, 'sigpesq_research_projects',"
+            " 'initiative', :payload)"
+        ),
+        {
+            "id": record_id,
+            "payload": json.dumps({"Id": project_id, "ParecerDiretoria": "Aprovado"}),
+        },
+    )
+    session.execute(
+        text(
+            "INSERT INTO attribute_assertions (source_record_id,"
+            " canonical_entity_type, canonical_entity_id)"
+            " VALUES (:rid, 'initiative', :init)"
+        ),
+        {"rid": record_id, "init": init_id},
+    )
+    session.commit()
+
+
+def test_pdf_with_the_title_of_an_advisorship_does_not_touch_it(
+    loader, session, tmp_path, advisorships_table
+):
+    add_stored_advisorship(session, 141, ADVISORSHIP_TITLE)
+    write_pj(
+        tmp_path, "PJ_2449.json", titulo=ADVISORSHIP_TITLE, descricao="Texto do PDF."
+    )
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 0
+    assert stats["skipped_no_match"] == 1
+    assert read_initiative(session, 141) == ("Programa: PIBIC", None)
+
+
+def test_pdf_with_the_title_of_an_advisorship_creates_no_project(
+    loader, session, tmp_path, advisorships_table
+):
+    add_stored_advisorship(session, 141, ADVISORSHIP_TITLE)
+    write_ingestable_pj(tmp_path, "PJ_2449.json", ADVISORSHIP_TITLE)
+
+    stats = loader.run(str(tmp_path), ingest_new=True)
+
+    assert stats["created"] == 0
+    assert stats["skipped_duplicate"] == 1
+    assert session.execute(text("SELECT COUNT(*) FROM initiatives")).scalar() == 1
+    assert read_initiative(session, 141) == ("Programa: PIBIC", None)
+
+
+def test_pdf_with_a_title_similar_to_an_advisorship_does_not_touch_it(
+    loader, session, tmp_path, advisorships_table
+):
+    add_stored_advisorship(session, 8275, "Mapeamento das notas do Enem por município")
+    write_pj(
+        tmp_path,
+        "PJ_6020.json",
+        titulo="Mapeamento das notas do ENEM por municípios",
+        descricao="Texto do PDF.",
+    )
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 0
+    assert read_initiative(session, 8275) == ("Programa: PIBIC", None)
+
+
+def test_pdf_code_pointing_to_an_advisorship_does_not_touch_it(
+    loader, session, tmp_path, advisorships_table
+):
+    add_stored_advisorship(session, 141, ADVISORSHIP_TITLE)
+    add_sigpesq_project_record(session, 1, 2449, 141)
+    write_pj(
+        tmp_path,
+        "PJ_2449.json",
+        codigo="2449",
+        titulo="Outro título, só no documento",
+        descricao="Texto do PDF.",
+    )
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 0
+    assert read_initiative(session, 141) == ("Programa: PIBIC", None)
+
+
+def test_research_project_is_still_enriched_beside_an_advisorship(
+    loader, session, tmp_path, advisorships_table
+):
+    add_initiative(session, 140, "Robô móvel para vigilância em ambientes internos")
+    add_sigpesq_project_record(session, 1, 2449, 140)
+    add_stored_advisorship(session, 141, ADVISORSHIP_TITLE)
+    write_pj(
+        tmp_path,
+        "PJ_2449.json",
+        codigo="2449",
+        titulo=ADVISORSHIP_TITLE,
+        descricao="Texto do PDF.",
+    )
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 1
+    description, enrichment = read_initiative(session, 140)
+    assert enrichment["project_code"] == "2449"
+    assert read_initiative(session, 141) == ("Programa: PIBIC", None)

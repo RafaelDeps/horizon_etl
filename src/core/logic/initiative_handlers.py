@@ -373,6 +373,13 @@ class AdvisorshipHandler(BaseInitiativeHandler):
                 description=fellowship_data.get("description"),
             )
             self.fel_controller.create(fellowship)
+            if sponsor_id is not None:
+                # Branch 036: the library's Fellowship constructor assigns the
+                # (empty) sponsor relationship after the id, so a new row is
+                # stored without its sponsor and the next run does not find
+                # it by name + sponsor. Written again once the row exists.
+                fellowship.sponsor_id = sponsor_id
+                self.fel_controller.update(fellowship)
             self._cache_fellowship(
                 fellowship,
                 fellowship_data,

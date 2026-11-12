@@ -30,7 +30,10 @@ from src.core.logic.initiative_identity import normalize_text
 # 5 (branch 035): an advisorship item is a stored advisorship of the same
 # title only for the same student and years, so advisorships of different
 # students merged by their title are split by one rebuild.
-HORIZON_RULE_VERSION = 5
+# 6 (branch 036): the student of a Lattes advisorship is stored under the
+# clean name, so persons named with the title of a work, an academic title or
+# a link are renamed by one rebuild.
+HORIZON_RULE_VERSION = 6
 
 # Similarity (rapidfuzz token_sort_ratio, 0-100) at which two names or titles
 # are the same thing: PersonMatcher's fuzzy threshold, and the "key corrected"

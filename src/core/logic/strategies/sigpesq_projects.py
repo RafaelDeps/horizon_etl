@@ -19,6 +19,22 @@ class SigPesqProjectMappingStrategy(ProjectMappingStrategy):
     research project exports, including multi-value name parsing and date handling.
     """
 
+    # The name lists the portal returns in another order between downloads.
+    UNORDERED_NAME_COLUMNS = ("Pesquisadores", "Estudantes")
+
+    def change_content(self, row: dict) -> Dict[str, Any]:
+        """The content compared to decide whether a row changed (branch 036).
+
+        The portal reorders "Pesquisadores" and "Estudantes" between downloads,
+        which made an unchanged row look changed. Both lists are compared as
+        sorted names; a name added or removed is still a change. The row
+        itself, and the payload stored for tracking, stay as read.
+        """
+        content = dict(row)
+        for column in self.UNORDERED_NAME_COLUMNS:
+            content[column] = sorted(self._parse_names(row.get(column)))
+        return content
+
     def map_row(self, row: dict) -> Dict[str, Any]:
         """
         Maps a Single SigPesq Excel row to a standardized dictionary of initiative attributes.

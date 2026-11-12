@@ -11,6 +11,7 @@ from src.core.logic.professional_activity_rules import (
     distinct_activities,
     split_institution,
 )
+from src.core.logic.student_name_rules import CleanedName, clean_student_name
 
 
 @dataclass
@@ -453,6 +454,17 @@ class LattesParser:
 
         return advisorships
 
+    @staticmethod
+    def _advisorship_student(item: Dict) -> CleanedName:
+        """The student of an advisorship item under the name only (branch 036):
+        the field sometimes carries the title of the work, an academic title
+        or a link, or is not a name. An item whose text is not a name is kept
+        without a student; an item with no student text is dropped as before.
+        """
+        return clean_student_name(
+            item.get("orientando") or item.get("nome_do_orientado")
+        )
+
     def _parse_items(
         self, items: List[Dict], status: str, default_type: str = ""
     ) -> List[Dict]:
@@ -463,7 +475,7 @@ class LattesParser:
         for item in items:
             title = item.get("titulo")
             # Try specific keys first, then generic
-            student_name = item.get("orientando") or item.get("nome_do_orientado")
+            student = self._advisorship_student(item)
 
             start_year_str = item.get("ano_inicio")
             end_year_str = item.get("ano_conclusao") or item.get("ano")
@@ -512,12 +524,13 @@ class LattesParser:
             elif "outras" in text_search or "outros" in text_search:
                 canonical_type = "Advisorship"
 
-            if title and student_name:
+            if title and "empty" not in student.kinds:
                 parsed.append(
                     {
                         "title": title,
                         "normalized_title": self.normalize_title(title),
-                        "student_name": student_name,
+                        "student_name": student.name,
+                        "student_name_kinds": student.kinds,
                         "year": year,
                         "start_year": start_year,
                         "end_year": end_year,
@@ -576,7 +589,7 @@ class LattesParser:
 
             # Extract common fields
             title = item.get("titulo")
-            student_name = item.get("orientando") or item.get("nome_do_orientado")
+            student = self._advisorship_student(item)
 
             start_year_str = item.get("ano_inicio")
             end_year_str = item.get("ano_conclusao") or item.get("ano")
@@ -594,12 +607,13 @@ class LattesParser:
 
             institution = item.get("instituicao") or item.get("nome_instituicao")
 
-            if title and student_name:
+            if title and "empty" not in student.kinds:
                 parsed.append(
                     {
                         "title": title,
                         "normalized_title": self.normalize_title(title),
-                        "student_name": student_name,
+                        "student_name": student.name,
+                        "student_name_kinds": student.kinds,
                         "year": year,
                         "start_year": start_year,
                         "end_year": end_year,

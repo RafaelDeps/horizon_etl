@@ -84,6 +84,21 @@ def test_a_database_written_before_spec_035_needs_a_reset(tmp_path):
     assert rule_version_requires_reset(str(db)) is True
 
 
+def test_a_database_written_before_spec_036_needs_a_reset(tmp_path):
+    # Spec 036: version 5 stored the student of a Lattes advisorship under the
+    # whole text of the curriculum field, so persons are named with the title
+    # of a work, an academic title or a link.
+    db = tmp_path / "v5.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE horizon_meta SET value = '5' WHERE key = 'rule_version'")
+    con.commit()
+    con.close()
+    assert HORIZON_RULE_VERSION >= 6
+    assert rule_version_requires_reset(str(db)) is True
+
+
 def test_weekly_resets_once_before_the_phases(
     tmp_path, monkeypatch, _no_rule_version_reset
 ):

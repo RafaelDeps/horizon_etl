@@ -452,3 +452,27 @@ def test_projeto_nao_usa_o_indice_de_orientacoes():
     )
 
     assert existing is projeto
+
+
+# --- Spec 036: the content compared for "unchanged" may come from the strategy ---
+
+
+def test_o_conteudo_comparado_vem_da_estrategia_quando_ela_informa():
+    loader = ProjectLoader.__new__(ProjectLoader)
+    loader.mapping_strategy = MagicMock()
+    loader.mapping_strategy.change_content.return_value = {"Estudantes": ["A", "B"]}
+    linha = {"Estudantes": "B; A"}
+
+    assert loader._change_content(linha) == {"Estudantes": ["A", "B"]}
+    loader.mapping_strategy.change_content.assert_called_once_with(linha)
+
+
+def test_sem_estrategia_ou_sem_o_metodo_a_linha_e_comparada_como_veio():
+    loader = ProjectLoader.__new__(ProjectLoader)
+    linha = {"Estudantes": "B; A"}
+
+    loader.mapping_strategy = None
+    assert loader._change_content(linha) is linha
+
+    loader.mapping_strategy = object()
+    assert loader._change_content(linha) is linha

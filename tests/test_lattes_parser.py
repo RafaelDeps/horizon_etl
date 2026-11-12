@@ -321,3 +321,74 @@ def test_a_final_full_stop_does_not_make_another_activity(parser):
         _activity(instituicao="Universidade X, UX, Brasil", ano_inicio="2010"),
     )
     assert len(r) == 1 and r[0]["institution"] == "Universidade X, UX, Brasil"
+
+
+# --- Spec 036: the student of an advisorship item is stored under the name ---
+
+WORK_TITLE = "Guilherme Lopes de Oliveira. Uso do método OTA (PT 10550)"
+SEVERAL = "Rafael Scopel Paviotti/Sidarta Barroso Veloso"
+
+
+def _advisorship_items():
+    return [
+        {"titulo": "A", "orientando": WORK_TITLE, "ano_inicio": 2022},
+        {"titulo": "B", "orientando": "Dr. Hamilton Carvalho Tolosa"},
+        {"titulo": "C", "orientando": "Maria da Silva"},
+        {"titulo": "D", "orientando": SEVERAL},
+        {"titulo": "E", "orientando": "Acadêmicos do 6 periodo"},
+        {"titulo": "F"},
+        {"titulo": "G", "orientando": "   "},
+    ]
+
+
+def _nested(items):
+    return {"orientacoes": {"concluidas": {"iniciacao_cientifica": items}}}
+
+
+def _flat(items):
+    return {"dados_complementares": {"orientacoes_concluidas": items}}
+
+
+@pytest.mark.parametrize("shape", [_nested, _flat])
+def test_advisorship_student_is_cleaned_in_both_paths(parser, shape):
+    parsed = {
+        row["title"]: row
+        for row in parser.parse_advisorships(shape(_advisorship_items()))
+    }
+
+    assert parsed["A"]["student_name"] == "Guilherme Lopes de Oliveira"
+    assert parsed["A"]["student_name_kinds"] == ("work_title",)
+    assert parsed["B"]["student_name"] == "Hamilton Carvalho Tolosa"
+    assert parsed["B"]["student_name_kinds"] == ("title",)
+    assert parsed["C"]["student_name"] == "Maria da Silva"
+    assert parsed["C"]["student_name_kinds"] == ()
+    assert parsed["D"]["student_name"] == SEVERAL
+    assert parsed["D"]["student_name_kinds"] == ("several",)
+
+
+@pytest.mark.parametrize("shape", [_nested, _flat])
+def test_advisorship_whose_student_text_is_not_a_name_is_kept(parser, shape):
+    parsed = {
+        row["title"]: row
+        for row in parser.parse_advisorships(shape(_advisorship_items()))
+    }
+
+    assert parsed["E"]["student_name"] is None
+    assert "not_a_name" in parsed["E"]["student_name_kinds"]
+
+
+@pytest.mark.parametrize("shape", [_nested, _flat])
+def test_advisorship_with_no_student_text_is_still_dropped(parser, shape):
+    titles = [
+        row["title"] for row in parser.parse_advisorships(shape(_advisorship_items()))
+    ]
+
+    assert titles == ["A", "B", "C", "D", "E"]
+
+
+@pytest.mark.parametrize("shape", [_nested, _flat])
+def test_advisorship_parsing_does_not_change_the_curriculum_item(parser, shape):
+    items = _advisorship_items()
+    parser.parse_advisorships(shape(items))
+
+    assert items == _advisorship_items()

@@ -490,7 +490,7 @@ class ProjectLoader:
                 self._row_document_key(row_dict, source_file),
                 downloaded_at=report_date,
             ) as doc:
-                if doc.unchanged(row_dict):
+                if doc.unchanged(self._change_content(row_dict)):
                     stats["skipped_unchanged"] = stats.get("skipped_unchanged", 0) + 1
                     continue
                 doc.begin()
@@ -668,6 +668,15 @@ class ProjectLoader:
         logger.info(
             f"Recalculation complete. Processed {processed_count} parents, updated {updated_count}."
         )
+
+    def _change_content(self, row_dict: dict):
+        """What is compared to decide whether a row changed: the strategy's
+        own content when it gives one (branch 036: SigPesq project rows with
+        reordered name lists), otherwise the row as read."""
+        change_content = getattr(self.mapping_strategy, "change_content", None)
+        if callable(change_content):
+            return change_content(row_dict)
+        return row_dict
 
     def _process_row_safely(
         self,

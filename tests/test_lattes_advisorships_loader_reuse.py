@@ -93,3 +93,40 @@ def test_task_called_alone_builds_its_own_loader(tmp_path, monkeypatch):
     strategy = MockLoader.call_args.kwargs["mapping_strategy"]
     assert isinstance(strategy, LattesAdvisorshipMappingStrategy)
     MockLoader.return_value.process_records.assert_called_once()
+
+
+# --- Spec 036: student names ---
+
+
+def test_an_item_without_a_student_maps_to_no_student_names():
+    mapped = LattesAdvisorshipMappingStrategy("Ana Supervisora").map_row(
+        {"title": "Iniciação Científica", "student_name": None, "start_year": 2020}
+    )
+
+    assert mapped["student_names"] == []
+    assert mapped["identity_key"]
+    assert mapped["coordinator_name"] == "Ana Supervisora"
+
+
+def test_the_student_name_summary_reports_every_kind_and_starts_again():
+    logger = MagicMock()
+    module.log_student_name_summary(MagicMock())  # empty the counts
+    module.count_student_names(
+        [
+            {"student_name_kinds": ("work_title",)},
+            {"student_name_kinds": ("link", "several")},
+            {"student_name_kinds": ("title", "not_a_name")},
+            {"student_name_kinds": ()},
+            {"title": "row parsed before branch 036"},
+        ]
+    )
+
+    line = module.log_student_name_summary(logger)
+
+    assert line == (
+        "student names: title 1, link 1, work title 1, footnote 0, "
+        "not a name 1, several 1, uncut 0"
+    )
+    logger.info.assert_called_once_with(line)
+    assert module.log_student_name_summary(MagicMock()).endswith("uncut 0")
+    assert "work title 0" in module.log_student_name_summary(MagicMock())

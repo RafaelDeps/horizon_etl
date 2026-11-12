@@ -420,9 +420,31 @@ class ProjectEnrichmentLoader:
                 rejected.add(code)
         return rejected
 
+    def _not_an_advisorship(self, id_column: str) -> str:
+        """SQL condition that leaves out the initiatives that are advisorships.
+
+        Branch 036: the loader stores nearly every advisorship with the type
+        "Research Project", so the stored type does not tell them apart; the
+        row in ``advisorships`` does. Without it a project PDF was matched to
+        an advisorship with the same title and its text written there.
+        """
+        has_table = self._session.execute(
+            text(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'advisorships'"
+            )
+        ).first()
+        if not has_table:
+            return ""
+        return (
+            f" AND NOT EXISTS (SELECT 1 FROM advisorships adv"
+            f" WHERE adv.id = {id_column})"
+        )
+
     def _load_code_index(self) -> Dict[str, int]:
         """``project_code -> initiative_id`` for APPROVED SigPesq projects, using
-        the tracking tables as the authoritative code<->initiative link."""
+        the tracking tables as the authoritative code<->initiative link. An
+        initiative that is an advisorship is left out (branch 036)."""
         rows = self._session.execute(
             text(
                 """
@@ -435,6 +457,7 @@ class ProjectEnrichmentLoader:
                 WHERE sr.source_system = 'sigpesq_research_projects'
                   AND sr.source_entity_type = 'initiative'
                 """
+                + self._not_an_advisorship("aa.canonical_entity_id")
             )
         ).fetchall()
 
@@ -457,7 +480,8 @@ class ProjectEnrichmentLoader:
         self,
     ) -> Tuple[Dict[str, List[int]], Dict[int, str]]:
         """Returns (normalized_name -> [initiative_id], {initiative_id -> normalized_name})
-        for Research Project initiatives only (advisorships excluded)."""
+        for Research Project initiatives only. Advisorships are excluded by
+        their row in ``advisorships``, not by the stored type (branch 036)."""
         rows = self._session.execute(
             text(
                 """
@@ -466,6 +490,7 @@ class ProjectEnrichmentLoader:
                 JOIN initiative_types t ON i.initiative_type_id = t.id
                 WHERE t.name = :type_name
                 """
+                + self._not_an_advisorship("i.id")
             ),
             {"type_name": RESEARCH_PROJECT_TYPE},
         ).fetchall()

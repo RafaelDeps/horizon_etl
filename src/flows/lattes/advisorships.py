@@ -2,6 +2,7 @@ import glob
 import json
 import os
 import time
+from collections import Counter
 from typing import List, Optional
 
 from loguru import logger as fallback_logger
@@ -37,6 +38,35 @@ from src.flows.lattes.cv_document import (
 from src.flows.lattes.cv_timing import log_cv_duration
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
+
+# Branch 036: what the name rule did to the student texts of the curricula
+# processed in this run (the unchanged curricula are skipped and not counted).
+STUDENT_NAME_KINDS = (
+    ("title", "title"),
+    ("link", "link"),
+    ("work_title", "work title"),
+    ("footnote", "footnote"),
+    ("not_a_name", "not a name"),
+    ("several", "several"),
+    ("uncut", "uncut"),
+)
+_student_name_counts: Counter = Counter()
+
+
+def count_student_names(rows: List[dict]) -> None:
+    for row in rows:
+        _student_name_counts.update(row.get("student_name_kinds") or ())
+
+
+def log_student_name_summary(logger) -> str:
+    """One line with the cleaning counts of the phase; the counts start again."""
+    line = "student names: " + ", ".join(
+        f"{label} {_student_name_counts.get(kind, 0)}"
+        for kind, label in STUDENT_NAME_KINDS
+    )
+    logger.info(line)
+    _student_name_counts.clear()
+    return line
 
 
 @task(name="Ingest Lattes Advisorships for File", cache_policy=NO_CACHE)
@@ -119,6 +149,10 @@ def ingest_advisorships_file_task(
         return
     if dropped:
         logger.info(f"Dropped {dropped} duplicate advisorships for {lattes_id}")
+    count_student_names(advisorships)
+    if project_loader is None:
+        # Called alone, outside the phase: report this curriculum at once.
+        log_student_name_summary(logger)
 
     logger.info(f"Processing {len(advisorships)} advisorships for {json_name}...")
 
@@ -207,6 +241,7 @@ def _ingest_lattes_advisorships(json_files: List[str], skip, logger) -> None:
         finish_lattes_listing(skip, json_files)
     project_loader.team_synchronizer.log_lookup_summary("lattes_advisorships")
     project_loader.person_matcher.log_match_summary("lattes_advisorships")
+    log_student_name_summary(logger)
     log_researcher_resolution_summary("lattes_advisorships")
 
 

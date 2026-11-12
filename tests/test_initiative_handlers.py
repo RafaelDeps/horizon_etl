@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 from research_domain.domain.entities import Advisorship
@@ -382,7 +383,9 @@ def test_ensure_fellowship_updates_stale_value_on_existing_fellowship(
     )
     assert second is first
     assert second.value == 800.0
-    MockFellowshipController.return_value.update.assert_called_once()
+    # One update writes the sponsor of the new row (branch 036), the other
+    # the changed value.
+    assert MockFellowshipController.return_value.update.call_count == 2
 
 
 @patch("src.core.logic.initiative_handlers.FellowshipController")
@@ -583,3 +586,111 @@ def test_matched_advisorship_with_a_new_title_is_renamed_as_before(
         _update_name(handler, "Old", dict(data))
         == "T | Orientacao Ana Estudante | 2020"
     )
+
+
+# --- Spec 036: an item whose student text is not a name has no student ---
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_an_item_without_a_student_resolves_to_no_person(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    person_matcher = MagicMock()
+    handler = AdvisorshipHandler(
+        initiative_controller=MagicMock(),
+        person_matcher=person_matcher,
+        entity_manager=MagicMock(),
+    )
+
+    assert handler._student_person({"student_names": []}) is None
+    assert handler.item_student({"student_names": []}) == (None, "")
+    person_matcher.match_or_create.assert_not_called()
+
+
+# --- Spec 036: a new fellowship is stored with its sponsor ---
+
+
+def _fellowship_handler(MockFellowshipController, stored=(), sponsor_id=3):
+    MockFellowshipController.return_value.get_all.return_value = list(stored)
+    entity_manager = MagicMock()
+    entity_manager.ensure_organization.return_value = sponsor_id
+    handler = AdvisorshipHandler(
+        initiative_controller=MagicMock(),
+        person_matcher=MagicMock(),
+        entity_manager=entity_manager,
+    )
+    return handler, MockFellowshipController.return_value
+
+
+def _fellowship_row(sponsor_name="CNPq"):
+    return {
+        "fellowship_data": {
+            "name": "JTC",
+            "sponsor_name": sponsor_name,
+            "value": 0.0,
+            "description": "Programa: JTC",
+        }
+    }
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_a_new_fellowship_gets_its_sponsor_written_after_it_is_created(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    handler, controller = _fellowship_handler(MockFellowshipController)
+    order = MagicMock()
+    order.attach_mock(controller.create, "create")
+    order.attach_mock(controller.update, "update")
+
+    fellowship = handler._ensure_fellowship(_fellowship_row())
+
+    # The library's constructor clears the sponsor of a new row; the handler
+    # writes it again once the row exists.
+    assert order.mock_calls == [call.create(fellowship), call.update(fellowship)]
+    assert fellowship.sponsor_id == 3
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_a_fellowship_stored_with_its_sponsor_is_found_in_the_next_run(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    stored = SimpleNamespace(
+        id=15,
+        name="JTC",
+        value=0.0,
+        sponsor_id=3,
+        sponsor=SimpleNamespace(name="CNPq"),
+    )
+    handler, controller = _fellowship_handler(MockFellowshipController, [stored])
+
+    assert handler._ensure_fellowship(_fellowship_row()) is stored
+    assert handler._ensure_fellowship(_fellowship_row(" cnpq ")) is stored
+    controller.create.assert_not_called()
+    controller.update.assert_not_called()
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_a_fellowship_without_a_sponsor_is_created_once_and_found_again(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    handler, controller = _fellowship_handler(MockFellowshipController)
+
+    first = handler._ensure_fellowship(_fellowship_row(sponsor_name=""))
+
+    controller.create.assert_called_once_with(first)
+    controller.update.assert_not_called()
+    assert first.sponsor_id is None
+
+    stored = SimpleNamespace(
+        id=19, name="JTC", value=0.0, sponsor_id=None, sponsor=None
+    )
+    later, later_controller = _fellowship_handler(MockFellowshipController, [stored])
+    later_controller.create.reset_mock()
+
+    assert later._ensure_fellowship(_fellowship_row(sponsor_name="")) is stored
+    later_controller.create.assert_not_called()
