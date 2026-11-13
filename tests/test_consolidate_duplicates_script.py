@@ -142,3 +142,28 @@ def test_a_failing_article_consolidation_does_not_crash_the_weekly_phase(
     assert result["records_merged"] == 0
     assert "error" in result["articles"]
     assert (reports / "dedup_report.json").exists()
+
+
+def test_person_dedup_keeps_document_links_and_linkedin_links_of_merged_persons(
+    tmp_path, monkeypatch
+):
+    # Spec 037: the LinkedIn link of a merged person stays with the survivor.
+    from unittest.mock import MagicMock
+
+    from src.adapters.database.document_item_store import repoint_person_links
+    from src.adapters.database.linkedin_link_store import repoint_linkedin_link
+    from src.scripts import consolidate_duplicates as module
+
+    consolidator = MagicMock()
+    consolidator.return_value.build_report.return_value = {"refused_groups": 0}
+    consolidator.return_value.consolidate_all.return_value = 0
+    monkeypatch.setattr(module, "PersonConsolidator", consolidator)
+    monkeypatch.setattr(module, "_consolidate_articles", lambda *_: {})
+    monkeypatch.setattr(module, "_write_report", lambda *_: "report.json")
+
+    module.run_person_dedup(str(tmp_path / "x.db"), str(tmp_path))
+
+    assert consolidator.call_args.kwargs["merge_hooks"] == [
+        repoint_person_links,
+        repoint_linkedin_link,
+    ]

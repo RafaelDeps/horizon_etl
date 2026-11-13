@@ -153,6 +153,17 @@ MIGRATIONS: List[Tuple[str, str]] = [
         "CREATE INDEX IF NOT EXISTS ix_source_field_claims_entity"
         " ON source_field_claims (entity_type, entity_id, field)",
     ),
+    # Spec 037: LinkedIn profile links read from the maintainer's local list.
+    # ETL-owned, beside the library's person tables and never altering them:
+    # one row per person that has a link, one person per link.
+    (
+        "0015_person_linkedin_links",
+        "CREATE TABLE IF NOT EXISTS person_linkedin_links ("
+        " person_id INTEGER PRIMARY KEY,"
+        " linkedin_url TEXT NOT NULL UNIQUE,"
+        " listed_name TEXT NOT NULL,"
+        " updated_at TEXT NOT NULL)",
+    ),
 ]
 
 

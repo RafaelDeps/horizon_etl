@@ -91,6 +91,11 @@ _PHASES = [
     # source phases loaded and before export_canonical, so the canonical export
     # and downstream marts see exactly one record per person (contract R6-R14).
     ("consolidate_duplicates", ["consolidate_duplicates"], 900, False, "app"),
+    # linkedin_links (spec 037) stores the LinkedIn link of the persons named
+    # in the maintainer's local list: after the persons are merged, so a name
+    # is compared with the final persons, and before the ids and the export.
+    # Without the list (GitHub Actions) it does nothing; never critical.
+    ("linkedin_links", ["linkedin_links"], 300, False, "app"),
     # assign_horizon_ids (spec 020) runs on the final, consolidated state, so
     # every exported entity gets its permanent id; it must precede
     # export_canonical, which publishes the ids. Non-critical: without it the

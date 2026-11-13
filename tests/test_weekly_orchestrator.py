@@ -472,3 +472,19 @@ def test_the_skipped_archive_is_reported_as_skipped():
         logger.remove(sink)
 
     assert any("zip_exports" in m and "skipped" in m for m in messages)
+
+
+def test_linkedin_links_phase_runs_after_the_person_merge_and_before_the_export():
+    # Spec 037: names are compared with the merged persons, and the link must
+    # be stored before the export reads it. Without the local list the phase
+    # does nothing, so it never stops the run.
+    names = [p[0] for p in wo._PHASES]
+    position = names.index("linkedin_links")
+    assert names[position - 1] == "consolidate_duplicates"
+    assert (
+        position < names.index("assign_horizon_ids") < names.index("export_canonical")
+    )
+    name, argv_tail, _timeout, critical, mode = wo._PHASES[position]
+    assert argv_tail == ["linkedin_links"]
+    assert critical is False
+    assert mode == "app"

@@ -9,6 +9,9 @@ from loguru import logger
 sys.path.append(os.getcwd())
 
 from src.adapters.database.document_item_store import repoint_person_links  # noqa: E402
+from src.adapters.database.linkedin_link_store import (  # noqa: E402
+    repoint_linkedin_link,
+)
 from src.core.logic.person_consolidator import PersonConsolidator  # noqa: E402
 from src.core.logic.reference_consolidator import ReferenceConsolidator  # noqa: E402
 
@@ -46,7 +49,9 @@ def run_person_dedup(
 ) -> dict:
     """Weekly-pipeline person dedup: classify duplicates, merge the safe ones,
     and persist a reviewable report (contract R12/R14)."""
-    consolidator = PersonConsolidator(db_path, merge_hooks=[repoint_person_links])
+    consolidator = PersonConsolidator(
+        db_path, merge_hooks=[repoint_person_links, repoint_linkedin_link]
+    )
     groups = consolidator.find_all_groups()
     planned = consolidator.build_report(groups=groups)
     merged_now = consolidator.consolidate_all()
@@ -116,7 +121,7 @@ def execute(db_path: str, entity: str) -> dict:
     result = {"db_path": db_path, "entity": entity}
     if entity in {"persons", "all"}:
         result["person_records_merged"] = PersonConsolidator(
-            db_path, merge_hooks=[repoint_person_links]
+            db_path, merge_hooks=[repoint_person_links, repoint_linkedin_link]
         ).consolidate_all()
     if entity in {"references", "all"}:
         consolidator = ReferenceConsolidator(db_path)

@@ -151,6 +151,7 @@ def test_export_all_orchestrates_exports():
                     "birthday": None,
                     "cnpq_url": None,
                     "google_scholar_url": None,
+                    "linkedin_url": None,
                     "resume": None,
                     "citation_names": None,
                     "initiatives": [],
@@ -1083,6 +1084,7 @@ def test_export_researchers_backfills_participant_only_people_from_projects_and_
                 "birthday": None,
                 "cnpq_url": None,
                 "google_scholar_url": None,
+                "linkedin_url": None,
                 "resume": None,
                 "citation_names": None,
                 "initiatives": [
@@ -1487,3 +1489,89 @@ def test_tracking_attributes_publish_keyed_value_hash():
     exported_data, _ = mock_sink.export.call_args[0]
     value_hash = exported_data[0]["attributes"]["resume"]["value_hash"]
     assert value_hash == keyed_export_hash("stored-c")
+
+
+# --- Spec 037: the person entry carries the LinkedIn link ---
+
+
+def _linkedin_exporter():
+    with (
+        patch("src.core.logic.canonical_exporter.OrganizationController"),
+        patch("src.core.logic.canonical_exporter.CampusController"),
+        patch("src.core.logic.canonical_exporter.KnowledgeAreaController"),
+        patch("src.core.logic.canonical_exporter.ResearcherController"),
+        patch("src.core.logic.canonical_exporter.InitiativeController"),
+        patch("src.core.logic.canonical_exporter.ArticleController"),
+    ):
+        return CanonicalDataExporter(sink=MagicMock(spec=IExportSink))
+
+
+def test_person_entry_always_has_the_linkedin_url_key():
+    entry = CanonicalDataExporter._build_researcher_base_export_dict(
+        SimpleNamespace(id=7, name="Maria da Silva")
+    )
+
+    assert "linkedin_url" in entry
+    assert entry["linkedin_url"] is None
+    assert entry["cnpq_url"] is None and entry["google_scholar_url"] is None
+
+
+def test_fetch_person_linkedin_links_reads_the_table():
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    exporter = _linkedin_exporter()
+    engine = create_engine("sqlite:///:memory:")
+    with Session(engine) as session:
+        assert exporter._fetch_person_linkedin_links(None) == {}
+        assert exporter._fetch_person_linkedin_links(session) == {}  # no table
+
+        session.execute(
+            text(
+                "CREATE TABLE person_linkedin_links (person_id INTEGER PRIMARY KEY,"
+                " linkedin_url TEXT, listed_name TEXT, updated_at TEXT)"
+            )
+        )
+        session.execute(
+            text(
+                "INSERT INTO person_linkedin_links VALUES"
+                " (452, 'https://www.linkedin.com/in/andre', 'Andre Porto', 'x')"
+            )
+        )
+        assert exporter._fetch_person_linkedin_links(session) == {
+            452: "https://www.linkedin.com/in/andre"
+        }
+
+
+def test_export_researchers_writes_the_link_of_listed_persons_only():
+    exporter = _linkedin_exporter()
+    listed = MagicMock()
+    listed.to_dict.return_value = {"id": 452, "name": "Andre Porto"}
+    other = MagicMock()
+    other.to_dict.return_value = {"id": 2981, "name": "Paulo Sergio"}
+    exporter.researcher_ctrl.get_all.return_value = [listed, other]
+    exporter.initiative_ctrl.get_all.return_value = []
+    exporter.initiative_ctrl.list_initiative_types.return_value = []
+    exporter._get_session = lambda: None
+    exporter._get_campus_resolver = lambda: MagicMock(
+        get_campus=lambda *_args, **_kwargs: None
+    )
+    exporter._fetch_person_linkedin_links = lambda _session: {
+        452: "https://www.linkedin.com/in/andre"
+    }
+
+    exporter.export_researchers("output/researchers_canonical.json")
+
+    exported_by_path = {
+        call_args[0][1]: call_args[0][0]
+        for call_args in exporter.sink.export.call_args_list
+    }
+    by_id = {
+        entry["id"]: entry
+        for entry in exported_by_path["output/researchers_canonical.json"]
+    }
+    assert by_id[452]["linkedin_url"] == "https://www.linkedin.com/in/andre"
+    assert by_id[2981]["linkedin_url"] is None
+    for path, entries in exported_by_path.items():
+        if path.endswith("_canonical.json"):
+            assert all("linkedin_url" in entry for entry in entries), path

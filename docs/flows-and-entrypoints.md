@@ -370,6 +370,53 @@ advisorship is renamed to the disambiguated title a rebuild gives it, and a
 
 The rule version is 2. A database kept from version 1 is rebuilt once.
 
+## LinkedIn links from a local list (branch 037)
+
+No collected source carries a LinkedIn link, so the link comes from a list the
+maintainer keeps on their own machine:
+
+`data/linkedin_run/linkedin.list`, UTF-8, one person per line, the profile
+link, a comma, the full name:
+
+```text
+# comment
+https://www.linkedin.com/in/maria-silva,Maria da Silva
+```
+
+The file is under `data/`, so it is never versioned, and the ETL only reads
+it: it never creates or changes it and reads nothing outside the repository.
+Any person the ETL stores may be listed (alumni first).
+
+The weekly phase `linkedin_links` (`app.py linkedin_links`) runs after
+`consolidate_duplicates` and before `assign_horizon_ids` and
+`export_canonical`. It is not critical. For each line:
+
+| Outcome | When | Result |
+|---|---|---|
+| stored | the name equals the name of exactly one person, ignoring case, accents and spaces | the link is stored in the form `https://www.linkedin.com/in/<profile>` |
+| not found | no person has that name | nothing stored, no person created |
+| several persons | two or more persons have that name | nothing stored on any of them |
+| conflict | the name is on lines with different links, or the link is on lines of different names | nothing stored for the names involved |
+| invalid | no comma, no name, or a link that is not a LinkedIn profile address | ignored |
+
+The stored links are made equal to the usable lines: a changed link replaces
+the old one and a person whose line is gone loses the link. Two cases change
+nothing: no list file (GitHub Actions never has it), and a list with no usable
+line, which is taken for a mistake. Reading the same list again writes
+nothing. When two duplicate persons are merged, the link stays with the one
+that remains.
+
+The links live in the ETL-owned table `person_linkedin_links`
+(migration 0015). The export adds `linkedin_url` to every person entry
+(`researchers_canonical.json` and the classification files built from it,
+`students_canonical.json` included): the link, or `null`. No permanent id and
+no identity rule depends on it.
+
+The phase logs one line, for example
+`linkedin links: lines 182, stored 148 (added 0, changed 0, removed 0), not found 34, several persons 0, conflicts 0, invalid 0`,
+then one line per unused line with the name and the reason, and writes
+`data/reports/linkedin_links_report.json`.
+
 ## SQLite connection settings (spec 018)
 
 `libbase` commits after every record it adds, so a Lattes phase issues

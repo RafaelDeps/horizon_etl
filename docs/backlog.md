@@ -671,3 +671,14 @@ these differences remain, none of them in a field the merge decides:
   Co-orientador: Y") and each is stored as one person with that text.
   Splitting them needs an advisorship with more than one student, which
   branch 035 does not allow. Status: Open.
+- **TD-052 — LinkedIn links are matched by exact name only**: the local list
+  of branch 037 has the name and the link, no other key. A person stored
+  under another spelling is not found (34 of 182 names on 2026-11-13), and a
+  person stored twice blocks the link until the duplicate is merged. A
+  stronger key in the list (Lattes id, e-mail) would lift both limits.
+  Status: Open, accepted.
+- **TD-053 — No LinkedIn links in the GitHub Actions exports**: the list is
+  local and never versioned (maintainer's decision of 2026-11-13), so the
+  weekly of GitHub Actions exports `linkedin_url` empty and only a local run
+  carries the links. Publishing them through the workflow needs the list, or
+  the links, to reach it. Status: Open, decision needed.

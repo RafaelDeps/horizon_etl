@@ -8,6 +8,8 @@ import sqlite3
 import subprocess
 import sys
 
+import pytest
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -105,3 +107,31 @@ def test_a_database_of_other_rules_is_rebuilt_once(
     con.close()
     guard()
     assert calls == [url]
+
+
+def test_a_new_database_has_the_linkedin_links_table(tmp_path):
+    # Spec 037: an ETL-owned table beside the library's person tables.
+    db = tmp_path / "data" / "new.db"
+    db.parent.mkdir()
+    _ensure(tmp_path, db)
+
+    con = sqlite3.connect(db)
+    columns = [
+        row[1] for row in con.execute("PRAGMA table_info(person_linkedin_links)")
+    ]
+    assert columns == ["person_id", "linkedin_url", "listed_name", "updated_at"]
+
+    insert = "INSERT INTO person_linkedin_links VALUES (?, ?, 'Maria', '2026-11-13')"
+    con.execute(insert, (1, "https://www.linkedin.com/in/maria"))
+    with pytest.raises(sqlite3.IntegrityError):  # one link per person
+        con.execute(insert, (1, "https://www.linkedin.com/in/other"))
+    with pytest.raises(sqlite3.IntegrityError):  # one person per link
+        con.execute(insert, (2, "https://www.linkedin.com/in/maria"))
+    con.commit()
+    con.close()
+
+    # A second pass over the migrations keeps the table and its row.
+    _ensure(tmp_path, db)
+    con = sqlite3.connect(db)
+    assert con.execute("SELECT COUNT(*) FROM person_linkedin_links").fetchone() == (1,)
+    con.close()

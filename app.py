@@ -321,6 +321,12 @@ def main():
                 report["report_path"],
             )
 
+        if flow_to_run == "linkedin_links":
+            from src.flows.maintenance.linkedin_links import linkedin_links_flow
+
+            logger.info("Executing Flow: Sync LinkedIn Links")
+            linkedin_links_flow()
+
         if flow_to_run == "recalculate_parent_projects":
             from src.flows.maintenance.parent_projects import (
                 recalculate_parent_projects_flow,

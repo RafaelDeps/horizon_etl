@@ -364,6 +364,8 @@ class CanonicalDataExporter:
         export_dict.setdefault("birthday", None)
         export_dict.setdefault("cnpq_url", None)
         export_dict.setdefault("google_scholar_url", None)
+        # Spec 037: always present, filled from the ETL's own table of links.
+        export_dict.setdefault("linkedin_url", None)
         export_dict.setdefault("resume", None)
         export_dict.setdefault("citation_names", None)
         return export_dict
@@ -526,6 +528,24 @@ class CanonicalDataExporter:
                 role_map, row_data.get("person_id"), row_data.get("role_name")
             )
         return role_map
+
+    def _fetch_person_linkedin_links(self, session: Any) -> dict[Any, str]:
+        """``person id -> LinkedIn profile link`` (spec 037). The table is
+        the ETL's own and may not exist in a database created before it."""
+        if session is None:
+            return {}
+        try:
+            rows = session.execute(
+                text("SELECT person_id, linkedin_url FROM person_linkedin_links")
+            ).fetchall()
+        except Exception as exc:
+            logger.info(f"No LinkedIn links to export: {exc}")
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            return {}
+        return {self._normalize_person_id(row[0]): row[1] for row in rows}
 
     def _fetch_person_institutional_email_flags(self, session: Any) -> dict[Any, bool]:
         if session is None:
@@ -1444,12 +1464,15 @@ class CanonicalDataExporter:
             session
         )
 
+        person_linkedin_links = self._fetch_person_linkedin_links(session)
+
         researchers_by_id: dict[Any, dict[str, Any]] = {}
         for researcher in researchers:
             researcher_dict = self._build_researcher_base_export_dict(researcher)
             researcher_id = self._normalize_person_id(researcher_dict.get("id"))
             if researcher_id is None:
                 continue
+            researcher_dict["linkedin_url"] = person_linkedin_links.get(researcher_id)
             researchers_by_id[researcher_id] = researcher_dict
 
         original_researcher_count = len(researchers_by_id)
@@ -1487,6 +1510,9 @@ class CanonicalDataExporter:
                         continue
                     researchers_by_id[person_id] = (
                         self._build_researcher_base_export_dict(person)
+                    )
+                    researchers_by_id[person_id]["linkedin_url"] = (
+                        person_linkedin_links.get(person_id)
                     )
                     added_participant_count += 1
             except Exception as exc:

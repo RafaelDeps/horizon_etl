@@ -26,6 +26,8 @@ NEW_TABLES = {
     "source_document_references",
     # branch 030
     "source_field_claims",
+    # spec 037
+    "person_linkedin_links",
 }
 # Migrations that create an index on a new table rather than a table.
 NEW_INDEXES = {"0010_source_document_items_index", "0014_source_field_claims_index"}
