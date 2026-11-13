@@ -493,7 +493,7 @@ these differences remain, none of them in a field the merge decides:
   the same fellowship; "JTC" and "PICTI" are used by one row each, so the
   next run did not find them by name and sponsor. The handler now writes the
   sponsor right after creating the fellowship.
-  Status: Implemented (2026-11-12, branch 036); validation pending.
+  Status: Implemented (2026-11-12, branch 036); validated locally and on the fork (2026-11-13).
 - **TD-035 — `recalculate_parent_projects` only extends a parent's dates**:
   it moves the start earlier and the end later, never back. A parent keeps a
   date from an earlier state once a child changes or leaves (parent 288: end
@@ -535,7 +535,7 @@ these differences remain, none of them in a field the merge decides:
   enrichment now leaves out every initiative with a row in `advisorships`,
   in the title index and in the code index. Measured before the fix: 4
   advisorships with PDF data (PJ 2449, 3879, 2804, 6020).
-  Status: Implemented (2026-11-12, branch 036); validation pending.
+  Status: Implemented (2026-11-12, branch 036); validated locally and on the fork (2026-11-13).
 - **TD-039 — A value that is not a DOI merges different articles**: the DOI
   field of a Lattes article sometimes holds a Scopus link without a DOI
   (`...citedby.url?...&doi=null&md5=...`) or an ISSN, and any text was taken
