@@ -170,3 +170,21 @@ def test_zip_excludes_unzipped_exports_canonical_folders(tmp_path):
     assert not any(
         n.startswith(("exports_canonical/", "exports_canonical (2)/")) for n in names
     )
+
+
+def test_the_json_archive_never_holds_the_parquet_archive(tmp_path):
+    # Spec 038 (FR-008, FR-011): the Parquet archive lives next to the JSON
+    # archive and must never enter it; the member list stays the same.
+    (tmp_path / "initiatives_canonical.json").write_text("[]", encoding="utf-8")
+    zip_exports_task.fn(str(tmp_path))
+    with zipfile.ZipFile(tmp_path / "exports_canonical.zip") as zf:
+        before = zf.namelist()
+
+    (tmp_path / "exports_parquet.zip").write_bytes(b"PK\x05\x06" + b"\0" * 18)
+    (tmp_path / "exports_parquet.zip.tmp").write_bytes(b"partial")
+    zip_exports_task.fn(str(tmp_path))
+    with zipfile.ZipFile(tmp_path / "exports_canonical.zip") as zf:
+        after = zf.namelist()
+
+    assert after == before
+    assert not any("exports_parquet" in n for n in after)

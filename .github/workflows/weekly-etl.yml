@@ -152,31 +152,36 @@ jobs:
           HORIZON_LATTES_RETRY_PAUSE_MIN: ${{ github.event.inputs.lattes_retry_pause_min }}
         run: make weekly-flows
 
-      - name: Commit exports_canonical.zip if changed
+      - name: Commit the export archives if changed
         if: success()
         run: |
           set -euo pipefail
-          ZIP="data/exports/exports_canonical.zip"
-          if [ ! -f "$ZIP" ]; then
-            echo "::warning::$ZIP was not generated; nothing to commit."
-            exit 0
-          fi
           # Spec 029: never publish an archive made with another key, by a
           # local run, or over the size limit. A refusal is a warning: the
           # archive from HEAD is put back and the run stays green.
-          python -m src.scripts.check_publishable_archive data/exports/exports_canonical.zip --ref HEAD --warn-only
-          if [ ! -f "$ZIP" ]; then
-            echo "::warning::$ZIP was refused and is not in HEAD; nothing to commit."
-            exit 0
-          fi
-          git add -- "$ZIP"
-          if git diff --cached --quiet; then
-            echo "No changes to $ZIP; nothing to commit."
+          # Spec 038: the Parquet archive is gated and committed with the JSON
+          # archive, in one commit.
+          STAGED=0
+          for ARCHIVE in data/exports/exports_canonical.zip data/exports/exports_parquet.zip; do
+            if [ ! -f "$ARCHIVE" ]; then
+              echo "::warning::$ARCHIVE was not generated; nothing to commit for it."
+              continue
+            fi
+            python -m src.scripts.check_publishable_archive "$ARCHIVE" --ref HEAD --warn-only
+            if [ ! -f "$ARCHIVE" ]; then
+              echo "::warning::$ARCHIVE was refused and is not in HEAD; nothing to commit for it."
+              continue
+            fi
+            git add -- "$ARCHIVE"
+            STAGED=1
+          done
+          if [ "$STAGED" -eq 0 ] || git diff --cached --quiet; then
+            echo "No changes to the export archives; nothing to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore(exports_canonical.zip): update from weekly run $(date -u +%Y-%m-%d)"
+          git commit -m "chore(exports): update the export archives from weekly run $(date -u +%Y-%m-%d)"
           git push origin "HEAD:${{ github.ref_name }}"
 
       # Spec 029: the artifact is public, so it is built as an allow-list. The

@@ -61,11 +61,14 @@ jobs:
           BASE_SHA="HEAD~1"
         fi
 
-        if [ -n "$(git diff --name-only "$BASE_SHA"...HEAD -- data/exports/exports_canonical.zip)" ]; then
-          python -m src.scripts.check_publishable_archive data/exports/exports_canonical.zip --ref "$BASE_SHA"
-        else
-          echo "The export archive did not change; nothing to check."
-        fi
+        # Spec 038: the Parquet archive passes the same check.
+        for ARCHIVE in data/exports/exports_canonical.zip data/exports/exports_parquet.zip; do
+          if [ -n "$(git diff --name-only "$BASE_SHA"...HEAD -- "$ARCHIVE")" ]; then
+            python -m src.scripts.check_publishable_archive "$ARCHIVE" --ref "$BASE_SHA"
+          else
+            echo "$ARCHIVE did not change; nothing to check."
+          fi
+        done
 
     - name: Run Tests
       run: |

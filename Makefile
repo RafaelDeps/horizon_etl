@@ -33,7 +33,7 @@ PREFECT_DB_SERVICE ?= database
 	ingest-sigpesq extract-project-files \
 	ingest-lattes-download ingest-lattes-projects ingest-lattes-full \
 	sync-cnpq \
-	export-canonical export-knowledge-areas-mart export-initiatives-analytics-mart export-people-graph export-collaboration-graph export-researchers-collaboration-graph export-outside-ifes-collaboration-graph export-null-researchers-collaboration-graph export-students-collaboration-graph export-rg-membership-manifest \
+	export-canonical parquet-archive export-knowledge-areas-mart export-initiatives-analytics-mart export-people-graph export-collaboration-graph export-researchers-collaboration-graph export-outside-ifes-collaboration-graph export-null-researchers-collaboration-graph export-students-collaboration-graph export-rg-membership-manifest \
 	anonymize-backfill anonymize-check \
 	test test-coverage lint format format-check ci-check \
 	audit-duplicates consolidate-duplicates \
@@ -194,6 +194,9 @@ sync-cnpq: prefect-server ## Sync CNPq research groups (CAMPUS=Serra; EARLY_STOP
 
 export-canonical: prefect-server ## Export all canonical data to OUTPUT_DIR
 	@$(FLOW_PYTHON) app.py export_canonical "$(OUTPUT_DIR)" "$(CAMPUS)"
+
+parquet-archive: prefect-server ## Build exports_parquet.zip from exports_canonical.zip in OUTPUT_DIR (spec 038)
+	@$(FLOW_PYTHON) app.py parquet_archive "$(OUTPUT_DIR)"
 
 export-knowledge-areas-mart: prefect-server ## Export knowledge areas mart JSON
 	@$(FLOW_PYTHON) app.py ka_mart "$(OUTPUT_DIR)/knowledge_areas_mart.json" "$(CAMPUS)"

@@ -682,3 +682,11 @@ these differences remain, none of them in a field the merge decides:
   weekly of GitHub Actions exports `linkedin_url` empty and only a local run
   carries the links. Publishing them through the workflow needs the list, or
   the links, to reach it. Status: Open, decision needed.
+- **TD-054 — The Parquet archive grows the repository history**: the weekly
+  workflow commits `exports_parquet.zip` (about 51 MB on 2026-11-14) next to
+  `exports_canonical.zip` in every run in which the data changed (branch 038).
+  Parquet compresses whole tables, so each such commit adds about 40 to 50 MB
+  to the history, on top of the JSON archive. Options to study: publish the
+  archives as release assets, rewrite old archive history, or keep them in a
+  separate data repository. Status: Open, accepted for now (maintainer's
+  decision of 2026-11-14).

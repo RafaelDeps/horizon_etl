@@ -417,6 +417,30 @@ The phase logs one line, for example
 then one line per unused line with the name and the reason, and writes
 `data/reports/linkedin_links_report.json`.
 
+## Parquet export archive (branch 038)
+
+- **Weekly phase** `parquet_archive`, right after `zip_exports`, not critical,
+  900 s. It runs only when `zip_exports` built the JSON archive in the same
+  run; otherwise it is recorded as skipped with
+  `phase 'parquet_archive' skipped: zip_exports did not build the archive`.
+- **What it does**: reads the top-level members of
+  `data/exports/exports_canonical.zip` and writes
+  `data/exports/exports_parquet.zip` in the Parquet layout
+  (`docs/outputs-and-artifacts.md`), with the JSON archive's manifest, and the
+  report `data/reports/parquet_archive_report.json`. A failure keeps the
+  previous Parquet archive and logs
+  `exports_parquet.zip is now from an earlier run than exports_canonical.zip`.
+- **Commands**: `make parquet-archive` (uses `OUTPUT_DIR`) or
+  `python app.py parquet_archive [output_dir]`. `python app.py all` and
+  `export_canonical_data_flow` with its default `zip_exports=True` (the unified
+  pipeline) build it right after the JSON archive, never failing on it.
+- **Manual conversion of a folder** (loose files, same layout):
+  `python -m src.scripts.export_parquet --src DIR --dst DIR`.
+- **Publishing**: the weekly workflow step "Commit the export archives if
+  changed" checks each archive with `src.scripts.check_publishable_archive`
+  and commits both in one commit
+  (`chore(exports): update the export archives from weekly run <date>`).
+
 ## SQLite connection settings (spec 018)
 
 `libbase` commits after every record it adds, so a Lattes phase issues

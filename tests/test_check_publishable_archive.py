@@ -144,3 +144,63 @@ def test_a_missing_archive_is_refused(repo):
     (repo / ARCHIVE).unlink()
 
     assert _check("--ref", "HEAD") == 1
+
+
+# --- Spec 038: the same gate on the Parquet archive -------------------------
+
+PARQUET_ARCHIVE = "data/exports/exports_parquet.zip"
+
+
+def _parquet_archive(root, manifest):
+    """A Parquet archive built by the real build from a JSON archive."""
+    from src.flows.exports.parquet_archive import build_parquet_archive
+
+    folder = root / "data" / "exports"
+    folder.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(folder / "exports_canonical.zip", "w") as zf:
+        zf.writestr("rows.json", json.dumps([{"id": 1}]))
+        if manifest is not None:
+            zf.writestr("export_manifest.json", json.dumps(manifest))
+    if manifest is None:
+        # The build refuses a JSON archive without manifest; make one by hand.
+        with zipfile.ZipFile(folder / "exports_parquet.zip", "w") as zf:
+            zf.writestr("rows.cols.json", "{}")
+        return
+    report = build_parquet_archive(
+        str(folder), report_path=str(root / "parquet_report.json")
+    )
+    assert report["status"] == "built"
+
+
+@pytest.fixture
+def parquet_repo(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _parquet_archive(root, _manifest())
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "archives")
+    monkeypatch.chdir(root)
+    return root
+
+
+@pytest.mark.parametrize(
+    "manifest, reason",
+    [
+        (None, "manifest"),
+        (_manifest(official=False), "official workflow"),
+        (_manifest(fingerprint=OTHER_FINGERPRINT), "key differs"),
+    ],
+)
+def test_refuses_a_bad_parquet_archive(parquet_repo, manifest, reason):
+    _parquet_archive(parquet_repo, manifest)
+
+    reasons = gate.refusals(PARQUET_ARCHIVE, "HEAD")
+
+    assert any(reason in r for r in reasons)
+
+
+def test_accepts_a_good_parquet_archive(parquet_repo):
+    _parquet_archive(parquet_repo, _manifest())
+
+    assert gate.refusals(PARQUET_ARCHIVE, "HEAD") == []

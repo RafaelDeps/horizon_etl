@@ -22,6 +22,7 @@ from src.flows.exports.null_researchers_collaboration_graph import (
 from src.flows.exports.outside_ifes_collaboration_graph import (
     export_outside_ifes_collaboration_graph_flow,
 )
+from src.flows.exports.parquet_archive import EARLIER_RUN_WARNING, parquet_archive_task
 from src.flows.exports.people_collaboration_graph import (
     export_people_collaboration_graph_flow,
 )
@@ -297,7 +298,9 @@ def export_horizon_ids_task(output_dir: str):
 #   out of the walk and scrubbed copies are added to the zip explicitly.
 # * formandos/, docentes/, mestrado/ -- formatted report views (HTML), not part
 #   of the dataset.
-# * parquet/ -- alternate format mirror; no longer emitted by the flow.
+# * parquet/ -- stale loose mirror from before spec 013; never produced or read.
+#   Spec 038 publishes the Parquet layout as its own archive,
+#   exports_parquet.zip, built from this archive (and never put into it).
 #
 # The zip is versioned, so sweeping any of these in would put intermediate or
 # redundant material -- or raw personal data -- into git.
@@ -544,6 +547,13 @@ def export_canonical_data_flow(
     export_horizon_ids_task(output_dir)
     if zip_exports:
         zip_exports_task(output_dir)
+        # Spec 038: the Parquet archive comes from the JSON archive just built;
+        # its failure never stops this flow nor touches the JSON archive.
+        try:
+            parquet_archive_task(output_dir)
+        except Exception as exc:
+            logger.error("Parquet archive not built: {}", exc)
+            logger.warning(EARLIER_RUN_WARNING)
 
 
 @flow(name="Zip Exports Flow", **telegram_flow_state_handlers())

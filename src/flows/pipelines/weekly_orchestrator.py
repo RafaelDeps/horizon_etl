@@ -110,6 +110,10 @@ _PHASES = [
     # all passed (_ARCHIVE_GATE): a skipped build leaves the checked-out
     # archive untouched, so nothing is published and the run stays usable.
     ("zip_exports", ["zip_exports"], 900, True, "app"),
+    # Spec 038: exports_parquet.zip, built from the JSON archive just written so
+    # both come from the same run. Non-critical: a failure keeps the previous
+    # Parquet archive; run only when zip_exports built the JSON archive.
+    ("parquet_archive", ["parquet_archive"], 900, False, "app"),
     # --- docentes / OpenAlex analytics (read-only wrt DB; run as modules) ---
     (
         "openalex_citations",
@@ -193,7 +197,7 @@ def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
             argv.append(output_dir)
             if campus:
                 argv.append(campus)
-        elif argv_tail[0] == "zip_exports":
+        elif argv_tail[0] in ("zip_exports", "parquet_archive"):
             argv.append(output_dir)
     logger.info("▶ phase '{}': {}", name, " ".join(argv[1:]))
     rc = _run_phase_subprocess(argv, timeout, name)
@@ -410,6 +414,18 @@ def run_weekly(
                     {"name": name, "ok": False, "rc": SKIPPED, "critical": False}
                 )
                 continue
+        if name == "parquet_archive" and not any(
+            r["name"] == "zip_exports" and r["ok"] for r in results
+        ):
+            # Spec 038: no new JSON archive, so no new Parquet archive; both stay
+            # as they were.
+            logger.error(
+                "phase 'parquet_archive' skipped: zip_exports did not build the archive"
+            )
+            results.append(
+                {"name": name, "ok": False, "rc": SKIPPED, "critical": False}
+            )
+            continue
         results.append(_run_phase(name, argv_tail, timeout, campus, output_dir, mode))
 
     # Every phase subprocess has exited, so no connection holds the file: move

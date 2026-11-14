@@ -223,12 +223,21 @@ ARCHIVE_CHECK = "python -m src.scripts.check_publishable_archive"
 
 def test_the_weekly_checks_the_archive_before_committing_it():
     _, steps = _steps()
-    run = _step(steps, "Commit exports_canonical.zip if changed")["run"]
-    command = (
-        f"{ARCHIVE_CHECK} data/exports/exports_canonical.zip --ref HEAD --warn-only"
-    )
+    run = _step(steps, "Commit the export archives if changed")["run"]
+    command = f'{ARCHIVE_CHECK} "$ARCHIVE" --ref HEAD --warn-only'
     assert command in run
     assert run.index(command) < run.index("git add")
+
+
+def test_the_weekly_commits_both_archives_in_one_commit():
+    # Spec 038: the Parquet archive is gated and committed with the JSON one.
+    _, steps = _steps()
+    run = _step(steps, "Commit the export archives if changed")["run"]
+    assert "data/exports/exports_canonical.zip" in run
+    assert "data/exports/exports_parquet.zip" in run
+    assert run.count("git commit") == 1
+    assert run.count("git push") == 1
+    assert "chore(exports): update the export archives from weekly run" in run
 
 
 def test_ci_refuses_a_changed_archive_that_fails_the_check():
@@ -241,7 +250,19 @@ def test_ci_refuses_a_changed_archive_that_fails_the_check():
     assert "--warn-only" not in run
     assert "git diff --name-only" in run
     assert "data/exports/exports_canonical.zip" in run
+    # Spec 038: the Parquet archive is checked the same way.
+    assert "data/exports/exports_parquet.zip" in run
     assert "--ref" in run
     # CI never holds a key.
     assert "HORIZON_STATE_KEY" not in str(ci)
     assert "HORIZON_PII_HMAC_KEY" not in str(ci)
+
+
+def test_the_pre_commit_hook_checks_both_archives():
+    # Spec 038: each staged archive passes the same gate.
+    hook = Path(".githooks/pre-commit").read_text()
+    assert "data/exports/exports_canonical.zip" in hook
+    assert "data/exports/exports_parquet.zip" in hook
+    assert (
+        'python3 -m src.scripts.check_publishable_archive "$archive" --ref HEAD' in hook
+    )

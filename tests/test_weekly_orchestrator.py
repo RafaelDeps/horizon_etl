@@ -488,3 +488,58 @@ def test_linkedin_links_phase_runs_after_the_person_merge_and_before_the_export(
     assert argv_tail == ["linkedin_links"]
     assert critical is False
     assert mode == "app"
+
+
+def test_parquet_archive_phase_follows_the_json_archive_and_is_not_critical():
+    # Spec 038: built from the JSON archive just written; never fails the run.
+    names = [p[0] for p in wo._PHASES]
+    assert names.index("parquet_archive") == names.index("zip_exports") + 1
+    entry = next(p for p in wo._PHASES if p[0] == "parquet_archive")
+    assert entry == ("parquet_archive", ["parquet_archive"], 900, False, "app")
+
+
+def test_parquet_archive_receives_the_output_folder():
+    captured = []
+
+    def fake(argv, timeout=None):
+        captured.append(argv)
+        return MagicMock(returncode=0)
+
+    with (
+        patch("src.notifications.telegram.send_telegram_message", return_value=True),
+        patch.object(wo.subprocess, "run", side_effect=fake),
+    ):
+        assert wo.run_weekly(output_dir="somewhere") == 0
+
+    call = next(a for a in captured if a[2] == "parquet_archive")
+    assert call[-1] == "somewhere"
+
+
+def test_parquet_archive_runs_when_the_json_archive_was_built():
+    seen = []
+    assert _run_weekly_with(seen=seen) == 0
+    assert seen.index("parquet_archive") == seen.index("zip_exports") + 1
+
+
+@pytest.mark.parametrize("fail", [["zip_exports"], ["ka_mart"]])
+def test_parquet_archive_is_skipped_when_the_json_archive_was_not_built(fail):
+    from loguru import logger
+
+    seen, messages = [], []
+    sink = logger.add(lambda m: messages.append(str(m)))
+    try:
+        _run_weekly_with(fail=fail, seen=seen)
+    finally:
+        logger.remove(sink)
+
+    assert "parquet_archive" not in seen
+    assert any(
+        "phase 'parquet_archive' skipped: zip_exports did not build the archive" in m
+        for m in messages
+    )
+
+
+def test_a_failed_parquet_archive_leaves_the_run_green():
+    seen = []
+    assert _run_weekly_with(fail=["parquet_archive"], seen=seen) == 0
+    assert "anonymize_backfill" in seen

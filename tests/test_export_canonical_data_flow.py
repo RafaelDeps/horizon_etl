@@ -102,10 +102,15 @@ def test_export_canonical_data_flow_calls_tracking_exports_individually(tmp_path
             patch("src.flows.exports.canonical_data.export_horizon_ids_task")
         )
         stack.enter_context(patch("src.flows.exports.canonical_data.zip_exports_task"))
+        # Spec 038: the Parquet archive follows the JSON archive.
+        parquet_task = stack.enter_context(
+            patch("src.flows.exports.canonical_data.parquet_archive_task")
+        )
         makedirs = stack.enter_context(patch("os.makedirs"))
         export_canonical_data_flow.fn(output_dir=output_dir, campus="Serra")
 
     makedirs.assert_called_once_with(output_dir, exist_ok=True)
+    parquet_task.assert_called_once_with(output_dir)
     organizations_task.assert_called_once_with(output_dir)
     campuses_task.assert_called_once_with(output_dir, "Serra")
     knowledge_areas_task.assert_called_once_with(output_dir)

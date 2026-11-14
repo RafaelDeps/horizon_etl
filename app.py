@@ -22,6 +22,7 @@ from src.flows.exports.null_researchers_collaboration_graph import (
 from src.flows.exports.outside_ifes_collaboration_graph import (
     export_outside_ifes_collaboration_graph_flow,
 )
+from src.flows.exports.parquet_archive import parquet_archive_flow
 from src.flows.exports.people_collaboration_graph import (
     export_people_collaboration_graph_flow,
 )
@@ -295,6 +296,16 @@ def main():
             )
             logger.info(f"Executing Flow: Zip Exports (Output Dir: {output_dir})")
             zip_exports_flow(output_dir=output_dir)
+
+        if flow_to_run in ["parquet_archive", "all"]:
+            # Spec 038: exports_parquet.zip from exports_canonical.zip.
+            output_dir = (
+                sys.argv[2]
+                if len(sys.argv) > 2 and flow_to_run == "parquet_archive"
+                else "data/exports"
+            )
+            logger.info(f"Executing Flow: Parquet Archive (Output Dir: {output_dir})")
+            parquet_archive_flow(output_dir=output_dir)
 
         if flow_to_run == "lattes_download":
             logger.info("Executing Flow: Download Lattes Curricula")
