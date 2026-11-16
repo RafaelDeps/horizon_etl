@@ -56,17 +56,16 @@ O `full_ingestion_pipeline` coordena, em alto nivel:
 
 ## Lattes
 
-O download de curriculos Lattes chama `scriptLattes`. Essa dependencia ainda
-usa Selenium internamente, entao o flow valida a compatibilidade entre o
-Chrome/Chromium local e o `./chromedriver` antes de limpar `data/lattes_json` e
-baixar novos JSONs.
-
-Quando existir mais de um navegador instalado, informe o binario desejado:
+O download de curriculos Lattes chama `scriptLattes`, que abre o navegador pelo
+Playwright. Antes de baixar novos JSONs, o flow valida se o Chromium do
+Playwright esta instalado (`validate_script_lattes_runtime`). Para instalar:
 
 ```bash
-CHROME_BINARY=/caminho/para/chrome make ingest-lattes-download
-CHROME_BINARY=/caminho/para/chrome make ingest-lattes-full
+.venv/bin/python -m playwright install chromium
 ```
+
+Nao ha Selenium, `chromedriver` nem `CHROME_BINARY` no fluxo. O workflow semanal
+instala so o Chromium do Playwright (spec 039).
 
 Antes da chamada final ao `scriptLattes`, o flow baixa em paralelo os curriculos
 ausentes no cache bruto `cache/`. O padrao usa 3 workers para reduzir o tempo de

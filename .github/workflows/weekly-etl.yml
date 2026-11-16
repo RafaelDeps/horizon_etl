@@ -86,8 +86,6 @@ jobs:
       WEEKLY_CAMPUS: ${{ github.event.inputs.weekly_campus }}
       OUTPUT_DIR: ${{ github.event.inputs.output_dir || 'data/exports' }}
       PREFECT_UI_URL: http://127.0.0.1:4200
-      CHROME_BINARY: /usr/bin/chromium-browser
-      CHROMEDRIVER_PATH: /usr/bin/chromedriver
       RAPIDFUZZ_IMPLEMENTATION: fallback
     steps:
       - name: Checkout repository
@@ -105,13 +103,12 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt
 
+      # Spec 039: the only browser of the weekly. The Lattes download
+      # (scriptLattes) and the SigPesq agent both open it through Playwright;
+      # no apt/snap Chromium is installed, so a Snap Store outage cannot stop
+      # the run.
       - name: Install Playwright Chromium
         run: .venv/bin/python -m playwright install --with-deps chromium
-
-      - name: Install Chromium for Lattes (Selenium)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y chromium-browser chromium-driver
 
       - name: Validate required secrets
         run: |

@@ -113,17 +113,17 @@ data/raw/sigpesq/advisorships/2026/Relatorio_<data>.xlsx
 
 ## Fluxo Lattes
 
-O download de curriculos Lattes usa `scriptLattes`, que atualmente depende de
-Selenium e de um `chromedriver` local. Antes da execucao, o flow valida se o
-Chrome/Chromium encontrado tem a mesma versao major do `./chromedriver`.
-
-Quando houver mais de uma instalacao de Chrome/Chromium, ou quando o Chromium do
-sistema vier via Snap, informe um binario explicito:
+O download de curriculos Lattes usa `scriptLattes`, que abre o navegador pelo
+Playwright (o mesmo Chromium usado pelo agente do SigPesq). Antes da execucao, o
+flow valida se o Chromium do Playwright esta instalado. Para instalar:
 
 ```bash
-CHROME_BINARY=/caminho/para/chrome make ingest-lattes-download
-CHROME_BINARY=/caminho/para/chrome make ingest-lattes-full
+.venv/bin/python -m playwright install chromium
+# numa maquina Linux nova, com as bibliotecas do sistema:
+.venv/bin/python -m playwright install --with-deps chromium
 ```
+
+Nao e preciso Selenium, `chromedriver` nem `CHROME_BINARY` (spec 039).
 
 O diretorio `data/lattes_json` e limpo de arquivos `.json` antes de cada novo
 download. Isso evita misturar JSONs antigos com a lista atual de pesquisadores.
@@ -134,8 +134,8 @@ em `cache/` antes de chamar o `scriptLattes` para gerar os JSONs. O limite
 padrao e de 3 downloads simultaneos:
 
 ```bash
-HORIZON_LATTES_DOWNLOAD_WORKERS=4 CHROME_BINARY=/caminho/para/chrome make ingest-lattes-download
-HORIZON_LATTES_PREFETCH=0 CHROME_BINARY=/caminho/para/chrome make ingest-lattes-download
+HORIZON_LATTES_DOWNLOAD_WORKERS=4 make ingest-lattes-download
+HORIZON_LATTES_PREFETCH=0 make ingest-lattes-download
 ```
 
 ## Execucao com Docker

@@ -266,3 +266,41 @@ def test_the_pre_commit_hook_checks_both_archives():
     assert (
         'python3 -m src.scripts.check_publishable_archive "$archive" --ref HEAD' in hook
     )
+
+
+# --- Spec 039: the weekly installs only the Playwright Chromium -------------
+
+BROWSER_VARIABLES = ("CHROME_BINARY", "CHROMEDRIVER_PATH")
+
+
+def test_no_step_installs_a_browser_through_apt_or_snap():
+    import re
+
+    _, steps = _steps()
+    apt_chromium = re.compile(r"apt-get\s+install\b[^\n]*\bchromium", re.IGNORECASE)
+    for step in steps:
+        run = step.get("run") or ""
+        assert not apt_chromium.search(run), step.get("name")
+        assert "snap install" not in run, step.get("name")
+    assert "Install Chromium for Lattes (Selenium)" not in [
+        s.get("name") for s in steps
+    ]
+
+
+def test_the_job_sets_no_browser_path():
+    workflow, steps = _steps()
+    job_env = workflow["jobs"]["run-etl"].get("env") or {}
+    for name in BROWSER_VARIABLES:
+        assert name not in job_env
+        for step in steps:
+            assert name not in (step.get("env") or {}), step.get("name")
+
+
+def test_the_playwright_chromium_install_is_kept():
+    _, steps = _steps()
+    names = [s.get("name") for s in steps]
+    step = _step(steps, "Install Playwright Chromium")
+    assert step["run"] == ".venv/bin/python -m playwright install --with-deps chromium"
+    at = names.index("Install Playwright Chromium")
+    assert names.index("Create virtual environment and install dependencies") < at
+    assert at < names.index("Validate required secrets")
