@@ -108,15 +108,18 @@ No shared prerequisite: the stories touch different files. Phase 1 is enough.
   - Result: 1514 passed, 10 skipped, 0 failed in 6m43 (logs/pytest_039_full.log): the 1511 of T001 plus the 3 new workflow tests. flake8 src tests: 579, the same as T001. git status shows no file under data/ changed by the tests.
 - [X] T016 Run quickstart.md section 1, the greps on the workflow, and record the output.
   - Result: quickstart section 1: the grep for chromium-browser, chromium-driver, snap install, CHROME_BINARY and CHROMEDRIVER_PATH in .github/workflows/weekly-etl.yml prints nothing; the grep for the Playwright install prints one line (line 111).
-- [ ] T017 Local weekly run. Ask the maintainer first, and back up `db/horizon.db`, `data/lattes_json` and `data/raw` before. Follow quickstart.md section 2 and record:
+- [X] T017 Local weekly run. Ask the maintainer first, and back up `db/horizon.db`, `data/lattes_json` and `data/raw` before. Follow quickstart.md section 2 and record:
   - the phases and the time;
   - the Lattes line `downloads lattes: new=… refreshed=… reused=…`;
   - that a `.env` with or without `CHROME_BINARY` makes no difference.
-- [ ] T018 Second local weekly run (ask the maintainer first). Record the same items as T017.
-- [ ] T019 GitHub Actions, only if the maintainer asks; only on the RafaelDeps fork, never upstream; push without force. Follow quickstart.md section 3 and record:
+  - Result: (2026-11-16, passed) backup in data/_backup_2026-11-16_pre039/ (horizon.db, lattes_json, raw, both archives, RESTORE.txt), database hash checked. Weekly 15:11-15:52 (41 min) with make weekly-flows, exit 0, 24 phases with exit 0 (logs/weekly_039_run1.log). Lattes: 'downloads lattes: new=13 refreshed=104 reused=316 failed=2 reused_after_failure=2 retried=13 recovered=11': the curricula were downloaded through the Playwright Chromium; the 2 failed downloads kept their stored copies. The .env was not opened (maintainer's rule); no code reads CHROME_BINARY or CHROMEDRIVER_PATH. Database after the run copied to data/_backup_2026-11-16_pre039/horizon_after_run1.db.
+- [X] T018 Second local weekly run (ask the maintainer first). Record the same items as T017.
+  - Result: (2026-11-16, passed) a first try at 15:52 was stopped by the maintainer at 16:14 during consolidate_duplicates; its database was kept as data/_backup_2026-11-16_pre039/horizon_aborted_run2.db and db/horizon.db was restored from horizon_after_run1.db (hash checked). Weekly 18:10-18:51 (41 min), exit 0, 24 phases with exit 0 (logs/weekly_039_run2.log). Lattes: 'downloads lattes: new=0 refreshed=108 reused=326 failed=1 reused_after_failure=1 retried=7 recovered=6', through the Playwright Chromium; the failed download kept its stored copy. linkedin links: 313 lines, 243 stored, unchanged. Parquet archive built, 126 members, 50,652,951 bytes.
+- [X] T019 GitHub Actions, only if the maintainer asks; only on the RafaelDeps fork, never upstream; push without force. Follow quickstart.md section 3 and record:
   - that no step "Install Chromium for Lattes (Selenium)" ran;
   - that "Install Playwright Chromium" passed and every phase passed;
   - the Lattes download line, compared with run 43663739197.
+  - Result: (2026-11-16, passed) commit 86ecbf5 pushed to the RafaelDeps fork, branch 039-drop-snap-chromium, without force, nothing upstream. Run 43926472687 (18:13-20:11 UTC, success): no step 'Install Chromium for Lattes (Selenium)'; 'Install Playwright Chromium' passed; 24 phases with exit 0. First run of the branch: 'restore: rebuilt — no successful run', so every curriculum was downloaded: 'downloads lattes: new=431 refreshed=0 reused=0 failed=4' through the Playwright Chromium (run 43663739197 restored its state and reused copies, so the counts differ by design). linkedin links: 313 lines, 243 stored, 70 not found. Parquet archive built, 125 members, 49,917,286 bytes. Both archives publishable; bot commit bdf8f86 'chore(exports): update the export archives from weekly run 2026-11-16' (243 persons with linkedin_url; 18,213 persons, fewer than locally because the 4 failed curricula had no stored copy on a first run, the behaviour noted in the 2026-11-16 data audit).
 
   Or record that the maintainer chose not to run it.
 
