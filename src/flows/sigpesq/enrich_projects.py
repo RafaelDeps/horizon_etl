@@ -1,6 +1,11 @@
 from dotenv import load_dotenv
 from prefect import flow, get_run_logger
 
+from src.adapters.database.field_claim_store import (
+    SqliteFieldClaimStore,
+    SqliteFieldWriter,
+)
+from src.core.logic.field_merge import FieldMergeApplier, FieldMergeStats
 from src.core.logic.project_enrichment import ProjectEnrichmentLoader
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
@@ -34,6 +39,12 @@ def enrich_projects_flow(
     logger.info("Initializing SigPesq Project Enrichment Flow")
 
     loader = ProjectEnrichmentLoader(overwrite=overwrite, dry_run=dry_run)
+    if not dry_run:
+        # Branch 030: the PDF description is ranked with the other documents'.
+        store = SqliteFieldClaimStore(lambda: loader._session)
+        loader.field_merge = FieldMergeApplier(
+            store, SqliteFieldWriter(lambda: loader._session), FieldMergeStats()
+        )
 
     if dry_run:
         stats = loader.run(pj_dir, ingest_new=ingest_new)
@@ -44,6 +55,8 @@ def enrich_projects_flow(
         ):
             stats = loader.run(pj_dir, ingest_new=ingest_new)
 
+    if loader.field_merge is not None:
+        loader.field_merge.stats.log(ProjectEnrichmentLoader.SOURCE_SYSTEM)
     logger.info(f"Enrichment finished: {stats}")
     return stats
 

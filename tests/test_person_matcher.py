@@ -141,3 +141,37 @@ def test_match_or_create_prefers_richer_duplicate_for_same_canonical_name(matche
     )
     assert result.id == 2
     matcher.person_controller.create_person.assert_not_called()
+
+
+# ------------------------------------------------- spec 020: fuzzy tie-break
+def test_fuzzy_tie_is_broken_by_a_fixed_rule_not_by_cache_order():
+    from src.core.logic.person_matcher import PersonMatcher
+
+    class _P:
+        def __init__(self, pid, name, cnpq_url=None):
+            self.id, self.name, self.cnpq_url = pid, name, cnpq_url
+            self.emails = []
+
+    class _Ctrl:
+        def __init__(self, persons):
+            self.persons = persons
+
+        def get_all(self):
+            return list(self.persons)
+
+    winners = set()
+    for persons in (
+        [
+            _P(1, "Ciro Alexandre Torres Alvez"),
+            _P(2, "Ciro Alexandre Alvez Torres", "http://lattes.cnpq.br/1"),
+        ],
+        [
+            _P(2, "Ciro Alexandre Alvez Torres", "http://lattes.cnpq.br/1"),
+            _P(1, "Ciro Alexandre Torres Alvez"),
+        ],
+    ):
+        matcher = PersonMatcher(_Ctrl(persons))
+        matcher.preload_cache()
+        # A misspelling that is equally close (token-sort) to both names.
+        winners.add(matcher.match_or_create("Ciro Alexandre Torres Alves").id)
+    assert winners == {2}  # the richer record (with a Lattes URL), both orders

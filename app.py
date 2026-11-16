@@ -4,10 +4,14 @@ import sys
 from dotenv import load_dotenv
 from loguru import logger
 
+from src.adapters.database.sqlite_settings import install_sqlite_connection_settings
 from src.core.logic.pii_session_hook import install_lgpd_session_hooks
 from src.flows.all import ingest_all_sources_flow
 from src.flows.cnpq.groups import sync_cnpq_groups_flow
-from src.flows.exports.canonical_data import export_canonical_data_flow
+from src.flows.exports.canonical_data import (
+    export_canonical_data_flow,
+    zip_exports_flow,
+)
 from src.flows.exports.initiatives_analytics_mart import (
     export_initiatives_analytics_mart_flow,
 )
@@ -18,6 +22,7 @@ from src.flows.exports.null_researchers_collaboration_graph import (
 from src.flows.exports.outside_ifes_collaboration_graph import (
     export_outside_ifes_collaboration_graph_flow,
 )
+from src.flows.exports.parquet_archive import parquet_archive_flow
 from src.flows.exports.people_collaboration_graph import (
     export_people_collaboration_graph_flow,
 )
@@ -46,6 +51,7 @@ load_dotenv()
 os.environ.setdefault("PREFECT_API_URL", "http://127.0.0.1:4200/api")
 
 install_lgpd_session_hooks()
+install_sqlite_connection_settings()
 
 
 def _report_cnpq_summary(summary) -> None:
@@ -169,7 +175,11 @@ def main():
             logger.info(
                 f"Executing Flow: Export Canonical Data (Output: {output_dir}, Campus: {campus_filter})"
             )
-            export_canonical_data_flow(output_dir=output_dir, campus=campus_filter)
+            # Spec 029: the archive is built by its own phase (zip_exports),
+            # after the marts and the graph, so it holds their current files.
+            export_canonical_data_flow(
+                output_dir=output_dir, campus=campus_filter, zip_exports=False
+            )
 
         if flow_to_run in ["ka_mart", "all"]:
             output_path = (
@@ -278,6 +288,25 @@ def main():
             )
             export_people_collaboration_graph_flow(output_dir=output_dir)
 
+        if flow_to_run in ["zip_exports", "all"]:
+            output_dir = (
+                sys.argv[2]
+                if len(sys.argv) > 2 and flow_to_run == "zip_exports"
+                else "data/exports"
+            )
+            logger.info(f"Executing Flow: Zip Exports (Output Dir: {output_dir})")
+            zip_exports_flow(output_dir=output_dir)
+
+        if flow_to_run in ["parquet_archive", "all"]:
+            # Spec 038: exports_parquet.zip from exports_canonical.zip.
+            output_dir = (
+                sys.argv[2]
+                if len(sys.argv) > 2 and flow_to_run == "parquet_archive"
+                else "data/exports"
+            )
+            logger.info(f"Executing Flow: Parquet Archive (Output Dir: {output_dir})")
+            parquet_archive_flow(output_dir=output_dir)
+
         if flow_to_run == "lattes_download":
             logger.info("Executing Flow: Download Lattes Curricula")
             download_lattes_flow()
@@ -302,6 +331,26 @@ def main():
                 report["refused_groups"],
                 report["report_path"],
             )
+
+        if flow_to_run == "linkedin_links":
+            from src.flows.maintenance.linkedin_links import linkedin_links_flow
+
+            logger.info("Executing Flow: Sync LinkedIn Links")
+            linkedin_links_flow()
+
+        if flow_to_run == "recalculate_parent_projects":
+            from src.flows.maintenance.parent_projects import (
+                recalculate_parent_projects_flow,
+            )
+
+            logger.info("Executing Flow: Recalculate Parent Projects")
+            recalculate_parent_projects_flow()
+
+        if flow_to_run == "assign_horizon_ids":
+            from src.flows.maintenance.horizon_ids import assign_horizon_ids_flow
+
+            logger.info("Executing Flow: Assign Horizon Ids")
+            assign_horizon_ids_flow()
 
         if flow_to_run == "enrich_projects":
             from src.flows.sigpesq.enrich_projects import enrich_projects_flow

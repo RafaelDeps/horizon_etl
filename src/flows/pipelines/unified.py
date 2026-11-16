@@ -21,6 +21,7 @@ from src.flows.exports.initiatives_analytics_mart import (
 from src.flows.exports.knowledge_areas_mart import export_knowledge_areas_mart_flow
 from src.flows.lattes.advisorships import ingest_lattes_advisorships_flow
 from src.flows.lattes.projects import ingest_lattes_projects_flow
+from src.flows.maintenance.parent_projects import recalculate_parent_projects_flow
 from src.flows.sigpesq.advisorships import persist_advisorships
 from src.flows.sigpesq.all import download_all_sigpesq_reports
 from src.flows.sigpesq.enrich_projects import enrich_projects_flow
@@ -126,6 +127,8 @@ def full_ingestion_pipeline(
         # output. Best-effort: a no-op when no PJ files are present.
         logger.info("Step 8/10: Enriching projects from SigPesq document files...")
         enrich_projects_flow()
+        # Parent projects span all their advisorships, so after every source.
+        recalculate_parent_projects_flow()
 
         logger.info(f"Step 9/10: Exporting canonical data to {output_dir}...")
         export_canonical_data_flow(output_dir=output_dir, campus=campus_name)

@@ -14,6 +14,51 @@ on:
         required: false
         default: "data/exports"
         type: string
+      fresh_database:
+        description: "Ignore the previous run's database and rebuild from scratch."
+        required: false
+        default: false
+        type: boolean
+      refresh_share:
+        description: "Share of stored Lattes curricula and CNPq pages downloaded again (0-1; blank = 0.25)."
+        required: false
+        default: ""
+        type: string
+      full_refresh:
+        description: "Download every Lattes curriculum and CNPq page again."
+        required: false
+        default: false
+        type: boolean
+      early_stop:
+        description: "Stop downloading from a portal that blocks or stops answering, and use the stored copies."
+        required: false
+        default: true
+        type: boolean
+      cnpq_stop_after:
+        description: "CNPq failed attempts in a row that stop the downloads (blank = 8; 0 = off)."
+        required: false
+        default: ""
+        type: string
+      cnpq_budget_min:
+        description: "Minutes of CNPq downloads before they stop (blank = 45; 0 = off)."
+        required: false
+        default: ""
+        type: string
+      lattes_stop_after:
+        description: "Lattes failures or access check pages in a row that stop the downloads (blank = 5; 0 = off)."
+        required: false
+        default: ""
+        type: string
+      lattes_retry_workers:
+        description: "Workers that ask again, in the same run, for the Lattes curricula that got the access check page (blank = 1; 0 = off)."
+        required: false
+        default: ""
+        type: string
+      lattes_retry_pause_min:
+        description: "Minutes to wait before asking again for those curricula (blank = 5)."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -77,52 +122,89 @@ jobs:
           test -n "$HORIZON_PII_HMAC_KEY" || { echo "Missing GitHub secret: HORIZON_PII_HMAC_KEY"; exit 1; }
           test -n "$MISTRAL_API_KEY" || { echo "Missing GitHub secret: MISTRAL_API_KEY"; exit 1; }
 
+      # Spec 022: start from the database, raw downloads and Lattes cache of
+      # the last successful weekly of this branch. Anything missing or broken
+      # leaves a rebuild (make weekly-flows -> make db-ensure creates it); the
+      # step never fails the run, and the job summary says what happened.
+      - name: Restore previous weekly run
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FRESH_DATABASE: ${{ github.event.inputs.fresh_database }}
+          # Spec 029: the state travels in one encrypted bundle. The keys are
+          # given to this step and to "Prepare artifact" only.
+          HORIZON_STATE_KEY: ${{ secrets.HORIZON_STATE_KEY }}
+          HORIZON_STATE_KEY_PREVIOUS: ${{ secrets.HORIZON_STATE_KEY_PREVIOUS }}
+        run: make restore-weekly
+
       - name: Run weekly flows
+        env:
+          # Spec 023: rotation of the raw downloads (defaults when blank).
+          HORIZON_REFRESH_SHARE: ${{ github.event.inputs.refresh_share }}
+          HORIZON_FULL_REFRESH: ${{ github.event.inputs.full_refresh }}
+          # Spec 024: give a portal up when it blocks (defaults when blank).
+          HORIZON_PORTAL_EARLY_STOP: ${{ github.event.inputs.early_stop }}
+          HORIZON_CNPQ_STOP_AFTER_FAILURES: ${{ github.event.inputs.cnpq_stop_after }}
+          HORIZON_CNPQ_DOWNLOAD_BUDGET_MIN: ${{ github.event.inputs.cnpq_budget_min }}
+          HORIZON_LATTES_STOP_AFTER_FAILURES: ${{ github.event.inputs.lattes_stop_after }}
+          # Spec 025: second try of the Lattes access check pages (defaults when blank).
+          HORIZON_LATTES_RETRY_WORKERS: ${{ github.event.inputs.lattes_retry_workers }}
+          HORIZON_LATTES_RETRY_PAUSE_MIN: ${{ github.event.inputs.lattes_retry_pause_min }}
         run: make weekly-flows
 
-      - name: Compress large export files
-        if: always()
-        run: |
-          # Never touch archives: exports_canonical.zip is the flow's own
-          # deliverable and must ship byte-for-byte as written by
-          # `make weekly-flows` (no double wrapping).
-          find data/ -type f -size +10M ! -name '*.zip' \
-            -exec sh -c 'for f; do zip -m -j "$f.zip" "$f"; done' sh {} +
-
-      - name: Commit exports_canonical.zip if changed
+      - name: Commit the export archives if changed
         if: success()
         run: |
           set -euo pipefail
-          ZIP="data/exports/exports_canonical.zip"
-          if [ ! -f "$ZIP" ]; then
-            echo "::warning::$ZIP was not generated; nothing to commit."
-            exit 0
-          fi
-          git add -- "$ZIP"
-          if git diff --cached --quiet; then
-            echo "No changes to $ZIP; nothing to commit."
+          # Spec 029: never publish an archive made with another key, by a
+          # local run, or over the size limit. A refusal is a warning: the
+          # archive from HEAD is put back and the run stays green.
+          # Spec 038: the Parquet archive is gated and committed with the JSON
+          # archive, in one commit.
+          STAGED=0
+          for ARCHIVE in data/exports/exports_canonical.zip data/exports/exports_parquet.zip; do
+            if [ ! -f "$ARCHIVE" ]; then
+              echo "::warning::$ARCHIVE was not generated; nothing to commit for it."
+              continue
+            fi
+            python -m src.scripts.check_publishable_archive "$ARCHIVE" --ref HEAD --warn-only
+            if [ ! -f "$ARCHIVE" ]; then
+              echo "::warning::$ARCHIVE was refused and is not in HEAD; nothing to commit for it."
+              continue
+            fi
+            git add -- "$ARCHIVE"
+            STAGED=1
+          done
+          if [ "$STAGED" -eq 0 ] || git diff --cached --quiet; then
+            echo "No changes to the export archives; nothing to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore(exports_canonical.zip): update from weekly run $(date -u +%Y-%m-%d)"
+          git commit -m "chore(exports): update the export archives from weekly run $(date -u +%Y-%m-%d)"
           git push origin "HEAD:${{ github.ref_name }}"
+
+      # Spec 029: the artifact is public, so it is built as an allow-list. The
+      # database, raw downloads and Lattes cache go in one encrypted bundle;
+      # next to it only text files that pass a scan. Never fails the run; with
+      # no usable key the bundle is simply absent and the next run rebuilds.
+      - name: Prepare artifact
+        if: always()
+        continue-on-error: true
+        env:
+          HORIZON_STATE_KEY: ${{ secrets.HORIZON_STATE_KEY }}
+        run: make seal-weekly
 
       - name: Upload ETL artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: weekly-etl-artifacts
-          retention-days: 30
+          # Spec 022: the next run restores from this artifact; 90 days leave
+          # a database to restore after about twelve failed weeklies in a row.
+          retention-days: 90
           if-no-files-found: ignore
-          path: |
-            data
-            db/horizon.db
-            !data/exports/exports_canonical.zip
-            !.venv
-            !.venv/**
-            !.env
-            !.env.*
+          path: artifact_out
 
       - name: Show Prefect logs on failure
         if: failure()

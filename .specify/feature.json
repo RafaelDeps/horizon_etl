@@ -1,1 +1,3 @@
-{"feature_directory":"specs/014-infisical-sigpesq-credentials"}
+{
+  "feature_directory": "specs/038-parquet-export-archive"
+}

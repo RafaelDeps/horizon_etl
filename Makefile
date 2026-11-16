@@ -27,13 +27,13 @@ PREFECT_SERVER_SERVICE ?= server
 PREFECT_DB_SERVICE ?= database
 
 .PHONY: help setup logs-dir \
-	db-clean db-init db-reset \
+	db-clean db-init db-ensure db-reset db-save-ids restore-weekly seal-weekly purge-history-plan purge-history-verify \
 	prefect-server prefect-stop prefect-status \
 	pipeline pipeline-log weekly-flows full-refresh \
 	ingest-sigpesq extract-project-files \
 	ingest-lattes-download ingest-lattes-projects ingest-lattes-full \
 	sync-cnpq \
-	export-canonical export-knowledge-areas-mart export-initiatives-analytics-mart export-people-graph export-collaboration-graph export-researchers-collaboration-graph export-outside-ifes-collaboration-graph export-null-researchers-collaboration-graph export-students-collaboration-graph export-rg-membership-manifest \
+	export-canonical parquet-archive export-knowledge-areas-mart export-initiatives-analytics-mart export-people-graph export-collaboration-graph export-researchers-collaboration-graph export-outside-ifes-collaboration-graph export-null-researchers-collaboration-graph export-students-collaboration-graph export-rg-membership-manifest \
 	anonymize-backfill anonymize-check \
 	test test-coverage lint format format-check ci-check \
 	audit-duplicates consolidate-duplicates \
@@ -63,12 +63,41 @@ logs-dir:
 # --- Database ---
 
 db-clean: ## Delete the local SQLite database
-	@rm -f db/horizon.db
+	@rm -f db/horizon.db db/horizon.db-wal db/horizon.db-shm
 
 db-init: ## Initialize database schema and base data
 	@$(PYTHON) db/create_db.py
 
-db-reset: db-clean db-init ## Recreate the local database from scratch
+db-save-ids: ## Save the horizon id history (db/horizon_id_history.json) before a reset
+	@$(PYTHON) src/scripts/save_horizon_id_history.py
+
+db-reset: db-save-ids db-clean db-init ## Recreate the local database from scratch (keeps the id history)
+
+db-ensure: ## Create the local database only if it does not exist (keeps a persistent database)
+	@$(PYTHON) db/ensure_db.py
+
+restore-weekly: ## Restore db/horizon.db, data/raw and cache/ from the last successful weekly run of this branch (CI; FRESH_DATABASE=true skips it)
+	@if [ "$(FRESH_DATABASE)" = "true" ]; then \
+		$(PYTHON) -m src.scripts.restore_weekly_artifact --disabled; \
+	else \
+		$(PYTHON) -m src.scripts.restore_weekly_artifact --github; \
+	fi
+
+seal-weekly: ## Seal the weekly state into artifact_out/ (encrypted bundle + clean public text; never fails the run)
+	@$(REPORT_PYTHON) -m src.scripts.weekly_state_bundle seal --out artifact_out
+
+# Spec 029: history purge tooling. Only the read-only modes have a target; the
+# rewrite is run by hand, by the procedure in
+# specs/029-pii-safe-exports/contracts/history-purge.md.
+PY ?= $(HOME)/.local/share/uv/tools/git-filter-repo/bin/python
+
+purge-history-plan: ## List refs and the personal data found in a mirror clone (REPO=/path/mirror.git); writes nothing
+	@test -n "$(REPO)" || { echo "REPO=/path/mirror.git is required"; exit 2; }
+	@$(PY) src/scripts/purge_history_pii.py plan --repo "$(REPO)"
+
+purge-history-verify: ## Check that a mirror clone's branches and tags hold no personal data (REPO=/path/mirror.git)
+	@test -n "$(REPO)" || { echo "REPO=/path/mirror.git is required"; exit 2; }
+	@$(PY) src/scripts/purge_history_pii.py verify --repo "$(REPO)"
 
 # --- Prefect Server ---
 
@@ -116,8 +145,23 @@ pipeline-log: prefect-server logs-dir ## Run the unified pipeline and tee output
 full-refresh: db-reset prefect-server ## Reset DB and run full pipeline for all campuses
 	@$(FLOW_PYTHON) app.py full_pipeline "" "$(OUTPUT_DIR)"
 
-weekly-flows: db-reset prefect-server ## Reset DB and run weekly source flows plus exports (incl. SigPesq document extraction)
-	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" $(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
+# Spec 024: give a portal up when it blocks; each variable is passed only
+# when set (blank = the defaults: 8 CNPq attempts, 45 min, 5 Lattes requests).
+# Spec 025: the second try of the Lattes access check pages (blank = 1 worker
+# after 5 min; LATTES_RETRY_WORKERS=0 turns it off).
+PORTAL_STOP_ENV = $(if $(EARLY_STOP),HORIZON_PORTAL_EARLY_STOP="$(EARLY_STOP)") \
+	$(if $(CNPQ_STOP_AFTER),HORIZON_CNPQ_STOP_AFTER_FAILURES="$(CNPQ_STOP_AFTER)") \
+	$(if $(CNPQ_BUDGET_MIN),HORIZON_CNPQ_DOWNLOAD_BUDGET_MIN="$(CNPQ_BUDGET_MIN)") \
+	$(if $(LATTES_STOP_AFTER),HORIZON_LATTES_STOP_AFTER_FAILURES="$(LATTES_STOP_AFTER)") \
+	$(if $(LATTES_RETRY_WORKERS),HORIZON_LATTES_RETRY_WORKERS="$(LATTES_RETRY_WORKERS)") \
+	$(if $(LATTES_RETRY_PAUSE_MIN),HORIZON_LATTES_RETRY_PAUSE_MIN="$(LATTES_RETRY_PAUSE_MIN)")
+
+weekly-flows: db-ensure prefect-server ## Run weekly source flows plus exports on the persistent DB (only changed documents; REFRESH_SHARE=0.25 / FULL_REFRESH=1 tune the raw download rotation; EARLY_STOP=0 / CNPQ_STOP_AFTER / CNPQ_BUDGET_MIN / LATTES_STOP_AFTER tune the portal early stop; LATTES_RETRY_WORKERS / LATTES_RETRY_PAUSE_MIN tune the second try of access check pages)
+	@HORIZON_PROJECT_FILES_LIMIT="$(PROJECT_FILES_LIMIT)" \
+		$(if $(REFRESH_SHARE),HORIZON_REFRESH_SHARE="$(REFRESH_SHARE)") \
+		$(if $(FULL_REFRESH),HORIZON_FULL_REFRESH="$(FULL_REFRESH)") \
+		$(PORTAL_STOP_ENV) \
+		$(FLOW_PYTHON) app.py weekly "$(WEEKLY_CAMPUS)" "$(OUTPUT_DIR)"
 
 # --- Ingestion ---
 
@@ -134,8 +178,8 @@ ingest-sigpesq: prefect-server ## Ingest all SigPesq reports (groups, projects, 
 extract-project-files: prefect-server ## Baixa os PDFs dos projetos e extrai PJ_*.json via Mistral (sob demanda)
 	@$(FLOW_PYTHON) app.py extract_project_files "$(PROJECT_FILES_LIMIT)"
 
-ingest-lattes-download: prefect-server ## Download Lattes curricula via scriptLattes
-	@$(FLOW_PYTHON) -m src.flows.lattes.download
+ingest-lattes-download: prefect-server ## Download Lattes curricula via scriptLattes (EARLY_STOP / LATTES_STOP_AFTER / LATTES_RETRY_WORKERS / LATTES_RETRY_PAUSE_MIN)
+	@$(PORTAL_STOP_ENV) $(FLOW_PYTHON) -m src.flows.lattes.download
 
 ingest-lattes-projects: prefect-server ## Ingest Lattes projects, articles, and education
 	@$(FLOW_PYTHON) -m src.flows.lattes.projects
@@ -143,13 +187,16 @@ ingest-lattes-projects: prefect-server ## Ingest Lattes projects, articles, and 
 ingest-lattes-full: prefect-server ## Run complete Lattes ingestion (download + projects + advisorships)
 	@$(FLOW_PYTHON) -m src.flows.lattes.complete
 
-sync-cnpq: prefect-server ## Sync CNPq research groups (CAMPUS=Serra)
-	@$(FLOW_PYTHON) app.py cnpq_sync "$(CAMPUS)"
+sync-cnpq: prefect-server ## Sync CNPq research groups (CAMPUS=Serra; EARLY_STOP / CNPQ_STOP_AFTER / CNPQ_BUDGET_MIN)
+	@$(PORTAL_STOP_ENV) $(FLOW_PYTHON) app.py cnpq_sync "$(CAMPUS)"
 
 # --- Exports ---
 
 export-canonical: prefect-server ## Export all canonical data to OUTPUT_DIR
 	@$(FLOW_PYTHON) app.py export_canonical "$(OUTPUT_DIR)" "$(CAMPUS)"
+
+parquet-archive: prefect-server ## Build exports_parquet.zip from exports_canonical.zip in OUTPUT_DIR (spec 038)
+	@$(FLOW_PYTHON) app.py parquet_archive "$(OUTPUT_DIR)"
 
 export-knowledge-areas-mart: prefect-server ## Export knowledge areas mart JSON
 	@$(FLOW_PYTHON) app.py ka_mart "$(OUTPUT_DIR)/knowledge_areas_mart.json" "$(CAMPUS)"

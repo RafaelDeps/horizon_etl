@@ -6,7 +6,8 @@ from typing import Any, Iterable, Optional
 
 from sqlalchemy.exc import IntegrityError
 
-from src.core.logic.pii_anonymizer import scrub_source_record_payload
+from src.core.logic.horizon_identity import canonical
+from src.core.logic.pii_anonymizer import scrub_pii_deep, scrub_source_record_payload
 from src.tracking.context import current_ingestion_run_id, current_source_system
 from src.tracking.controllers import (
     AttributeAssertionController,
@@ -34,10 +35,16 @@ def _json_safe(value: Any) -> Any:
 
 
 def stable_hash(value: Any) -> str:
+    # Hash the canonical form (spec 020): the same information always gives the
+    # same hash, whatever the source's types (600 / 600.0 / "600", NaN / "").
     payload = json.dumps(
-        value, sort_keys=True, ensure_ascii=False, default=_json_default
+        canonical(value), sort_keys=True, ensure_ascii=False, default=_json_default
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# Item types of spec 021 for the tracked entity types that differ.
+_CARRIED_TYPES = {"advisorship": "initiative"}
 
 
 class TrackingRecorder:
@@ -203,6 +210,14 @@ class TrackingRecorder:
         match_strategy: str,
         match_confidence: Optional[float] = None,
     ):
+        # Spec 021: inside a source document, the matched entity is an item the
+        # document carries (an advisorship is an initiative row).
+        from src.core.logic.document_skip import carry
+
+        carry(
+            _CARRIED_TYPES.get(canonical_entity_type, canonical_entity_type),
+            canonical_entity_id,
+        )
         if not source_record_id:
             return None
 
@@ -236,6 +251,9 @@ class TrackingRecorder:
             return
 
         for attribute_name, value in selected_attributes.items():
+            # Spec 029: the stored value is scrubbed and the hash follows the
+            # stored value (a clean value keeps the hash it always had).
+            value = scrub_pii_deep(value)
             with self._controller(
                 getattr(
                     self,
@@ -275,6 +293,8 @@ class TrackingRecorder:
         if not run_id:
             return
 
+        before = scrub_pii_deep(before)
+        after = scrub_pii_deep(after)
         with self._controller(
             getattr(
                 self,

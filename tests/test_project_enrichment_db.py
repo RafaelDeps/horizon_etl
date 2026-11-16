@@ -16,7 +16,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session
 
 from src.core.logic.project_enrichment import ProjectEnrichmentLoader
@@ -279,6 +279,75 @@ def test_unmatched_document_is_counted_not_written(loader, session, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Titles taken by another initiative type (spec 019)
+# --------------------------------------------------------------------------- #
+def add_advisorship(session, init_id, name):
+    session.execute(
+        text(
+            "INSERT OR IGNORE INTO initiative_types (id, name) VALUES (2, 'Advisorship')"
+        )
+    )
+    session.execute(
+        text(
+            "INSERT INTO initiatives (id, name, initiative_type_id) "
+            "VALUES (:id, :n, 2)"
+        ),
+        {"id": init_id, "n": name},
+    )
+    session.commit()
+
+
+def write_ingestable_pj(tmp_path, filename, titulo):
+    return write_pj(
+        tmp_path,
+        filename,
+        titulo=titulo,
+        descricao="Projeto sobre dados educacionais.",
+        objetivos={"geral": "Mapear indicadores.", "especificos": []},
+    )
+
+
+def test_title_of_another_initiative_type_is_a_duplicate(loader, session, tmp_path):
+    """Initiative names are unique across all types: in CI an advisorship had
+    the title of a new project document, the insert failed and locked the
+    tracking writes out. The duplicate check must see every type."""
+    add_advisorship(session, 50, "Mapeamento dos dados do ENEM")
+    write_ingestable_pj(tmp_path, "PJ_1.json", "Mapeamento dos dados do ENEM")
+    loader.dry_run = True
+
+    stats = loader.run(str(tmp_path), ingest_new=True)
+
+    assert stats["skipped_duplicate"] == 1
+    assert stats["created"] == 0
+
+
+def test_title_differing_only_by_accents_and_case_is_a_duplicate(
+    loader, session, tmp_path
+):
+    add_advisorship(session, 50, "Mapeamento dos Dados do ENEM no Espírito Santo")
+    write_ingestable_pj(
+        tmp_path, "PJ_1.json", "mapeamento dos dados do enem no espirito santo"
+    )
+    loader.dry_run = True
+
+    stats = loader.run(str(tmp_path), ingest_new=True)
+
+    assert stats["skipped_duplicate"] == 1
+    assert stats["created"] == 0
+
+
+def test_new_title_is_still_created(loader, session, tmp_path):
+    add_advisorship(session, 50, "Outra orientação")
+    write_ingestable_pj(tmp_path, "PJ_1.json", "Mapeamento dos dados do ENEM")
+    loader.dry_run = True
+
+    stats = loader.run(str(tmp_path), ingest_new=True)
+
+    assert stats["created"] == 1
+    assert stats["skipped_duplicate"] == 0
+
+
+# --------------------------------------------------------------------------- #
 # Origin & review persistence (feature 006)
 # --------------------------------------------------------------------------- #
 def test_rerun_does_not_shrink_the_review_backlog(loader, session, tmp_path):
@@ -316,6 +385,7 @@ def test_rerun_does_not_shrink_the_review_backlog(loader, session, tmp_path):
                     "match_strategy": "new_from_document",
                     "origin": "new_from_document",
                     "needs_review": True,
+                    "source_file": "PJ_1.json",
                 }
             ),
         },
@@ -333,7 +403,9 @@ def test_rerun_does_not_shrink_the_review_backlog(loader, session, tmp_path):
     _, enrichment = read_initiative(session, 2)
     assert enrichment["needs_review"] is True
     assert enrichment["origin"] == "new_from_document"
-    assert enrichment["match_strategy"] == "title_exact", "current run recorded"
+    # Spec 032 (TD-033): the creating document keeps its strategy, as a rebuild
+    # writes it; the run still counts the title match (FR-008).
+    assert enrichment["match_strategy"] == "new_from_document"
 
 
 def test_reviewed_initiative_stays_reviewed_across_reruns(loader, session, tmp_path):
@@ -420,3 +492,278 @@ def test_backfill_restores_origin_from_the_audit_trail(loader, session):
     _, enrichment = read_initiative(session, 7)
     assert enrichment["origin"] == "new_from_document"
     assert enrichment["needs_review"] is True, "restored origin re-raises the flag"
+
+
+# --------------------------------------------------------------------------- #
+# Spec 032 (TD-033): a second run over unchanged documents writes nothing
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def enrichment_updates(session):
+    """Counts the UPDATEs of enrichment_json the session runs."""
+    statements = []
+
+    def _count(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("UPDATE initiatives SET") and (
+            "enrichment_json" in statement
+        ):
+            statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", _count)
+    yield statements
+    event.remove(engine, "before_cursor_execute", _count)
+
+
+@pytest.fixture
+def tracked(loader, monkeypatch):
+    """Records the ``changed`` flag of each tracking call."""
+    calls = []
+    monkeypatch.setattr(
+        loader, "_record_tracking", lambda **kwargs: calls.append(kwargs)
+    )
+    return calls
+
+
+def test_second_run_rewrites_no_unchanged_note(
+    loader, session, tmp_path, enrichment_updates, tracked
+):
+    add_initiative(session, 1, "Estudo sobre redes neurais")
+    write_pj(
+        tmp_path,
+        "PJ_1.json",
+        titulo="Estudo sobre redes neurais",
+        descricao="Investiga arquiteturas profundas.",
+        objetivos={"geral": "Avaliar desempenho", "especificos": []},
+    )
+    loader.run(str(tmp_path), ingest_new=False)
+    assert len(enrichment_updates) == 1
+    enrichment_updates.clear()
+    tracked.clear()
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 1
+    assert enrichment_updates == [], "an unchanged note is not rewritten"
+    assert [c["changed"] for c in tracked] == [False]
+
+
+def insert_created_initiative(session, init_id, name, strategy, code=None):
+    """An initiative created by a document, with the note that run wrote."""
+    session.execute(
+        text(
+            "INSERT INTO initiatives (id, name, description, initiative_type_id, "
+            "enrichment_json) VALUES (:id, :n, :d, 1, :j)"
+        ),
+        {
+            "id": init_id,
+            "n": name,
+            "d": "Descricao rica o suficiente.",
+            "j": json.dumps(
+                {
+                    "source": "sigpesq_project_files",
+                    "project_code": code,
+                    "match_strategy": strategy,
+                    "origin": "new_from_document",
+                    "needs_review": True,
+                    "source_file": "PJ_7.json",
+                }
+            ),
+        },
+    )
+    session.commit()
+
+
+def test_per_run_tracking_records_the_real_strategy(
+    loader, session, tmp_path, monkeypatch
+):
+    """Spec 032 FR-005: the note keeps new_from_document, the per-run match
+    records how the document really matched."""
+    from src.core.logic import project_enrichment
+
+    matches = []
+    fake = SimpleNamespace(
+        has_active_run=lambda: True,
+        record_source_record=lambda **kwargs: SimpleNamespace(id=1),
+        record_entity_match=lambda **kwargs: matches.append(kwargs),
+        record_attribute_assertions=lambda **kwargs: None,
+        record_change=lambda **kwargs: None,
+    )
+    monkeypatch.setattr(project_enrichment, "tracking_recorder", fake)
+    loader.ensure_schema()
+    insert_created_initiative(session, 7, "Projeto do documento", "new_from_document")
+    write_pj(
+        tmp_path,
+        "PJ_7.json",
+        titulo="Projeto do documento",
+        descricao="Descricao rica o suficiente.",
+        objetivos={"geral": "g", "especificos": []},
+    )
+
+    loader.run(str(tmp_path), ingest_new=False)
+
+    assert [m["match_strategy"] for m in matches] == ["title_exact"]
+    _, enrichment = read_initiative(session, 7)
+    assert enrichment["match_strategy"] == "new_from_document"
+
+
+def test_drifted_note_is_repaired_once(
+    loader, session, tmp_path, enrichment_updates, tracked
+):
+    """Spec 032 US3: a note that already moved to title_exact goes back once,
+    then the next run writes nothing."""
+    loader.ensure_schema()
+    insert_created_initiative(
+        session, 7, "Projeto do documento", "title_exact", code="7"
+    )
+    write_pj(
+        tmp_path,
+        "PJ_7.json",
+        codigo="7",
+        titulo="Projeto do documento",
+        descricao="Descricao rica o suficiente.",
+        objetivos={"geral": "g", "especificos": []},
+    )
+
+    loader.run(str(tmp_path), ingest_new=False)
+
+    _, enrichment = read_initiative(session, 7)
+    assert enrichment["match_strategy"] == "new_from_document"
+    assert len(enrichment_updates) == 1
+    assert [c["changed"] for c in tracked] == [True]
+
+    enrichment_updates.clear()
+    tracked.clear()
+    loader.run(str(tmp_path), ingest_new=False)
+
+    assert enrichment_updates == []
+    assert [c["changed"] for c in tracked] == [False]
+
+
+# --------------------------------------------------------------------------- #
+# A project PDF never matches an advisorship (spec 036)
+# --------------------------------------------------------------------------- #
+ADVISORSHIP_TITLE = "Instrumentação de um robô móvel para serviços de vigilância"
+
+
+@pytest.fixture
+def advisorships_table(session):
+    session.execute(text("CREATE TABLE advisorships (id INTEGER PRIMARY KEY)"))
+    session.commit()
+
+
+def add_stored_advisorship(session, init_id, name, description="Programa: PIBIC"):
+    """An advisorship as the loader stores it: its initiative row carries the
+    type of a research project; the row in ``advisorships`` is what tells."""
+    add_initiative(session, init_id, name, description=description)
+    session.execute(text("INSERT INTO advisorships (id) VALUES (:id)"), {"id": init_id})
+    session.commit()
+
+
+def add_sigpesq_project_record(session, record_id, project_id, init_id):
+    session.execute(
+        text(
+            "INSERT INTO source_records (id, source_system, source_entity_type,"
+            " raw_payload_json) VALUES (:id, 'sigpesq_research_projects',"
+            " 'initiative', :payload)"
+        ),
+        {
+            "id": record_id,
+            "payload": json.dumps({"Id": project_id, "ParecerDiretoria": "Aprovado"}),
+        },
+    )
+    session.execute(
+        text(
+            "INSERT INTO attribute_assertions (source_record_id,"
+            " canonical_entity_type, canonical_entity_id)"
+            " VALUES (:rid, 'initiative', :init)"
+        ),
+        {"rid": record_id, "init": init_id},
+    )
+    session.commit()
+
+
+def test_pdf_with_the_title_of_an_advisorship_does_not_touch_it(
+    loader, session, tmp_path, advisorships_table
+):
+    add_stored_advisorship(session, 141, ADVISORSHIP_TITLE)
+    write_pj(
+        tmp_path, "PJ_2449.json", titulo=ADVISORSHIP_TITLE, descricao="Texto do PDF."
+    )
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 0
+    assert stats["skipped_no_match"] == 1
+    assert read_initiative(session, 141) == ("Programa: PIBIC", None)
+
+
+def test_pdf_with_the_title_of_an_advisorship_creates_no_project(
+    loader, session, tmp_path, advisorships_table
+):
+    add_stored_advisorship(session, 141, ADVISORSHIP_TITLE)
+    write_ingestable_pj(tmp_path, "PJ_2449.json", ADVISORSHIP_TITLE)
+
+    stats = loader.run(str(tmp_path), ingest_new=True)
+
+    assert stats["created"] == 0
+    assert stats["skipped_duplicate"] == 1
+    assert session.execute(text("SELECT COUNT(*) FROM initiatives")).scalar() == 1
+    assert read_initiative(session, 141) == ("Programa: PIBIC", None)
+
+
+def test_pdf_with_a_title_similar_to_an_advisorship_does_not_touch_it(
+    loader, session, tmp_path, advisorships_table
+):
+    add_stored_advisorship(session, 8275, "Mapeamento das notas do Enem por município")
+    write_pj(
+        tmp_path,
+        "PJ_6020.json",
+        titulo="Mapeamento das notas do ENEM por municípios",
+        descricao="Texto do PDF.",
+    )
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 0
+    assert read_initiative(session, 8275) == ("Programa: PIBIC", None)
+
+
+def test_pdf_code_pointing_to_an_advisorship_does_not_touch_it(
+    loader, session, tmp_path, advisorships_table
+):
+    add_stored_advisorship(session, 141, ADVISORSHIP_TITLE)
+    add_sigpesq_project_record(session, 1, 2449, 141)
+    write_pj(
+        tmp_path,
+        "PJ_2449.json",
+        codigo="2449",
+        titulo="Outro título, só no documento",
+        descricao="Texto do PDF.",
+    )
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 0
+    assert read_initiative(session, 141) == ("Programa: PIBIC", None)
+
+
+def test_research_project_is_still_enriched_beside_an_advisorship(
+    loader, session, tmp_path, advisorships_table
+):
+    add_initiative(session, 140, "Robô móvel para vigilância em ambientes internos")
+    add_sigpesq_project_record(session, 1, 2449, 140)
+    add_stored_advisorship(session, 141, ADVISORSHIP_TITLE)
+    write_pj(
+        tmp_path,
+        "PJ_2449.json",
+        codigo="2449",
+        titulo=ADVISORSHIP_TITLE,
+        descricao="Texto do PDF.",
+    )
+
+    stats = loader.run(str(tmp_path), ingest_new=False)
+
+    assert stats["enriched"] == 1
+    description, enrichment = read_initiative(session, 140)
+    assert enrichment["project_code"] == "2449"
+    assert read_initiative(session, 141) == ("Programa: PIBIC", None)

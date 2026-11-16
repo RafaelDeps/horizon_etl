@@ -96,6 +96,15 @@ def setup_database():
     print("Recreating all tables via Base.metadata...")
     # This will create tables for all models registered with Base (including Advisorship/Fellowship if imported)
     Base.metadata.create_all(client._engine)
+
+    # ETL-owned tables (spec 020 identity tables, enrichment column) come from
+    # the migrations, so a reset database has them from the start.
+    from sqlalchemy.orm import Session
+
+    from src.db.migrations import run_migrations
+
+    with Session(client._engine) as session:
+        run_migrations(session)
     print("Database tables initialized successfully.")
 
 

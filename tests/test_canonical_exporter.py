@@ -151,6 +151,7 @@ def test_export_all_orchestrates_exports():
                     "birthday": None,
                     "cnpq_url": None,
                     "google_scholar_url": None,
+                    "linkedin_url": None,
                     "resume": None,
                     "citation_names": None,
                     "initiatives": [],
@@ -1083,6 +1084,7 @@ def test_export_researchers_backfills_participant_only_people_from_projects_and_
                 "birthday": None,
                 "cnpq_url": None,
                 "google_scholar_url": None,
+                "linkedin_url": None,
                 "resume": None,
                 "citation_names": None,
                 "initiatives": [
@@ -1303,3 +1305,273 @@ def test_build_classification_payload_marks_academic_reference_only_note():
     assert payload["classification_confidence"] == "low"
     assert payload["classification_note"] == "academic_advisor_reference_only"
     assert payload["role_evidence"]["academic_reference_count"] == 2
+
+
+# --- Spec 029: exporters scrub free text and publish keyed hashes ---
+
+_FAKE_EMAIL = "person@example.test"
+_FAKE_PHONE = "+55 00 00000-0000"
+
+
+def _make_exporter():
+    mock_sink = MagicMock(spec=IExportSink)
+    with (
+        patch("src.core.logic.canonical_exporter.OrganizationController"),
+        patch("src.core.logic.canonical_exporter.CampusController"),
+        patch("src.core.logic.canonical_exporter.KnowledgeAreaController"),
+        patch("src.core.logic.canonical_exporter.ResearcherController"),
+        patch("src.core.logic.canonical_exporter.InitiativeController"),
+    ):
+        exporter = CanonicalDataExporter(sink=mock_sink)
+    exporter._campus_resolver = MagicMock()
+    exporter._campus_resolver.get_campus.return_value = None
+    return exporter, mock_sink
+
+
+def test_export_initiatives_scrubs_free_text():
+    exporter, mock_sink = _make_exporter()
+    item = SimpleNamespace(
+        id=1,
+        name="Projeto",
+        status="active",
+        description=f"Contact {_FAKE_EMAIL} or {_FAKE_PHONE}",
+        start_date=None,
+        end_date=None,
+        initiative_type_id=None,
+        organization_id=None,
+        parent_id=None,
+        demandante=None,
+        metadata={"external_partner": f"Partner {_FAKE_EMAIL}"},
+    )
+    exporter.initiative_ctrl.get_all.return_value = [item]
+    exporter.initiative_ctrl.list_initiative_types.return_value = []
+    exporter.initiative_ctrl.get_teams.return_value = []
+    exporter.org_ctrl.get_all.return_value = []
+
+    with (
+        patch("src.core.logic.canonical_exporter.ResearchGroupController"),
+        patch("eo_lib.TeamController"),
+    ):
+        exporter.export_initiatives("output/initiatives.json")
+
+    exported_data, _ = mock_sink.export.call_args[0]
+    description = exported_data[0]["description"]
+    assert _FAKE_EMAIL not in description
+    assert _FAKE_PHONE not in description
+    assert "@anon.lgpd" in description
+    assert _FAKE_EMAIL not in exported_data[0]["external_partner"]
+    assert item.description == f"Contact {_FAKE_EMAIL} or {_FAKE_PHONE}"
+
+
+def test_export_advisorships_scrubs_free_text():
+    exporter, mock_sink = _make_exporter()
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeSession:
+        def execute(self, statement, params=None):
+            statement_text = getattr(statement, "text", str(statement))
+            if "entity_matches" in statement_text:
+                return FakeResult([])
+            return FakeResult(
+                [
+                    {
+                        "id": 1,
+                        "name": "Orientacao 1",
+                        "status": "active",
+                        "description": f"Write to {_FAKE_EMAIL} {_FAKE_PHONE}",
+                        "start_date": None,
+                        "end_date": None,
+                        "advisorship_type": "Scientific Initiation",
+                        "advisorship_program": None,
+                        "initiative_type_name": "Advisorship",
+                        "person_id": 452,
+                        "person_name": "Aluno A",
+                        "supervisor_id": 2981,
+                        "supervisor_name": "Paulo Sergio",
+                        "fellowship_id": None,
+                        "fellowship_name": None,
+                        "fellowship_description": None,
+                        "fellowship_value": None,
+                        "sponsor_name": None,
+                        "parent_id": None,
+                        "parent_name": None,
+                        "parent_status": None,
+                        "parent_description": None,
+                        "parent_start_date": None,
+                        "parent_end_date": None,
+                    }
+                ]
+            )
+
+    exporter.initiative_ctrl._service._repository._session = FakeSession()
+
+    exporter.export_advisorships("output/advisorships_canonical.json")
+
+    exported_data, _ = mock_sink.export.call_args[0]
+    description = exported_data[0]["advisorships"][0]["description"]
+    assert _FAKE_EMAIL not in description
+    assert _FAKE_PHONE not in description
+
+
+def test_export_publishes_keyed_hashes_not_stored_ones():
+    from src.core.logic.pii_anonymizer import keyed_export_hash
+
+    exporter, _ = _make_exporter()
+    rows = [
+        {"id": 1, "payload_hash": "stored-a"},
+        {"id": 2, "payload_hash": "stored-a"},
+        {"id": 3, "value_hash": "stored-b"},
+    ]
+
+    exported = exporter._enrich_export_rows(rows, entity_type="source_record")
+
+    assert exported[0]["payload_hash"] == keyed_export_hash("stored-a")
+    assert exported[0]["payload_hash"] != "stored-a"
+    assert exported[1]["payload_hash"] == exported[0]["payload_hash"]
+    assert exported[2]["value_hash"] == keyed_export_hash("stored-b")
+    # The stored rows are not changed by exporting.
+    assert rows[0]["payload_hash"] == "stored-a"
+
+
+def test_tracking_attributes_publish_keyed_value_hash():
+    from src.core.logic.pii_anonymizer import keyed_export_hash
+
+    exporter, mock_sink = _make_exporter()
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeSession:
+        def execute(self, statement, params=None):
+            statement_text = getattr(statement, "text", str(statement))
+            if (
+                "FROM entity_matches" in statement_text
+                and "JOIN source_records sr" not in statement_text
+            ):
+                return FakeResult([{"entity_id": 7}])
+            if "FROM attribute_assertions aa" in statement_text:
+                return FakeResult(
+                    [
+                        {
+                            "entity_id": 7,
+                            "attribute_name": "resume",
+                            "value_json": {"text": "texto"},
+                            "value_hash": "stored-c",
+                            "is_selected": 1,
+                            "selection_reason": "x",
+                            "asserted_at": "2026-03-23T10:01:00",
+                            "source_record_pk": 1,
+                            "source_system": "lattes",
+                            "source_entity_type": "researcher_profile",
+                            "source_record_id": "1",
+                            "source_file": "f",
+                            "source_path": "p",
+                        }
+                    ]
+                )
+            return FakeResult([])
+
+    exporter._has_tracking_schema = lambda: True
+    exporter._get_session = lambda: FakeSession()
+
+    exporter.export_researchers_tracking("output/researchers_tracking.json")
+
+    exported_data, _ = mock_sink.export.call_args[0]
+    value_hash = exported_data[0]["attributes"]["resume"]["value_hash"]
+    assert value_hash == keyed_export_hash("stored-c")
+
+
+# --- Spec 037: the person entry carries the LinkedIn link ---
+
+
+def _linkedin_exporter():
+    with (
+        patch("src.core.logic.canonical_exporter.OrganizationController"),
+        patch("src.core.logic.canonical_exporter.CampusController"),
+        patch("src.core.logic.canonical_exporter.KnowledgeAreaController"),
+        patch("src.core.logic.canonical_exporter.ResearcherController"),
+        patch("src.core.logic.canonical_exporter.InitiativeController"),
+        patch("src.core.logic.canonical_exporter.ArticleController"),
+    ):
+        return CanonicalDataExporter(sink=MagicMock(spec=IExportSink))
+
+
+def test_person_entry_always_has_the_linkedin_url_key():
+    entry = CanonicalDataExporter._build_researcher_base_export_dict(
+        SimpleNamespace(id=7, name="Maria da Silva")
+    )
+
+    assert "linkedin_url" in entry
+    assert entry["linkedin_url"] is None
+    assert entry["cnpq_url"] is None and entry["google_scholar_url"] is None
+
+
+def test_fetch_person_linkedin_links_reads_the_table():
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    exporter = _linkedin_exporter()
+    engine = create_engine("sqlite:///:memory:")
+    with Session(engine) as session:
+        assert exporter._fetch_person_linkedin_links(None) == {}
+        assert exporter._fetch_person_linkedin_links(session) == {}  # no table
+
+        session.execute(
+            text(
+                "CREATE TABLE person_linkedin_links (person_id INTEGER PRIMARY KEY,"
+                " linkedin_url TEXT, listed_name TEXT, updated_at TEXT)"
+            )
+        )
+        session.execute(
+            text(
+                "INSERT INTO person_linkedin_links VALUES"
+                " (452, 'https://www.linkedin.com/in/andre', 'Andre Porto', 'x')"
+            )
+        )
+        assert exporter._fetch_person_linkedin_links(session) == {
+            452: "https://www.linkedin.com/in/andre"
+        }
+
+
+def test_export_researchers_writes_the_link_of_listed_persons_only():
+    exporter = _linkedin_exporter()
+    listed = MagicMock()
+    listed.to_dict.return_value = {"id": 452, "name": "Andre Porto"}
+    other = MagicMock()
+    other.to_dict.return_value = {"id": 2981, "name": "Paulo Sergio"}
+    exporter.researcher_ctrl.get_all.return_value = [listed, other]
+    exporter.initiative_ctrl.get_all.return_value = []
+    exporter.initiative_ctrl.list_initiative_types.return_value = []
+    exporter._get_session = lambda: None
+    exporter._get_campus_resolver = lambda: MagicMock(
+        get_campus=lambda *_args, **_kwargs: None
+    )
+    exporter._fetch_person_linkedin_links = lambda _session: {
+        452: "https://www.linkedin.com/in/andre"
+    }
+
+    exporter.export_researchers("output/researchers_canonical.json")
+
+    exported_by_path = {
+        call_args[0][1]: call_args[0][0]
+        for call_args in exporter.sink.export.call_args_list
+    }
+    by_id = {
+        entry["id"]: entry
+        for entry in exported_by_path["output/researchers_canonical.json"]
+    }
+    assert by_id[452]["linkedin_url"] == "https://www.linkedin.com/in/andre"
+    assert by_id[2981]["linkedin_url"] is None
+    for path, entries in exported_by_path.items():
+        if path.endswith("_canonical.json"):
+            assert all("linkedin_url" in entry for entry in entries), path

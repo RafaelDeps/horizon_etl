@@ -1,14 +1,20 @@
 import json
 import os
+import time
 import zipfile
 from typing import Optional
 
 from loguru import logger
 from prefect import flow, task
 
+from src.adapters.database.horizon_id_store import (
+    SqliteHorizonIdStore,
+    sqlite_path_from_url,
+)
 from src.adapters.sinks.json_sink import JsonSink
 from src.core.logic.canonical_exporter import CanonicalDataExporter
-from src.core.logic.pii_anonymizer import scrub_pii_deep
+from src.core.logic.horizon_id_assigner import write_alias_file, write_id_file
+from src.core.logic.pii_anonymizer import key_fingerprint, scan_text, scrub_pii_deep
 from src.core.logic.research_group_exporter import ResearchGroupExporter
 from src.flows.exports.null_researchers_collaboration_graph import (
     export_null_researchers_collaboration_graph_flow,
@@ -16,6 +22,7 @@ from src.flows.exports.null_researchers_collaboration_graph import (
 from src.flows.exports.outside_ifes_collaboration_graph import (
     export_outside_ifes_collaboration_graph_flow,
 )
+from src.flows.exports.parquet_archive import EARLIER_RUN_WARNING, parquet_archive_task
 from src.flows.exports.people_collaboration_graph import (
     export_people_collaboration_graph_flow,
 )
@@ -258,6 +265,30 @@ def export_advisorship_analytics_task(output_dir: str):
     exporter.generate_advisorship_mart(input_path, output_path)
 
 
+@task(name="export_horizon_ids_task")
+def export_horizon_ids_task(output_dir: str):
+    """Spec 020: publishes the permanent ids and their aliases in two new
+    files next to the existing exports, which keep their format. A database
+    without ids (the assign_horizon_ids phase did not run) only logs a
+    warning."""
+    logger.info("Starting Horizon ids export...")
+    try:
+        store = SqliteHorizonIdStore(sqlite_path_from_url(os.getenv("DATABASE_URL")))
+        write_id_file(store, output_dir)
+        write_alias_file(store, output_dir)
+    except Exception as exc:  # the new files must never sink the export
+        logger.warning("Horizon ids export skipped: {}", exc)
+    # Spec 021: status and dates of every source document, in a new file.
+    try:
+        from src.adapters.database.document_state_store import read_document_states
+        from src.core.logic.document_skip import write_states_file
+
+        db_path = sqlite_path_from_url(os.getenv("DATABASE_URL"))
+        write_states_file(read_document_states(db_path), output_dir)
+    except Exception as exc:
+        logger.warning("Document states export skipped: {}", exc)
+
+
 # Directories that live under the export folder but are NOT deliverables.
 #
 # * project_sigpesq_files_json -- INPUT: regenerable by
@@ -267,7 +298,9 @@ def export_advisorship_analytics_task(output_dir: str):
 #   out of the walk and scrubbed copies are added to the zip explicitly.
 # * formandos/, docentes/, mestrado/ -- formatted report views (HTML), not part
 #   of the dataset.
-# * parquet/ -- alternate format mirror; no longer emitted by the flow.
+# * parquet/ -- stale loose mirror from before spec 013; never produced or read.
+#   Spec 038 publishes the Parquet layout as its own archive,
+#   exports_parquet.zip, built from this archive (and never put into it).
 #
 # The zip is versioned, so sweeping any of these in would put intermediate or
 # redundant material -- or raw personal data -- into git.
@@ -280,17 +313,73 @@ SKIP_DIRS = {
 }
 
 
+# Where the archive build reports what its safety net replaced (counts only).
+SCAN_REPORT_PATH = "data/reports/export_scan_report.json"
+
+# The archive is committed to git; a build over this is refused (spec 029).
+MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
+
+MANIFEST_NAME = "export_manifest.json"
+
+# Members the archive may carry; anything else is left out and logged.
+_TEXT_EXTENSIONS = {".json", ".csv", ".html", ".md", ".txt"}
+
+
+def _zip_date(path: str) -> tuple:
+    """Zip date of a file, the way ``ZipFile.write`` takes it."""
+    return zipfile.ZipInfo.from_file(path).date_time
+
+
+def _write_scan_report(report: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(SCAN_REPORT_PATH) or ".", exist_ok=True)
+        with open(SCAN_REPORT_PATH, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, ensure_ascii=False, indent=2, sort_keys=True)
+    except OSError as exc:
+        logger.warning("Export scan report not written: {}", exc)
+
+
 @task(name="zip_exports_task")
 def zip_exports_task(output_dir: str):
     zip_path = os.path.join(output_dir, "exports_canonical.zip")
     tmp_zip_path = zip_path + ".tmp"
     logger.info("Zipping exports to {}...", zip_path)
-    skip_names = {os.path.basename(zip_path), os.path.basename(tmp_zip_path)}
+    # Spec 029: the safety net needs the key (tokens are keyed); fail early,
+    # before anything is written, so the previous archive stays.
+    key_fingerprint()
+    started = time.monotonic()
+    # A manifest in the folder is never carried: the one written below is the
+    # only manifest the archive may hold.
+    skip_names = {
+        os.path.basename(zip_path),
+        os.path.basename(tmp_zip_path),
+        MANIFEST_NAME,
+    }
     skipped_dirs = 0
+    files_scanned = 0
+    matches: dict[str, dict[str, int]] = {}
+    left_out: list[dict[str, str]] = []
+
+    def add_member(zf: zipfile.ZipFile, arcname: str, data: bytes, date_time):
+        """Scan one text member; write it as is when clean, else replaced."""
+        nonlocal files_scanned
+        text = data.decode("utf-8")
+        scanned, counts = scan_text(text)
+        files_scanned += 1
+        if any(counts.values()):
+            matches[arcname] = counts
+            info = zipfile.ZipInfo(arcname, date_time=date_time)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, scanned.encode("utf-8"))
+            return True
+        return False
+
     try:
         with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for root, dirs, files in os.walk(output_dir):
                 # Prune in place so os.walk never descends into them.
+                dirs.sort()
                 pruned = [
                     d
                     for d in dirs
@@ -300,14 +389,30 @@ def zip_exports_task(output_dir: str):
                     dirs.remove(d)
                     skipped_dirs += 1
                     logger.info("Excluded from zip (input, not output): {}/", d)
-                for fname in files:
+                for fname in sorted(files):
                     # No archive inside the archive: skip every nested .zip
                     # (data_snapshot.zip, a previous archive, anything else).
                     if fname in skip_names or fname.lower().endswith(".zip"):
                         continue
                     fpath = os.path.join(root, fname)
                     arcname = os.path.relpath(fpath, output_dir)
-                    zf.write(fpath, arcname)
+                    extension = os.path.splitext(fname)[1].lower()
+                    if extension not in _TEXT_EXTENSIONS:
+                        left_out.append({"file": arcname, "reason": "extension"})
+                        logger.warning("Left out of the zip (extension): {}", arcname)
+                        continue
+                    with open(fpath, "rb") as fh:
+                        data = fh.read()
+                    try:
+                        data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        if extension == ".json":
+                            raise
+                        left_out.append({"file": arcname, "reason": "not utf-8"})
+                        logger.warning("Left out of the zip (not utf-8): {}", arcname)
+                        continue
+                    if not add_member(zf, arcname, data, _zip_date(fpath)):
+                        zf.write(fpath, arcname)
 
             # The SigPesq project documents are INPUT, not output (regenerable,
             # and carrying coordinator e-mails in clear text -- see SKIP_DIRS),
@@ -328,30 +433,68 @@ def zip_exports_task(output_dir: str):
                             "Skipped unreadable project document {}: {}", fname, exc
                         )
                         continue
-                    zf.writestr(
-                        os.path.join("project_sigpesq_files_json", fname),
-                        json.dumps(
-                            scrub_pii_deep(document), ensure_ascii=False, indent=2
-                        ),
-                    )
+                    arcname = os.path.join("project_sigpesq_files_json", fname)
+                    data = json.dumps(
+                        scrub_pii_deep(document), ensure_ascii=False, indent=2
+                    ).encode("utf-8")
+                    # Scrubbed copy: written in every case, after the scan.
+                    if not add_member(
+                        zf, arcname, data, _zip_date(os.path.join(pj_dir, fname))
+                    ):
+                        zf.writestr(arcname, data)
                     scrubbed_count += 1
                 if scrubbed_count:
                     logger.info(
                         "Added {} scrubbed project documents to the zip",
                         scrubbed_count,
                     )
+
+            # Spec 029: which key anonymized this archive, and whether it was
+            # built by the official workflow. Written last; no timestamp, so
+            # it adds no change of its own.
+            manifest = zipfile.ZipInfo(MANIFEST_NAME, date_time=(1980, 1, 1, 0, 0, 0))
+            manifest.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(
+                manifest,
+                json.dumps(
+                    {
+                        "official": os.environ.get("GITHUB_ACTIONS") == "true",
+                        "key_fingerprint": key_fingerprint(),
+                    },
+                    sort_keys=True,
+                ),
+            )
+        size = os.path.getsize(tmp_zip_path)
+        if size > MAX_ARCHIVE_BYTES:
+            raise RuntimeError(
+                f"The archive is {size} bytes, over the {MAX_ARCHIVE_BYTES} limit; "
+                "the previous archive is kept"
+            )
         os.replace(tmp_zip_path, zip_path)
     except BaseException:
         if os.path.exists(tmp_zip_path):
             os.unlink(tmp_zip_path)
         raise
+    seconds = round(time.monotonic() - started, 2)
+    _write_scan_report(
+        {
+            "files_scanned": files_scanned,
+            "seconds": seconds,
+            "matches": matches,
+            "left_out": left_out,
+        }
+    )
+    for name, counts in sorted(matches.items()):
+        logger.warning("Export safety net replaced matches in {}: {}", name, counts)
     size_mb = os.path.getsize(zip_path) / (1024 * 1024)
     logger.info("Exports zipped: {} ({:.1f} MB)", zip_path, size_mb)
 
 
 @flow(name="Export Canonical Data Flow", **telegram_flow_state_handlers())
 def export_canonical_data_flow(
-    output_dir: str = "data/exports", campus: Optional[str] = None
+    output_dir: str = "data/exports",
+    campus: Optional[str] = None,
+    zip_exports: bool = True,
 ):
     """
     Flow to export canonical data (Organizations, Campuses, Knowledge Areas, Researchers)
@@ -360,6 +503,9 @@ def export_canonical_data_flow(
     Args:
         output_dir: Directory where the JSON files will be saved. Defaults to 'data/exports'.
         campus: Optional name of the campus to filter by.
+        zip_exports: Build the archive at the end (default, for in-process
+            callers). The weekly passes False and runs the ``zip_exports``
+            phase after the marts and the graph (spec 029).
     """
     # Ensure absolute path or relative to CWD
     if not os.path.isabs(output_dir):
@@ -398,6 +544,25 @@ def export_canonical_data_flow(
     export_outside_ifes_collaboration_graph_flow(output_dir=output_dir)
     export_null_researchers_collaboration_graph_flow(output_dir=output_dir)
     export_research_group_membership_graphs_manifest_flow(output_dir=output_dir)
+    export_horizon_ids_task(output_dir)
+    if zip_exports:
+        zip_exports_task(output_dir)
+        # Spec 038: the Parquet archive comes from the JSON archive just built;
+        # its failure never stops this flow nor touches the JSON archive.
+        try:
+            parquet_archive_task(output_dir)
+        except Exception as exc:
+            logger.error("Parquet archive not built: {}", exc)
+            logger.warning(EARLIER_RUN_WARNING)
+
+
+@flow(name="Zip Exports Flow", **telegram_flow_state_handlers())
+def zip_exports_flow(output_dir: str = "data/exports"):
+    """Builds exports_canonical.zip from the files already in ``output_dir``
+    (spec 029). Its own phase, so the archive holds the current marts and
+    graph."""
+    if not os.path.isabs(output_dir):
+        output_dir = os.path.join(os.getcwd(), output_dir)
     zip_exports_task(output_dir)
 
 

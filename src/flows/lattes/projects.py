@@ -4,7 +4,8 @@ import glob
 import json
 import os
 import re
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional
 
 faulthandler.enable()
 
@@ -12,6 +13,7 @@ from eo_lib import InitiativeController, PersonController, TeamController
 from loguru import logger
 from prefect import flow, task
 from prefect.cache_policies import NO_CACHE
+from prefect.utilities.annotations import quote
 from research_domain.controllers import (
     AcademicEducationController,
     ArticleController,
@@ -25,17 +27,39 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from src.adapters.sources.lattes_parser import LattesParser
+from src.adapters.sources.raw_store import JsonDownloadManifest
+from src.core.logic.document_skip import carry, current, mark_partial
 from src.core.logic.entity_manager import EntityManager
+from src.core.logic.horizon_identity import (
+    canonical,
+    dedupe_same_document,
+    lattes_article_key,
+    lattes_education_key,
+    lattes_id_from_cv_path,
+    normalize_doi,
+)
+from src.core.logic.initiative_identity import normalize_text
 from src.core.logic.pii_anonymizer import scrub_pii_deep
+from src.core.logic.professional_activity_rules import activity_key
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.researcher_resolution import (
     ResearcherRef,
     load_researcher_index,
+    log_researcher_resolution_summary,
     resolve_or_create_researcher,
     resolve_researcher_from_lattes,
     sync_researcher_ref,
 )
 from src.core.logic.strategies.lattes_projects import LattesProjectMappingStrategy
+from src.core.ports.document_state_store import DocumentFailed
+from src.flows.document_phase import document_phase
+from src.flows.lattes.cv_document import (
+    finish_lattes_listing,
+    read_cv,
+    retry_unidentified,
+    set_cv_claim_source,
+)
+from src.flows.lattes.cv_timing import log_cv_duration
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
@@ -112,6 +136,7 @@ def _ingest_researcher_file(
     parser: LattesParser,
     researcher_index: List[ResearcherRef],
     project_loader: "ProjectLoader",
+    data: Optional[dict] = None,
 ):
     try:
         filename = os.path.basename(file_path)
@@ -121,12 +146,13 @@ def _ingest_researcher_file(
             logger.info(f"Skipping file {filename}: Could not extract Lattes ID.")
             return
 
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load JSON {file_path}: {e}")
-            return
+        if data is None:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load JSON {file_path}: {e}")
+                return
 
         personal_info = parser.parse_personal_info(data)
 
@@ -172,30 +198,36 @@ def _ingest_researcher_file(
             raise RuntimeError(
                 f"Unable to load researcher entity for Lattes ID {lattes_id}."
             )
+        # The CV's own subject (spec 021): left out of the total-loss count.
+        carry("researcher", target_researcher.id, is_subject=True)
 
         # Guarantee the Lattes URL identity so future runs resolve by cnpq_url.
         if lattes_id and not personal_info.get("cnpq_url"):
             personal_info["cnpq_url"] = f"http://lattes.cnpq.br/{lattes_id}"
 
         # 1. Update Personal Info
-        needs_update = False
-        if personal_info.get("citation_names"):
-            target_researcher.citation_names = personal_info["citation_names"]
-            needs_update = True
-        if personal_info.get("cnpq_url"):
-            target_researcher.cnpq_url = personal_info["cnpq_url"]
-            needs_update = True
         if personal_info.get("resume"):
             # LGPD: the resume is free text that can embed personal e-mails
             # and phone numbers. Scrub it before persisting, so the column,
             # the tracking payloads and the change log never carry raw PII.
             personal_info["resume"] = scrub_pii_deep(personal_info["resume"])
-            target_researcher.resume = personal_info["resume"]
-            needs_update = True
+        profile_fields = ("citation_names", "cnpq_url", "resume")
+        # Only the fields whose stored value really differs are written and
+        # logged (spec 020, FR-022): a rerun over the same CV changes nothing.
+        before = {f: getattr(target_researcher, f, None) for f in profile_fields}
+        changed = [
+            f
+            for f in profile_fields
+            if personal_info.get(f)
+            and canonical(personal_info[f]) != canonical(before[f])
+        ]
 
-        if needs_update:
+        if any(personal_info.get(f) for f in profile_fields):
             try:
-                researcher_ctrl.update(target_researcher)
+                for field in changed:
+                    setattr(target_researcher, field, personal_info[field])
+                if changed:
+                    researcher_ctrl.update(target_researcher)
                 source_record = tracking_recorder.record_source_record(
                     source_entity_type="researcher_profile",
                     payload=personal_info,
@@ -221,25 +253,20 @@ def _ingest_researcher_file(
                     },
                     selection_reason="lattes_personal_info_selected_values",
                 )
-                tracking_recorder.record_change(
-                    source_record_id=getattr(source_record, "id", None),
-                    canonical_entity_type="researcher",
-                    canonical_entity_id=target_researcher.id,
-                    operation="update",
-                    changed_fields=[
-                        key
-                        for key in ("citation_names", "cnpq_url", "resume")
-                        if personal_info.get(key)
-                    ],
-                    after={
-                        "citation_names": personal_info.get("citation_names"),
-                        "cnpq_url": personal_info.get("cnpq_url"),
-                        "resume": personal_info.get("resume"),
-                    },
-                    reason="Updated from Lattes personal info",
-                )
+                if changed:
+                    tracking_recorder.record_change(
+                        source_record_id=getattr(source_record, "id", None),
+                        canonical_entity_type="researcher",
+                        canonical_entity_id=target_researcher.id,
+                        operation="update",
+                        changed_fields=changed,
+                        before={f: before[f] for f in changed},
+                        after={f: personal_info.get(f) for f in changed},
+                        reason="Updated from Lattes personal info",
+                    )
             except Exception as e:
                 logger.warning(f"Failed to update researcher data for {lattes_id}: {e}")
+                mark_partial(f"personal info: {e}")
 
         # O índice é lido uma vez só, então precisa acompanhar o que esta
         # ingestão acabou de gravar — currículos seguintes pontuam sobre ele.
@@ -255,15 +282,17 @@ def _ingest_researcher_file(
         projects.extend(parser.parse_extension_projects(data))
         projects.extend(parser.parse_development_projects(data))
 
-        # Deduplicate projects by name
-        seen_names = set()
-        unique_projects = []
+        # Deduplicate projects by normalized name. A project entered twice in
+        # the same CV is processed once, always the same version (spec 020,
+        # FR-020): the one with the smallest canonical hash.
         for p in projects:
-            p_name = (p.get("name") or "").strip()
-            if p_name and p_name not in seen_names:
-                p["name"] = p_name
-                unique_projects.append(p)
-                seen_names.add(p_name)
+            p["name"] = (p.get("name") or "").strip()
+        unique_projects, dropped = dedupe_same_document(
+            [p for p in projects if p["name"]],
+            lambda p: normalize_text(p["name"]),
+        )
+        if dropped:
+            logger.info(f"Dropped {dropped} duplicate projects in {filename}")
 
         if unique_projects:
             logger.info(
@@ -283,13 +312,23 @@ def _ingest_researcher_file(
         articles = []
         articles.extend(parser.parse_articles(data))
         articles.extend(parser.parse_conference_papers(data))
+        articles, dropped = dedupe_same_document(
+            articles, lambda art: lattes_article_key(file_path, art)
+        )
+        if dropped:
+            logger.info(f"Dropped {dropped} duplicate articles in {filename}")
         if articles:
             ingest_articles_task(
                 articles, target_researcher, all_researchers, parser, file_path
             )
 
         # 4. Handle Academic Education
-        education_list = parser.parse_academic_education(data)
+        education_list, dropped = dedupe_same_document(
+            parser.parse_academic_education(data),
+            lambda edu: lattes_education_key(file_path, edu),
+        )
+        if dropped:
+            logger.info(f"Dropped {dropped} duplicate educations in {filename}")
         if education_list:
             ingest_education_task(
                 education_list,
@@ -325,9 +364,13 @@ def _ingest_researcher_file(
                 logger.warning(
                     f"Failed to ingest {section_name} for {target_researcher.name}: {exc}"
                 )
+                mark_partial(f"{section_name}: {exc}")
 
     except Exception as e:
         logger.error(f"Failed to process file {file_path}: {e}")
+        if current() is not None:
+            # Inside a document (spec 021) the CV is rolled back whole.
+            raise DocumentFailed("partial", f"{type(e).__name__}: {e}") from e
 
 
 @task(name="Ingest Lattes Researcher Data", cache_policy=NO_CACHE)
@@ -337,9 +380,10 @@ def ingest_researcher_data(
     parser: LattesParser,
     researcher_index: List[ResearcherRef],
     project_loader: "ProjectLoader",
+    data: Optional[dict] = None,
 ):
     _ingest_researcher_file(
-        file_path, entity_manager, parser, researcher_index, project_loader
+        file_path, entity_manager, parser, researcher_index, project_loader, data
     )
 
 
@@ -368,6 +412,103 @@ def ingest_file_task(file_path: str, entity_manager: EntityManager):
     )
 
 
+# Filled on an existing article when it has no value and a CV gives one.
+_ARTICLE_FILL_FIELDS = ("doi", "journal_conference", "volume", "pages")
+
+
+def _fill_missing_article_fields(session, paper_id, art, source_record_id) -> None:
+    """The same work listed in several CVs: an empty field of the stored
+    article takes the value of a later CV, never overwriting one. Without it
+    the result depended on which CV came first (spec 020: the DOI of 8
+    articles was lost when the CVs were processed in a fixed order)."""
+    row = session.execute(
+        text(
+            "SELECT doi, journal_conference, volume, pages FROM articles "
+            "WHERE id = :id"
+        ),
+        {"id": paper_id},
+    ).fetchone()
+    if row is None:
+        return
+    current = dict(zip(_ARTICLE_FILL_FIELDS, row))
+    filled = {
+        field: art.get(field)
+        for field in _ARTICLE_FILL_FIELDS
+        if canonical(current[field]) is None and canonical(art.get(field)) is not None
+    }
+    if not filled:
+        return
+    session.execute(
+        text(
+            "UPDATE articles SET "
+            + ", ".join(f"{field} = :{field}" for field in filled)
+            + " WHERE id = :id"
+        ),
+        {**filled, "id": paper_id},
+    )
+    session.commit()
+    tracking_recorder.record_change(
+        source_record_id=source_record_id,
+        canonical_entity_type="article",
+        canonical_entity_id=paper_id,
+        operation="update",
+        changed_fields=sorted(filled),
+        before={field: current[field] for field in filled},
+        after=filled,
+        reason="Filled missing article fields from Lattes",
+    )
+
+
+def _with_clean_doi(art: dict) -> dict:
+    """A copy of the article item whose ``doi`` is the cleaned DOI, or None
+    (spec 033, FR-006). The CV's DOI field sometimes holds a Scopus link or an
+    ISSN; the article stores a real DOI only. The item itself is left as the
+    CV wrote it: it is the payload of the tracked source record."""
+    return {**art, "doi": normalize_doi(art.get("doi"))}
+
+
+def _find_article(session, title, year, doi) -> Optional[int]:
+    """Id of the stored article that is this work, or None (spec 029, D4).
+
+    A DOI that matches after ``normalize_doi`` (case, doi.org prefix) is the
+    same article whatever the title. Otherwise the same ``normalize_text``
+    title in the same year, unless both records carry a DOI and the DOIs differ.
+    A value that is not a DOI after ``normalize_doi`` (a Scopus link, an ISSN:
+    spec 033) counts as no DOI, so the item is matched by title and year.
+    Blank titles never match. The lowest id wins. Column-only SQL, as the
+    lookups it replaces (no ORM joins)."""
+    wanted = normalize_doi(doi)
+    if wanted:
+        pattern = "%" + wanted.replace("\\", "\\\\").replace("%", "\\%").replace(
+            "_", "\\_"
+        )
+        rows = session.execute(
+            text(
+                "SELECT id, doi FROM articles "
+                "WHERE lower(doi) LIKE :pattern ESCAPE '\\' ORDER BY id"
+            ),
+            {"pattern": pattern},
+        ).fetchall()
+        for row in rows:
+            if normalize_doi(row[1]) == wanted:
+                return row[0]
+    name = normalize_text(title)
+    if not name:
+        return None
+    rows = session.execute(
+        text("SELECT id, title, doi FROM articles WHERE year = :y ORDER BY id"),
+        {"y": year},
+    ).fetchall()
+    for row in rows:
+        if normalize_text(row[1]) != name:
+            continue
+        other = normalize_doi(row[2])
+        if wanted and other and other != wanted:
+            continue
+        return row[0]
+    return None
+
+
 def ingest_articles_task(
     articles: List[Dict],
     target_researcher: Researcher,
@@ -383,35 +524,27 @@ def ingest_articles_task(
         try:
             title = art["title"]
             year = art["year"]
-            doi = art.get("doi")
             source_record = tracking_recorder.record_source_record(
                 source_entity_type="article",
                 payload=art,
-                source_record_id=(doi or f"{parser.normalize_title(title)}|{year}"),
+                # Source-native key (spec 020): the CV it came from plus the
+                # fields that tell two works apart.
+                source_record_id=lattes_article_key(source_file, art),
                 source_file=source_file,
                 source_path=source_file,
             )
+            # Spec 033: the source record above keeps the DOI field as the CV
+            # wrote it; from here on the item carries the cleaned DOI or None.
+            art = _with_clean_doi(art)
+            doi = art["doi"]
 
-            # Column-only lookups. The Article.authors relationship is
-            # lazy="joined" and Researcher carries several more lazy="joined"
-            # relationships, so an ORM query collapses into a combinatorial
-            # LEFT OUTER JOIN that crashes native psycopg2/libpq with SIGSEGV
-            # on PostgreSQL (see export_canonical for the same root cause).
-            # Fetch only the row id so the author graph is never materialized.
-            paper_id = None
-            if doi:
-                paper_id = session.execute(
-                    text("SELECT id FROM articles WHERE doi = :doi LIMIT 1"),
-                    {"doi": doi},
-                ).scalar()
-            if paper_id is None:
-                paper_id = session.execute(
-                    text(
-                        "SELECT id FROM articles "
-                        "WHERE title = :t AND year = :y LIMIT 1"
-                    ),
-                    {"t": title, "y": year},
-                ).scalar()
+            # Column-only lookups (see _find_article): the Article.authors
+            # relationship is lazy="joined" and Researcher carries several more
+            # lazy="joined" relationships, so an ORM query collapses into a
+            # combinatorial LEFT OUTER JOIN that crashes native psycopg2/libpq
+            # with SIGSEGV on PostgreSQL (see export_canonical for the same
+            # root cause). Only the row id is fetched.
+            paper_id = _find_article(session, title, year, doi)
 
             if paper_id is None:
                 paper = article_ctrl.create_article(
@@ -447,6 +580,10 @@ def ingest_articles_task(
                     },
                     reason="Created article from Lattes",
                 )
+            else:
+                _fill_missing_article_fields(
+                    session, paper_id, art, getattr(source_record, "id", None)
+                )
 
             tracking_recorder.record_entity_match(
                 source_record_id=getattr(source_record, "id", None),
@@ -479,6 +616,7 @@ def ingest_articles_task(
                 ),
                 {"a": paper_id, "r": target_researcher.id},
             ).scalar()
+            carry("article_author", f"{paper_id}:{target_researcher.id}")
             if not already_linked:
                 try:
                     session.execute(
@@ -494,9 +632,11 @@ def ingest_articles_task(
                     logger.warning(
                         f"Failed to link article '{title}' to researcher {target_researcher.id}: {link_err}"
                     )
+                    mark_partial(f"article link: {link_err}")
 
         except Exception as art_err:
             logger.error(f"Failed to ingest article {art.get('title')}: {art_err}")
+            mark_partial(f"article: {art_err}")
 
 
 def ingest_education_task(
@@ -517,14 +657,9 @@ def ingest_education_task(
             source_record = tracking_recorder.record_source_record(
                 source_entity_type="academic_education",
                 payload=edu_data,
-                source_record_id="|".join(
-                    [
-                        str(target_researcher.id),
-                        str(edu_data.get("course_name") or ""),
-                        str(edu_data.get("degree") or ""),
-                        str(edu_data.get("start_year") or ""),
-                    ]
-                ),
+                # The CV's lattes_id, never researchers.id: a person merge
+                # must not make the same education look new (spec 020).
+                source_record_id=lattes_education_key(source_file, edu_data),
                 source_file=source_file,
                 source_path=source_file,
             )
@@ -680,6 +815,7 @@ def ingest_education_task(
             )
         except Exception as e:
             logger.warning(f"Failed to ingest education item: {e}")
+            mark_partial(f"education: {e}")
 
 
 def ingest_awards_task(awards, target_researcher, session):
@@ -692,10 +828,12 @@ def ingest_awards_task(awards, target_researcher, session):
         logger.warning(
             f"No DB session available; skipping {len(awards)} awards for {target_researcher.name}"
         )
+        mark_partial("awards: no DB session")
         return
     from research_domain.domain.entities.award import Award
 
     created = 0
+    kept = []
     for a in awards:
         title, year = a["title"], a.get("year")
         exists = (
@@ -704,11 +842,16 @@ def ingest_awards_task(awards, target_researcher, session):
             .first()
         )
         if exists:
+            kept.append(exists)
             continue
-        session.add(Award(researcher_id=target_researcher.id, title=title, year=year))
+        award = Award(researcher_id=target_researcher.id, title=title, year=year)
+        session.add(award)
+        kept.append(award)
         created += 1
     if created:
         session.commit()
+    for award in kept:  # spec 021: the rows this CV carries
+        carry("award", award.id)
     logger.info(f"Awards: {created} created for {target_researcher.name}")
 
 
@@ -737,6 +880,7 @@ def ingest_languages_task(languages, target_researcher, session):
         logger.warning(
             f"No DB session available; skipping {len(languages)} languages for {target_researcher.name}"
         )
+        mark_partial("languages: no DB session")
         return
     from research_domain.domain.entities.language import Language
     from research_domain.domain.entities.proficiency import (
@@ -745,6 +889,7 @@ def ingest_languages_task(languages, target_researcher, session):
     )
 
     created = 0
+    kept = []
     for lg in languages:
         name = lg["language"]
         language = session.query(Language).filter_by(name=name).first()
@@ -758,30 +903,35 @@ def ingest_languages_task(languages, target_researcher, session):
             .first()
         )
         if exists:
+            kept.append(exists)
             continue
-        session.add(
-            Proficiency(
-                researcher_id=target_researcher.id,
-                language_id=language.id,
-                comprehension=_proficiency_level(lg.get("comprehension")),
-                speaking=_proficiency_level(lg.get("speaking")),
-                reading=_proficiency_level(lg.get("reading")),
-                writing=_proficiency_level(lg.get("writing")),
-            )
+        proficiency = Proficiency(
+            researcher_id=target_researcher.id,
+            language_id=language.id,
+            comprehension=_proficiency_level(lg.get("comprehension")),
+            speaking=_proficiency_level(lg.get("speaking")),
+            reading=_proficiency_level(lg.get("reading")),
+            writing=_proficiency_level(lg.get("writing")),
         )
+        session.add(proficiency)
+        kept.append(proficiency)
         created += 1
     if created:
         session.commit()
+    for proficiency in kept:  # spec 021: the rows this CV carries
+        carry("proficiency", proficiency.id)
     logger.info(f"Proficiencies: {created} created for {target_researcher.name}")
 
 
 def ingest_professional_activities_task(activities, target_researcher, session):
     """Ingests Lattes professional activities (atuacao_profissional).
 
-    Deduped by (researcher_id, institution, start_year, activity_type).
+    An item is a repeat only when it equals a stored activity of the
+    researcher in every stored field (spec 034, FR-001); the parser already
+    returns each different item of the curriculum once.
     """
     ctrl = ProfessionalActivityController()
-    seen = set()
+    seen = {}  # stored fields -> row id
     if session is not None:
         from research_domain.domain.entities.professional_activity import (
             ProfessionalActivity,
@@ -792,19 +942,24 @@ def ingest_professional_activities_task(activities, target_researcher, session):
             .filter_by(researcher_id=target_researcher.id)
             .all()
         ):
-            seen.add((e.institution, e.start_year, e.activity_type))
+            seen[activity_key(e)] = e.id
 
     created = 0
     for act in activities:
-        key = (act["institution"], act["start_year"], act["activity_type"])
+        key = activity_key(act)
         if key in seen:
+            carry("professional_activity", seen[key])
             continue
         try:
-            ctrl.create_professional_activity(researcher_id=target_researcher.id, **act)
-            seen.add(key)
+            activity = ctrl.create_professional_activity(
+                researcher_id=target_researcher.id, **act
+            )
+            seen[key] = getattr(activity, "id", None)
+            carry("professional_activity", seen[key])
             created += 1
         except Exception as e:
             logger.warning(f"Failed to ingest professional activity: {e}")
+            mark_partial(f"professional activity: {e}")
     logger.info(
         f"Professional activities: {created} created for {target_researcher.name}"
     )
@@ -840,6 +995,7 @@ def ingest_technical_productions_task(productions, target_researcher, session):
                 type_cache[category] = type_id
             except Exception as e:
                 logger.warning(f"Failed to ensure production type '{category}': {e}")
+                mark_partial(f"production type: {e}")
                 continue
 
         existing_id = None
@@ -866,6 +1022,8 @@ def ingest_technical_productions_task(productions, target_researcher, session):
                 )
                 existing_id = production.id
                 created += 1
+            carry("research_production", existing_id)
+            carry("production_author", f"{existing_id}:{target_researcher.id}")
             already_linked = session.execute(
                 text(
                     "SELECT 1 FROM production_authors "
@@ -885,6 +1043,7 @@ def ingest_technical_productions_task(productions, target_researcher, session):
         except Exception as e:
             session.rollback()
             logger.warning(f"Failed to ingest technical production '{title}': {e}")
+            mark_partial(f"technical production: {e}")
     logger.info(
         f"Technical productions: {created} created for {target_researcher.name}"
     )
@@ -896,12 +1055,21 @@ def ingest_lattes_projects_flow():
     if not os.path.isabs(base_dir):
         base_dir = os.path.join(os.getcwd(), base_dir)
 
-    json_files = glob.glob(os.path.join(base_dir, "*.json"))
+    # Sorted: name matching depends on who already exists, so the order must
+    # not depend on the filesystem (spec 020, FR-002).
+    json_files = sorted(glob.glob(os.path.join(base_dir, "*.json")))
     logger.info(f"Found {len(json_files)} files in {base_dir}")
 
     if not json_files:
         return
 
+    # Opened before any controller: their sessions must bind to the shared
+    # connection of the document transactions (spec 021).
+    with document_phase("lattes_projects") as skip:
+        _ingest_lattes_projects(json_files, skip)
+
+
+def _ingest_lattes_projects(json_files: List[str], skip) -> None:
     init_ctrl = InitiativeController()
     person_ctrl = PersonController()
     entity_manager = EntityManager(init_ctrl, person_ctrl)
@@ -932,14 +1100,42 @@ def ingest_lattes_projects_flow():
     from src.core.logic.project_loader import ProjectLoader
 
     project_loader = ProjectLoader(mapping_strategy=None)
+    # One net change log for the whole phase (spec 020): a project listed in
+    # several CVs is logged once, by its real difference.
+    project_loader.defer_change_log = True
+
+    def reload_caches():
+        # A rolled-back CV may have created researchers, initiatives, persons
+        # or teams that the in-memory indexes still point at (spec 021).
+        researcher_index[:] = load_researcher_index(session)
+        project_loader.reset_caches()
+
+    skip.on_rollback = reload_caches
 
     with tracking_recorder.run_context(
         source_system="lattes_projects", flow_name="lattes_projects"
     ):
-        for json_file in json_files:
-            ingest_researcher_data(
-                json_file, entity_manager, parser, researcher_index, project_loader
-            )
+        # Spec 023: when each curriculum in cache/ was downloaded.
+        download_dates = JsonDownloadManifest().dates()
+        for position, json_file in enumerate(json_files, start=1):
+            started = time.perf_counter()
+            key = lattes_id_from_cv_path(json_file) or os.path.basename(json_file)
+            with skip.document(key, downloaded_at=download_dates.get(key)) as doc:
+                data = read_cv(json_file)
+                if doc.unchanged(data):
+                    continue
+                doc.begin()
+                set_cv_claim_source(doc, data, key)
+                # quote(): Prefect would otherwise walk these large objects
+                # (the ~7.6k-entry researcher index above all) on every call.
+                ingest_researcher_data(
+                    json_file,
+                    quote(entity_manager),
+                    quote(parser),
+                    quote(researcher_index),
+                    quote(project_loader),
+                    quote(data),
+                )
             # The ORM sessions accumulate every entity created for all 125 CV
             # files in their identity maps; merely committing (done inside the
             # ingest helpers) does not release those references. Expire them
@@ -948,6 +1144,17 @@ def ingest_lattes_projects_flow():
             # loop. gc.collect() alone cannot reclaim identity-map-held objects.
             _expire_lattes_sessions(session)
             gc.collect()
+            log_cv_duration(
+                "lattes_projects", position, len(json_files), json_file, started
+            )
+        project_loader.flush_change_log()
+        finish_lattes_listing(skip, json_files)
+        retried = retry_unidentified(skip, JsonDownloadManifest())
+        if retried:
+            logger.info(f"{retried} unidentified curricula will be downloaded again")
+    project_loader.team_synchronizer.log_lookup_summary("lattes_projects")
+    project_loader.person_matcher.log_match_summary("lattes_projects")
+    log_researcher_resolution_summary("lattes_projects")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,10 @@ HMAC_KEY_ENV = "HORIZON_PII_HMAC_KEY"
 _DOMAIN_CPF = "cpf"
 _DOMAIN_EMAIL = "email"
 _DOMAIN_PHONE = "phone"
+# Spec 029: published hashes and the key stamp use their own subkeys.
+_DOMAIN_EXPORT_HASH = "export_hash"
+_DOMAIN_FINGERPRINT = "fingerprint"
+_FINGERPRINT_LABEL = "horizon-pii-key-fingerprint"
 
 PII_COLUMN_REGISTRY: dict[str, str] = {
     "identification_id": "cpf",
@@ -44,6 +48,26 @@ _EMAIL_RE = re.compile(
 _PHONE_RE = re.compile(
     r"\+55[\s-]?\(?\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}"
     r"|\(\d{2,3}\)[\s-]?\d{4,5}[\s-]?\d{4}"
+)
+
+# Formatted CPF in free text (000.000.000-00). Bare 11-digit numbers are not
+# matched: they hit hex hashes.
+_CPF_RE = re.compile(r"(?<![\d.\-])\d{3}\.\d{3}\.\d{3}-\d{2}(?![\d\-])")
+
+# JSON pair of a known PII field whose value is a string or a number.
+_KNOWN_EMAIL_FIELDS = frozenset(
+    {"OrientadoEmail", "OrientadorEmail", "email", "contact_email"}
+)
+_KNOWN_CPF_FIELDS = frozenset({"OrientadoCpf", "OrientadorCpf", "identification_id"})
+_KNOWN_FIELD_TYPES: dict[str, str] = {
+    **{name: "email" for name in _KNOWN_EMAIL_FIELDS},
+    **{name: "cpf" for name in _KNOWN_CPF_FIELDS},
+    **{name: "phone" for name in _PAYLOAD_PHONE_FIELDS},
+}
+_MIN_NUMERIC_PII_DIGITS = 6
+_KNOWN_FIELD_RE = re.compile(
+    r'"(' + "|".join(map(re.escape, sorted(_KNOWN_FIELD_TYPES))) + r')"'
+    r'(\s*:\s*)("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?)'
 )
 
 
@@ -155,9 +179,16 @@ def scrub_phones_from_text(text: str | None) -> str | None:
     return _PHONE_RE.sub(lambda m: anonymize_phone(m.group(0)), text)
 
 
+def scrub_cpfs_from_text(text: str | None) -> str | None:
+    """Replace formatted CPF numbers (000.000.000-00) in free text."""
+    if not text:
+        return text
+    return _CPF_RE.sub(lambda m: anonymize_cpf(m.group(0)), text)
+
+
 def scrub_pii_text(text: str | None) -> str | None:
-    """Scrub e-mails and phone numbers from a free-text string."""
-    return scrub_phones_from_text(scrub_emails_from_text(text))
+    """Scrub e-mails, phone numbers and formatted CPFs from a free-text string."""
+    return scrub_cpfs_from_text(scrub_phones_from_text(scrub_emails_from_text(text)))
 
 
 def scrub_pii_deep(value: Any) -> Any:
@@ -169,6 +200,56 @@ def scrub_pii_deep(value: Any) -> Any:
     if isinstance(value, list):
         return [scrub_pii_deep(v) for v in value]
     return value
+
+
+def scan_text(text: str) -> tuple[str, dict[str, int]]:
+    """Safety-net scan of a whole file: replace every match, count by kind.
+
+    Known JSON fields are tokenized first (their values may be malformed or
+    numeric), then e-mails, phones and formatted CPFs in the remaining text.
+    Idempotent: tokens are never matched again. Hash values are untouched.
+    """
+    counts = {"email": 0, "phone": 0, "cpf": 0, "known_field": 0}
+
+    def _known(match: re.Match) -> str:
+        field, sep, raw = match.group(1), match.group(2), match.group(3)
+        value = raw[1:-1] if raw.startswith('"') else raw
+        field_type = _KNOWN_FIELD_TYPES[field]
+        # A short number is a count (our own reports have {"email": 0}), not a
+        # document or phone number.
+        if not raw.startswith('"') and len(value.lstrip("-")) < _MIN_NUMERIC_PII_DIGITS:
+            return match.group(0)
+        if not value or (
+            (field_type == "email" and is_anonymized_email(value))
+            or (field_type == "cpf" and is_anonymized_cpf(value))
+            or (field_type == "phone" and is_anonymized_phone(value))
+        ):
+            return match.group(0)
+        counts["known_field"] += 1
+        return f'"{field}"{sep}"{anonymize_field(value, field_type)}"'
+
+    def _count(kind: str, func):
+        def _sub(match: re.Match) -> str:
+            counts[kind] += 1
+            return func(match.group(0))
+
+        return _sub
+
+    text = _KNOWN_FIELD_RE.sub(_known, text)
+    text = _EMAIL_RE.sub(_count("email", anonymize_email), text)
+    text = _PHONE_RE.sub(_count("phone", anonymize_phone), text)
+    text = _CPF_RE.sub(_count("cpf", anonymize_cpf), text)
+    return text, counts
+
+
+def keyed_export_hash(value: str) -> str:
+    """Published form of a stored hash: HMAC-SHA256 under the export subkey."""
+    return _hmac_hex(_DOMAIN_EXPORT_HASH, value)
+
+
+def key_fingerprint() -> str:
+    """Short public stamp of the HMAC key; does not reveal it."""
+    return _hmac_hex(_DOMAIN_FINGERPRINT, _FINGERPRINT_LABEL)[:16]
 
 
 def scrub_source_record_phones(payload: dict) -> dict:

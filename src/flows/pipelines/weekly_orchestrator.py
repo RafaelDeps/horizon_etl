@@ -29,11 +29,20 @@ missing optional manual input (bolsistas, projetos, corpo docente) degrades
 gracefully without failing the weekly run.
 """
 
+import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger
+
+from src.adapters.database.sqlite_settings import finalize_sqlite_database
+from src.flows.portal_stops import (
+    clear_portal_stops,
+    read_access_check_retries,
+    read_portal_stops,
+)
 
 # (name, argv tail, timeout seconds, critical, mode)
 #   mode "app"    -> `python app.py <argv...>`      (DB-writing phases; LGPD hook active)
@@ -68,14 +77,43 @@ _PHASES = [
         "app",
     ),
     ("enrich_projects", ["enrich_projects"], 900, False, "app"),
+    # After every source phase (spec 021): parent projects span all their
+    # advisorships, SigPesq and Lattes, so a rebuild and an incremental run of
+    # the same inputs give the same parents.
+    (
+        "recalculate_parent_projects",
+        ["recalculate_parent_projects"],
+        900,
+        False,
+        "app",
+    ),
     # consolidate_duplicates merges the observed same-person pairs after all
     # source phases loaded and before export_canonical, so the canonical export
     # and downstream marts see exactly one record per person (contract R6-R14).
     ("consolidate_duplicates", ["consolidate_duplicates"], 900, False, "app"),
+    # linkedin_links (spec 037) stores the LinkedIn link of the persons named
+    # in the maintainer's local list: after the persons are merged, so a name
+    # is compared with the final persons, and before the ids and the export.
+    # Without the list (GitHub Actions) it does nothing; never critical.
+    ("linkedin_links", ["linkedin_links"], 300, False, "app"),
+    # assign_horizon_ids (spec 020) runs on the final, consolidated state, so
+    # every exported entity gets its permanent id; it must precede
+    # export_canonical, which publishes the ids. Non-critical: without it the
+    # export only lacks the new id files.
+    ("assign_horizon_ids", ["assign_horizon_ids"], 900, False, "app"),
     ("export_canonical", ["export_canonical"], 1800, True, "app"),
     ("knowledge_areas_mart", ["ka_mart"], 900, False, "app"),
     ("initiatives_analytics_mart", ["analytics_mart"], 900, False, "app"),
     ("people_relationship_graph", ["people_graph"], 1800, False, "app"),
+    # Spec 029: the archive is built from the files the phases above wrote, so
+    # it holds the current marts and graph. Critical, but only run when they
+    # all passed (_ARCHIVE_GATE): a skipped build leaves the checked-out
+    # archive untouched, so nothing is published and the run stays usable.
+    ("zip_exports", ["zip_exports"], 900, True, "app"),
+    # Spec 038: exports_parquet.zip, built from the JSON archive just written so
+    # both come from the same run. Non-critical: a failure keeps the previous
+    # Parquet archive; run only when zip_exports built the JSON archive.
+    ("parquet_archive", ["parquet_archive"], 900, False, "app"),
     # --- docentes / OpenAlex analytics (read-only wrt DB; run as modules) ---
     (
         "openalex_citations",
@@ -111,7 +149,29 @@ _PHASES = [
 ]
 
 
+# Spec 029: phases whose failure keeps the archive from being built, besides
+# any earlier critical phase.
+_ARCHIVE_GATE = (
+    "export_canonical",
+    "knowledge_areas_mart",
+    "initiatives_analytics_mart",
+    "people_relationship_graph",
+)
+SKIPPED = "skipped"
+
+
+def _archive_blockers(results) -> list:
+    """Names of the earlier phases that stop the archive from being built."""
+    return [
+        r["name"]
+        for r in results
+        if not r["ok"] and (r["critical"] or r["name"] in _ARCHIVE_GATE)
+    ]
+
+
 def _describe_rc(rc: Optional[int]) -> str:
+    if rc == SKIPPED:
+        return "skipped"
     if rc is None:
         return "timeout"
     if rc < 0:
@@ -137,6 +197,8 @@ def _run_phase(name, argv_tail, timeout, campus, output_dir, mode="app"):
             argv.append(output_dir)
             if campus:
                 argv.append(campus)
+        elif argv_tail[0] in ("zip_exports", "parquet_archive"):
+            argv.append(output_dir)
     logger.info("▶ phase '{}': {}", name, " ".join(argv[1:]))
     rc = _run_phase_subprocess(argv, timeout, name)
     log = logger.info if rc == 0 else logger.error
@@ -185,7 +247,81 @@ def _critical(name):
     return False
 
 
-def _notify(results, crit_failed):
+_STOP_REASONS = {
+    "failures_in_a_row": (
+        "failures_in_a_row, limit {limit}",
+        "{limit} falhas seguidas",
+    ),
+    "time_budget": ("time_budget, {minutes:g} min", "limite de {minutes:g} min"),
+}
+
+
+def _portal_stop_lines(stops: dict, portuguese: bool = False) -> list:
+    """One line per portal given up in this weekly (spec 024)."""
+    lines = []
+    for source, entry in sorted(stops.items()):
+        try:
+            counts = entry.get("counts") or {}
+            english, pt = _STOP_REASONS.get(
+                entry.get("reason"), ("{reason}", "{reason}")
+            )
+            values = {
+                "limit": entry.get("limit"),
+                "minutes": (entry.get("budget_s") or 0) / 60,
+                "reason": entry.get("reason"),
+            }
+            after = round(entry.get("elapsed_s") or 0)
+            stored = counts.get("reused", 0) + counts.get("reused_after_failure", 0)
+            if portuguese:
+                lines.append(
+                    f"⚠️ {source}: portal abandonado ({pt.format(**values)}) após "
+                    f"{after} s; {counts.get('stopped', 0)} não tentados, "
+                    f"{stored} das cópias guardadas, {counts.get('failed', 0)} falhas"
+                )
+            else:
+                lines.append(
+                    f"⚠ {source}: portal given up ({english.format(**values)}) after "
+                    f"{after} s; {counts.get('stopped', 0)} not tried, {stored} from "
+                    f"stored copies, {counts.get('failed', 0)} failed"
+                )
+        except Exception as exc:  # a report problem never changes the run
+            logger.warning("Portal stop entry of {} not shown: {}", source, exc)
+    return lines
+
+
+def _access_check_retry_lines(retries: dict, portuguese: bool = False) -> list:
+    """One line per source whose access check pages got a second try in
+    this weekly (spec 025)."""
+    lines = []
+    for source, entry in sorted(retries.items()):
+        try:
+            retried = entry.get("retried", 0)
+            recovered = entry.get("recovered", 0)
+            pause = f"{(entry.get('pause_s') or 0) / 60:g} min"
+            if portuguese:
+                lines.append(
+                    f"🔁 {source}: {retried} páginas de captcha pedidas de novo "
+                    f"após {pause}; {recovered} recuperadas, "
+                    f"{retried - recovered} ainda faltando"
+                )
+            else:
+                lines.append(
+                    f"↻ {source}: {retried} access check pages asked again after "
+                    f"{pause}; {recovered} recovered, {retried - recovered} "
+                    "still missing"
+                )
+        except Exception as exc:  # a report problem never changes the run
+            logger.warning("Access check retry entry of {} not shown: {}", source, exc)
+    return lines
+
+
+def _notify(
+    results,
+    crit_failed,
+    finalize: Optional[dict] = None,
+    stops: Optional[dict] = None,
+    retries: Optional[dict] = None,
+):
     from src.notifications.telegram import send_telegram_message
 
     head = "❌ Weekly ETL FALHOU" if crit_failed else "✅ Weekly ETL concluído"
@@ -198,7 +334,56 @@ def _notify(results, crit_failed):
         lines.append(
             "Fases críticas que falharam: " + ", ".join(r["name"] for r in crit_failed)
         )
+    if finalize and not finalize.get("finalized") and not finalize.get("skipped"):
+        lines.append("")
+        lines.append(f"⚠️ SQLite finalize falhou: {finalize.get('reason')}")
+    stop_lines = _portal_stop_lines(stops or {}, portuguese=True)
+    stop_lines += _access_check_retry_lines(retries or {}, portuguese=True)
+    if stop_lines:
+        lines.append("")
+        lines.extend(stop_lines)
     send_telegram_message("\n".join(lines))
+
+
+def _reset_if_rule_version_changed() -> None:
+    """FR-024 (spec 020): rebuild once when the database was built under other
+    key/hash/id rules. Since spec 021 ``make weekly-flows`` keeps the database
+    (``make db-ensure`` only creates a missing one), so this is the guard of
+    the persistent database: bumping ``HORIZON_RULE_VERSION`` makes the next
+    weekly start from scratch, keeping the id history."""
+    from src.adapters.database.horizon_id_store import sqlite_path_from_url
+    from src.flows.maintenance.horizon_ids import (
+        reset_database,
+        rule_version_requires_reset,
+    )
+
+    database_url = os.getenv("DATABASE_URL", "sqlite:///db/horizon.db")
+    try:
+        needs_reset = rule_version_requires_reset(sqlite_path_from_url(database_url))
+    except ValueError:  # not a SQLite file: nothing to compare
+        return
+    if needs_reset:
+        logger.warning(
+            "Database rule version differs from the code's; rebuilding it once "
+            "before the phases (FR-024)."
+        )
+        reset_database(database_url)
+
+
+def _run_pending_migrations() -> None:
+    """Spec 021: the database persists between runs, so tables added by a new
+    version of the ETL must reach an existing file before the phases use them
+    (until now the migrations ran lazily inside two phases)."""
+    from src.adapters.database.horizon_id_store import sqlite_path_from_url
+    from src.flows.maintenance.horizon_ids import _run_migrations
+
+    database_url = os.getenv("DATABASE_URL", "sqlite:///db/horizon.db")
+    try:
+        exists = os.path.exists(sqlite_path_from_url(database_url))
+    except ValueError:  # not a SQLite file
+        exists = True
+    if exists:
+        _run_migrations(database_url)
 
 
 def run_weekly(
@@ -207,9 +392,47 @@ def run_weekly(
 ) -> int:
     """Run every weekly phase in its own subprocess. Returns a process exit code."""
     campus = (campus_name or "").strip()
+    # Spec 021 (R8): the phases tell this weekly's listings from older ones by
+    # this start time (inherited by every phase subprocess).
+    os.environ["HORIZON_WEEKLY_STARTED_AT"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    _run_pending_migrations()
+    _reset_if_rule_version_changed()
+    # Spec 024: the portals given up are reported per weekly.
+    clear_portal_stops()
     results = []
     for name, argv_tail, timeout, _crit, mode in _PHASES:
+        if name == "zip_exports":
+            blockers = _archive_blockers(results)
+            if blockers:
+                # Recorded as a non-critical failure, not run (spec 029).
+                logger.error(
+                    "phase 'zip_exports' skipped: {} failed", ", ".join(blockers)
+                )
+                results.append(
+                    {"name": name, "ok": False, "rc": SKIPPED, "critical": False}
+                )
+                continue
+        if name == "parquet_archive" and not any(
+            r["name"] == "zip_exports" and r["ok"] for r in results
+        ):
+            # Spec 038: no new JSON archive, so no new Parquet archive; both stay
+            # as they were.
+            logger.error(
+                "phase 'parquet_archive' skipped: zip_exports did not build the archive"
+            )
+            results.append(
+                {"name": name, "ok": False, "rc": SKIPPED, "critical": False}
+            )
+            continue
         results.append(_run_phase(name, argv_tail, timeout, campus, output_dir, mode))
+
+    # Every phase subprocess has exited, so no connection holds the file: move
+    # the write-ahead log into db/horizon.db so the file (and the CI artifact
+    # built from it) is complete on its own. Never changes the exit code.
+    finalize = finalize_sqlite_database(os.getenv("DATABASE_URL"))
+    logger.info("SQLite finalize: {}", finalize)
 
     failed = [r for r in results if not r["ok"]]
     crit_failed = [r for r in failed if r["critical"]]
@@ -219,9 +442,15 @@ def run_weekly(
         logger.info(
             "  {} {} ({})", "✓" if r["ok"] else "✗", r["name"], _describe_rc(r["rc"])
         )
+    stops = read_portal_stops()
+    for line in _portal_stop_lines(stops):
+        logger.warning("  {}", line)
+    retries = read_access_check_retries()
+    for line in _access_check_retry_lines(retries):
+        logger.info("  {}", line)
 
     try:
-        _notify(results, crit_failed)
+        _notify(results, crit_failed, finalize=finalize, stops=stops, retries=retries)
     except Exception as exc:  # notification must never change the run outcome
         logger.warning("Telegram summary failed: {}", exc)
 

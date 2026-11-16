@@ -14,6 +14,7 @@ from src.flows.exports.knowledge_areas_mart import export_knowledge_areas_mart_f
 from src.flows.exports.people_relationship_graph import (
     export_people_relationship_graph_flow,
 )
+from src.flows.maintenance.parent_projects import recalculate_parent_projects_flow
 from src.notifications.telegram import (
     send_telegram_etl_report_summary,
     telegram_flow_state_handlers,
@@ -47,6 +48,11 @@ def weekly_pipelines_flow(
         reporter.run_step(
             step_name="all_sources",
             runner=lambda: ingest_all_sources_flow(campus_name=campus_name),
+        )
+        # Parent projects span all their advisorships, so after every source.
+        reporter.run_step(
+            step_name="recalculate_parent_projects",
+            runner=recalculate_parent_projects_flow,
         )
         reporter.run_step(
             step_name="consolidate_duplicates",

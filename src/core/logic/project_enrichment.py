@@ -11,7 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from rapidfuzz import fuzz, process
 from sqlalchemy import text
 
+from src.core.logic.field_merge import FieldMergeApplier, project_file_source
+from src.core.logic.horizon_identity import canonical
 from src.core.logic.initiative_identity import normalize_text
+from src.core.ports.field_claim_store import FieldClaim
 from src.db.migrations import run_migrations
 from src.tracking.recorder import tracking_recorder
 
@@ -128,6 +131,39 @@ def origin_from_prior(prior: Optional[Dict[str, Any]], strategy: str) -> str:
     )
 
 
+TITLE_STRATEGIES = frozenset({"title_exact", "title_fuzzy"})
+
+
+def strategy_from_prior(
+    prior: Optional[Dict[str, Any]],
+    origin: str,
+    strategy: str,
+    code: Optional[str],
+    source_file: Optional[str],
+) -> str:
+    """The strategy to store in the payload (spec 032, TD-033).
+
+    The document that created an initiative finds it by title on the next run.
+    For that document the payload keeps ``new_from_document``, as a rebuild
+    writes it, so a run over unchanged documents writes nothing; a payload that
+    already drifted is repaired, since the rule reads the permanent origin
+    (research R4). A match by code, or any other document, records its own
+    strategy (R3). The document is the same when the code matches, or, without
+    a code, when the source file does (R2).
+    """
+    if (
+        origin != ORIGIN_NEW_FROM_DOCUMENT
+        or not isinstance(prior, dict)
+        or strategy not in TITLE_STRATEGIES
+    ):
+        return strategy
+    if code:
+        same_document = prior.get("project_code") == code
+    else:
+        same_document = bool(source_file) and prior.get("source_file") == source_file
+    return NEW_FROM_DOCUMENT if same_document else strategy
+
+
 def build_enrichment(
     pj: Dict[str, Any],
     *,
@@ -152,7 +188,9 @@ def build_enrichment(
     payload = EnrichmentPayload(
         source=ProjectEnrichmentLoader.SOURCE_SYSTEM,
         project_code=code or None,
-        match_strategy=strategy,
+        match_strategy=strategy_from_prior(
+            prior, origin, strategy, code or None, meta.get("arquivo")
+        ),
         origin=origin,
         reviewed_at=reviewed_at,
         reviewed_by=(prior or {}).get("reviewed_by"),
@@ -312,10 +350,19 @@ class ProjectEnrichmentLoader:
 
     SOURCE_SYSTEM = "sigpesq_project_files"
 
-    def __init__(self, overwrite: bool = False, dry_run: bool = False):
+    def __init__(
+        self,
+        overwrite: bool = False,
+        dry_run: bool = False,
+        field_merge: Optional[FieldMergeApplier] = None,
+    ):
         self.controller = InitiativeController()
         self.overwrite = overwrite
         self.dry_run = dry_run
+        # Branch 030: the PDF's description is a claim, ranked after the
+        # Lattes CVs and the SigPesq report row of the project. Without it
+        # (or with ``overwrite``) the PDF fills an empty description, as before.
+        self.field_merge = field_merge
 
     @property
     def _session(self):
@@ -373,9 +420,31 @@ class ProjectEnrichmentLoader:
                 rejected.add(code)
         return rejected
 
+    def _not_an_advisorship(self, id_column: str) -> str:
+        """SQL condition that leaves out the initiatives that are advisorships.
+
+        Branch 036: the loader stores nearly every advisorship with the type
+        "Research Project", so the stored type does not tell them apart; the
+        row in ``advisorships`` does. Without it a project PDF was matched to
+        an advisorship with the same title and its text written there.
+        """
+        has_table = self._session.execute(
+            text(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'advisorships'"
+            )
+        ).first()
+        if not has_table:
+            return ""
+        return (
+            f" AND NOT EXISTS (SELECT 1 FROM advisorships adv"
+            f" WHERE adv.id = {id_column})"
+        )
+
     def _load_code_index(self) -> Dict[str, int]:
         """``project_code -> initiative_id`` for APPROVED SigPesq projects, using
-        the tracking tables as the authoritative code<->initiative link."""
+        the tracking tables as the authoritative code<->initiative link. An
+        initiative that is an advisorship is left out (branch 036)."""
         rows = self._session.execute(
             text(
                 """
@@ -388,6 +457,7 @@ class ProjectEnrichmentLoader:
                 WHERE sr.source_system = 'sigpesq_research_projects'
                   AND sr.source_entity_type = 'initiative'
                 """
+                + self._not_an_advisorship("aa.canonical_entity_id")
             )
         ).fetchall()
 
@@ -410,7 +480,8 @@ class ProjectEnrichmentLoader:
         self,
     ) -> Tuple[Dict[str, List[int]], Dict[int, str]]:
         """Returns (normalized_name -> [initiative_id], {initiative_id -> normalized_name})
-        for Research Project initiatives only (advisorships excluded)."""
+        for Research Project initiatives only. Advisorships are excluded by
+        their row in ``advisorships``, not by the stored type (branch 036)."""
         rows = self._session.execute(
             text(
                 """
@@ -419,6 +490,7 @@ class ProjectEnrichmentLoader:
                 JOIN initiative_types t ON i.initiative_type_id = t.id
                 WHERE t.name = :type_name
                 """
+                + self._not_an_advisorship("i.id")
             ),
             {"type_name": RESEARCH_PROJECT_TYPE},
         ).fetchall()
@@ -502,10 +574,12 @@ class ProjectEnrichmentLoader:
         """Reads the documents once, classifies them once, then enriches matched
         initiatives (deduplicated) and, if requested, ingests unmatched rich ones.
 
-        All writes join the session's ambient transaction (opened by the index
-        SELECTs) and are committed once at the end; a failing row is skipped via
-        savepoint. On error the session is rolled back and the exception
-        propagates. ``dry_run`` writes nothing and commits nothing.
+        Each row is written through ``_write_row``. On SQLite every successful
+        row is committed as soon as its SAVEPOINT is released, and a failing row
+        is skipped and the database released, so the tracking writes are never
+        locked out. An exception that propagates out of here rolls back only
+        what is still pending: rows already written stay. ``dry_run`` writes
+        nothing and commits nothing.
         """
         self.ensure_schema()
 
@@ -543,9 +617,11 @@ class ProjectEnrichmentLoader:
         # NO explicit begin() here. The index loads above already ran SELECTs, and
         # a SQLAlchemy Session autobegins on ANY execute() -- a SELECT included --
         # so the session is always mid-transaction by this point and begin() would
-        # raise "A transaction is already begun on this Session". The writes join
-        # that ambient transaction instead: still one unit of work, and the
-        # per-row SAVEPOINTs from _write_row nest inside it as before.
+        # raise "A transaction is already begun on this Session". The per-row
+        # SAVEPOINTs from _write_row run inside that ambient transaction; with
+        # pysqlite each one commits its row when released (see _write_row), so
+        # this is NOT a single unit of work on SQLite, and the final commit()
+        # only closes whatever is still open.
         # Keep it this way: reintroducing begin() breaks the phase outright, and
         # so does moving these writes above the index loads.
         try:
@@ -586,7 +662,12 @@ class ProjectEnrichmentLoader:
             )
             new_desc = compose_description(cand.pj)
             current = descriptions.get(init_id, "").strip()
-            write_desc = bool(new_desc) and (self.overwrite or not current)
+            merged = (
+                getattr(self, "field_merge", None) is not None and not self.overwrite
+            )
+            write_desc = (
+                False if merged else bool(new_desc) and (self.overwrite or not current)
+            )
 
             if self.dry_run:
                 logger.info(
@@ -595,11 +676,24 @@ class ProjectEnrichmentLoader:
                     f"review={enrichment['needs_review']} (code={code or '-'})"
                 )
             else:
-                written = self._write_row(
+                unchanged = not write_desc and canonical(enrichment) == canonical(
+                    current_enrichment.get(init_id)
+                )
+                # Spec 032: an unchanged note is not rewritten; the description
+                # merge and the tracking below still run.
+                written = unchanged or self._write_row(
                     lambda: self._apply(
                         init_id, enrichment, new_desc if write_desc else None
                     )
                 )
+                if written and merged:
+                    written = self._write_row(
+                        lambda: self._merge_description(
+                            init_id, code or os.path.basename(cand.path), new_desc
+                        )
+                    )
+                    after = self._stored_description(init_id)
+                    write_desc = bool(new_desc) and after == new_desc != current
                 if not written:
                     stats["errors"] += 1
                     continue
@@ -611,6 +705,10 @@ class ProjectEnrichmentLoader:
                     desc_written=new_desc if write_desc else None,
                     path=cand.path,
                     pj=cand.pj,
+                    # Spec 021: a run over unchanged documents logs no change.
+                    changed=bool(write_desc and new_desc != current)
+                    or canonical(enrichment)
+                    != canonical(current_enrichment.get(init_id)),
                 )
 
             stats["enriched"] += 1
@@ -632,7 +730,15 @@ class ProjectEnrichmentLoader:
         rejected_codes: Optional[set] = None,
     ) -> Dict[str, int]:
         org_id, type_id = self._lookup_org_and_type()
+        # Initiative names are unique across ALL types, so a new project cannot
+        # reuse an advisorship's title either; name_index only knows research
+        # projects. Without this the insert fails, and in CI that failure held
+        # the write lock and aborted the phase (spec 019).
         existing_names = set(name_index.keys())
+        for (name,) in self._session.execute(text("SELECT name FROM initiatives")):
+            norm = normalize_text(name)
+            if norm:
+                existing_names.add(norm)
         seen_titles: set[str] = set()
         rejected_codes = rejected_codes or set()
         stats = {
@@ -716,6 +822,12 @@ class ProjectEnrichmentLoader:
 
         if not self._write_row(_do):
             return False
+        if getattr(self, "field_merge", None) is not None and not self.overwrite:
+            self._write_row(
+                lambda: self._merge_description(
+                    new_id_box["id"], code or os.path.basename(cand.path), description
+                )
+            )
 
         self._record_tracking(
             init_id=new_id_box["id"],
@@ -813,13 +925,32 @@ class ProjectEnrichmentLoader:
     # -------------------------------------------------------------- write helpers
     def _write_row(self, fn) -> bool:
         """Runs a single write inside a SAVEPOINT so one failing row is skipped
-        without aborting the surrounding transaction."""
+        and the others go on.
+
+        On SQLite (pysqlite) the SAVEPOINT opens the transaction and its RELEASE
+        commits it, so a successful row is committed right away. A failing row
+        is undone by ROLLBACK TO SAVEPOINT, which leaves that transaction -- and
+        its write lock -- open; the tracking recorder writes through other
+        sessions and would then fail with "database is locked". So after a
+        failure the transaction is ended here: nothing is pending in it.
+        """
         try:
             with self._session.begin_nested():
                 fn()
             return True
         except Exception as exc:
             logger.warning(f"Row write failed, skipping: {exc}")
+            try:
+                self._session.commit()
+            except Exception as release_exc:
+                logger.warning(
+                    f"Could not release the transaction after a failed row: "
+                    f"{release_exc}"
+                )
+                try:
+                    self._session.rollback()
+                except Exception:
+                    pass
             return False
 
     def _apply(
@@ -840,6 +971,32 @@ class ProjectEnrichmentLoader:
                 {"j": payload, "id": init_id},
             )
 
+    def _merge_description(
+        self, init_id: int, document_key: str, description: Optional[str]
+    ) -> None:
+        doc_date, rank, tie = project_file_source(document_key)
+        claims = [
+            FieldClaim(
+                source_system=self.SOURCE_SYSTEM,
+                document_key=document_key,
+                entity_type="initiative",
+                entity_id=init_id,
+                field="description",
+                value=description,
+                doc_date=doc_date,
+                source_rank=rank,
+                tie_key=tie,
+            )
+        ]
+        touched = self.field_merge.store.replace_document_claims(
+            self.SOURCE_SYSTEM, document_key, claims
+        )
+        self.field_merge.apply(touched)
+
+    def _stored_description(self, init_id: int) -> str:
+        stored = self.field_merge.writer.read("initiative", init_id, ["description"])
+        return (stored.get("description") or "").strip()
+
     def _record_tracking(
         self,
         *,
@@ -850,6 +1007,7 @@ class ProjectEnrichmentLoader:
         desc_written: Optional[str],
         path: str,
         pj: Dict[str, Any],
+        changed: bool = True,
     ) -> None:
         if not tracking_recorder.has_active_run():
             return
@@ -878,6 +1036,8 @@ class ProjectEnrichmentLoader:
             selected_attributes=selected,
             selection_reason="sigpesq_project_file_enrichment",
         )
+        if not changed:
+            return
         tracking_recorder.record_change(
             source_record_id=sr_id,
             canonical_entity_type="initiative",

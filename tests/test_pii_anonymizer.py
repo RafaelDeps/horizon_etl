@@ -1,6 +1,8 @@
 import hashlib
 import hmac
+import json
 import os
+import re
 
 import pytest
 
@@ -16,6 +18,9 @@ from src.core.logic.pii_anonymizer import (
     is_anonymized_email,
     is_anonymized_phone,
     is_anonymized_text,
+    key_fingerprint,
+    keyed_export_hash,
+    scan_text,
     scrub_emails_from_text,
     scrub_phones_from_text,
     scrub_pii_deep,
@@ -621,3 +626,131 @@ def test_different_key_produces_different_tokens(monkeypatch):
     second = anonymize_cpf("12345678901")
     assert first != second
     assert second.startswith("LGPD-")
+
+
+# --- Spec 029: CPF in text, scan_text, keyed export hash, key fingerprint ---
+
+_FAKE_CPF = "000.000.000-00"
+
+
+def test_scrub_pii_text_replaces_formatted_cpf_only():
+    hex_hash = "a" * 20 + "12345678901" + "b" * 1
+    text = f"CPF {_FAKE_CPF} ok; hash {hex_hash}; bare 12345678901."
+
+    result = scrub_pii_text(text)
+
+    assert _FAKE_CPF not in result
+    assert "LGPD-" in result
+    assert hex_hash in result
+    assert "bare 12345678901." in result
+
+
+def test_scan_text_replaces_email_phone_and_cpf_with_counts():
+    text = f"mail person@example.test fone +55 00 00000-0000 cpf {_FAKE_CPF}"
+
+    cleaned, counts = scan_text(text)
+
+    assert "person@example.test" not in cleaned
+    assert "+55 00 00000-0000" not in cleaned
+    assert _FAKE_CPF not in cleaned
+    assert set(counts) == {"email", "phone", "cpf", "known_field"}
+    assert counts["email"] == 1
+    assert counts["phone"] == 1
+    assert counts["cpf"] == 1
+    assert counts["known_field"] == 0
+
+
+def test_scan_text_tokenizes_known_json_fields_string_and_number():
+    text = (
+        '{"OrientadoEmail": "not-an-address", "OrientadorEmail": "x", '
+        '"email": "bad", "contact_email": "bad2", '
+        '"OrientadoCpf": 12345678901, "OrientadorCpf": "12345678901", '
+        '"identification_id": "abc", "telefone": "12 3456", "celular": 99000000000}'
+    )
+
+    cleaned, counts = scan_text(text)
+    data = json.loads(cleaned)
+
+    assert counts["known_field"] == 9
+    assert data["OrientadoEmail"].endswith("@anon.lgpd")
+    assert data["email"].endswith("@anon.lgpd")
+    assert data["contact_email"].endswith("@anon.lgpd")
+    assert data["OrientadoCpf"].startswith("LGPD-")
+    assert data["identification_id"].startswith("LGPD-")
+    assert data["telefone"].startswith("LGPD-PHONE-")
+    assert data["celular"].startswith("LGPD-PHONE-")
+
+
+def test_scan_text_leaves_tokens_and_null_alone():
+    text = (
+        '{"email": "abcdef012345@anon.lgpd", "OrientadoCpf": "LGPD-0123456789abcdef",'
+        ' "telefone": "LGPD-PHONE-0123456789abcdef", "fax": null, "phone": null}'
+    )
+
+    cleaned, counts = scan_text(text)
+
+    assert cleaned == text
+    assert sum(counts.values()) == 0
+
+
+def test_scan_text_is_idempotent():
+    text = f'{{"email": "bad", "note": "person@example.test {_FAKE_CPF}"}}'
+
+    once, _ = scan_text(text)
+    twice, counts = scan_text(once)
+
+    assert twice == once
+    assert sum(counts.values()) == 0
+
+
+def test_scan_text_never_alters_hash_values():
+    text = (
+        '{"payload_hash": "12345678901234567890123456789012", '
+        '"value_hash": "00000000000000000000000000000000", '
+        '"content_hash": "11111111111111111111111111111111"}'
+    )
+
+    cleaned, counts = scan_text(text)
+
+    assert cleaned == text
+    assert sum(counts.values()) == 0
+
+
+def test_scan_text_keeps_at_sign_in_journal_names():
+    text = "J. Chem. @ 2020"
+
+    zero = {"email": 0, "phone": 0, "cpf": 0, "known_field": 0}
+    assert scan_text(text) == (text, zero)
+
+
+def test_keyed_export_hash_is_deterministic_and_keyed(monkeypatch):
+    first = keyed_export_hash("abc")
+
+    assert first == keyed_export_hash("abc")
+    assert re.fullmatch(r"[0-9a-f]{64}", first)
+    assert first != "abc"
+    assert first != hashlib.sha256(b"abc").hexdigest()
+
+    monkeypatch.setenv("HORIZON_PII_HMAC_KEY", "another-key-for-the-test")
+    assert keyed_export_hash("abc") != first
+
+
+def test_key_fingerprint_is_short_stable_and_keyed(monkeypatch):
+    first = key_fingerprint()
+
+    assert re.fullmatch(r"[0-9a-f]{16}", first)
+    assert first == key_fingerprint()
+    assert TEST_KEY not in first
+
+    monkeypatch.setenv("HORIZON_PII_HMAC_KEY", "another-key-for-the-test")
+    assert key_fingerprint() != first
+
+
+def test_scan_text_leaves_short_numbers_in_known_fields_alone():
+    """Our own reports hold counts under keys such as "email"."""
+    text = '{"file_bytes_hits": {"email": 0, "phone": 2, "cpf": 1}, "email": 12}'
+
+    cleaned, counts = scan_text(text)
+
+    assert cleaned == text
+    assert sum(counts.values()) == 0

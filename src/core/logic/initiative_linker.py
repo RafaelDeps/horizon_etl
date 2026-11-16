@@ -70,7 +70,11 @@ class InitiativeLinker:
                 members_to_sync.append((p, "Student", start_date))
 
         # 2. Delegate synchronization to TeamSynchronizer
-        self.team_synchronizer.synchronize_members(team.id, members_to_sync)
+        # The row's tracking key names the document (spec 020): membership
+        # becomes the union of what each document says about the team.
+        self.team_synchronizer.synchronize_members(
+            team.id, members_to_sync, document_key=project_data.get("_document_key")
+        )
 
         # 3. Link team to initiative
         try:
@@ -111,7 +115,9 @@ class InitiativeLinker:
                 members_to_add.append((p, "Student", start_date))
 
         # 3. Add members (Additive)
-        self.team_synchronizer.add_members(team.id, members_to_add)
+        self.team_synchronizer.add_members(
+            team.id, members_to_add, document_key=project_data.get("_document_key")
+        )
 
         # 4. Link team to initiative (Ensure assigned)
         try:

@@ -119,7 +119,7 @@ def test_sigpesq_adapter_logs_http_429_during_login(tmp_path):
 
     log_message = log_error.call_args.args[0]
     assert "HTTP 429" in log_message
-    assert "rate limiting" in log_message
+    assert "rate limiting" in log_message.lower()
     assert "Login.aspx" in log_message
 
 

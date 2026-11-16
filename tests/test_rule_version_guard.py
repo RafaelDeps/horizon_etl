@@ -1,0 +1,119 @@
+"""Spec 020 (FR-024): a database built under other rules is rebuilt once."""
+
+import sqlite3
+
+from src.core.logic.horizon_identity import HORIZON_RULE_VERSION
+from src.flows.maintenance.horizon_ids import rule_version_requires_reset
+from tests.test_horizon_id_assigner import _assign, _build
+
+
+def test_no_database_needs_no_reset(tmp_path):
+    assert rule_version_requires_reset(str(tmp_path / "missing.db")) is False
+
+
+def test_empty_database_needs_no_reset(tmp_path):
+    db = tmp_path / "empty.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE persons (id INTEGER PRIMARY KEY, name TEXT)")
+    con.close()
+    assert rule_version_requires_reset(str(db)) is False
+
+
+def test_same_version_needs_no_reset(tmp_path):
+    db = tmp_path / "same.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    assert rule_version_requires_reset(str(db)) is False
+
+
+def test_other_or_missing_version_needs_a_reset(tmp_path):
+    db = tmp_path / "other.db"
+    _build(db, order_seed=1)
+    assert rule_version_requires_reset(str(db)) is True  # never assigned
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute(
+        "UPDATE horizon_meta SET value = ? WHERE key = 'rule_version'",
+        (str(HORIZON_RULE_VERSION + 1),),
+    )
+    con.commit()
+    con.close()
+    assert rule_version_requires_reset(str(db)) is True
+
+
+def test_a_database_written_before_spec_033_needs_a_reset(tmp_path):
+    # Spec 033: version 2 took any text of the DOI field for a DOI, so its
+    # articles may be merged under a Scopus link or an ISSN.
+    db = tmp_path / "v2.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE horizon_meta SET value = '2' WHERE key = 'rule_version'")
+    con.commit()
+    con.close()
+    assert HORIZON_RULE_VERSION >= 3
+    assert rule_version_requires_reset(str(db)) is True
+
+
+def test_a_database_written_before_spec_034_needs_a_reset(tmp_path):
+    # Spec 034: version 3 took two professional activities of a researcher at
+    # the same institution and start year for one, so its rows are collapsed.
+    db = tmp_path / "v3.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE horizon_meta SET value = '3' WHERE key = 'rule_version'")
+    con.commit()
+    con.close()
+    assert HORIZON_RULE_VERSION >= 4
+    assert rule_version_requires_reset(str(db)) is True
+
+
+def test_a_database_written_before_spec_035_needs_a_reset(tmp_path):
+    # Spec 035: version 4 took every advisorship item with the title of a
+    # stored advisorship for that advisorship, whatever the student, so its
+    # advisorships of different students are merged.
+    db = tmp_path / "v4.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE horizon_meta SET value = '4' WHERE key = 'rule_version'")
+    con.commit()
+    con.close()
+    assert HORIZON_RULE_VERSION >= 5
+    assert rule_version_requires_reset(str(db)) is True
+
+
+def test_a_database_written_before_spec_036_needs_a_reset(tmp_path):
+    # Spec 036: version 5 stored the student of a Lattes advisorship under the
+    # whole text of the curriculum field, so persons are named with the title
+    # of a work, an academic title or a link.
+    db = tmp_path / "v5.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE horizon_meta SET value = '5' WHERE key = 'rule_version'")
+    con.commit()
+    con.close()
+    assert HORIZON_RULE_VERSION >= 6
+    assert rule_version_requires_reset(str(db)) is True
+
+
+def test_weekly_resets_once_before_the_phases(
+    tmp_path, monkeypatch, _no_rule_version_reset
+):
+    import src.flows.maintenance.horizon_ids as horizon_ids
+
+    real_guard = _no_rule_version_reset  # the suite stubs it in run_weekly
+    db = tmp_path / "old.db"
+    _build(db, order_seed=1)  # ingested rows, no rule version recorded
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db}")
+    resets = []
+    monkeypatch.setattr(horizon_ids, "reset_database", resets.append)
+
+    real_guard()
+    assert resets == [f"sqlite:///{db}"]
+
+    _assign(db)  # now recorded with the code's version
+    real_guard()
+    assert resets == [f"sqlite:///{db}"]

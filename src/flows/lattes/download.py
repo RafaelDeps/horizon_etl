@@ -1,17 +1,31 @@
+import contextlib
 import os
 import re
 import shutil
-import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from platform import system
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 from prefect import flow, task
 
+from src.adapters.sources.raw_store import JsonDownloadManifest
+from src.core.logic.access_check_retry import (
+    AccessCheckRetrySettings,
+    access_check_retry_settings,
+)
 from src.core.logic.lattes_generators import LattesConfigGenerator, LattesListGenerator
+from src.core.logic.portal_stop import PortalStop, portal_stop_settings
+from src.core.logic.raw_rotation import (
+    counts_line,
+    download_counts,
+    plan_downloads,
+    refresh_settings,
+)
+from src.core.ports.raw_store import IDownloadManifest
+from src.flows.portal_stops import record_access_check_retry, record_portal_stop
 from src.notifications.telegram import telegram_flow_state_handlers
 
 LATTES_ID_RE = re.compile(r"(?<!\d)\d{16}(?!\d)")
@@ -32,6 +46,12 @@ LattesDownloader = Callable[[str, str], None]
 
 class ScriptLattesRuntimeError(RuntimeError):
     """Raised when the local browser runtime cannot support scriptLattes."""
+
+
+class AccessCheckPage(ScriptLattesRuntimeError):
+    """The portal served its access check page instead of the curriculum.
+    Told apart from the other failures so it can be asked again later in the
+    same run (spec 025, research R1)."""
 
 
 # from research_domain_lib.repository.researcher_repository import ResearcherRepository
@@ -128,43 +148,6 @@ def _check_playwright_chromium() -> bool:
         return True
     except Exception:
         return False
-
-
-def _read_command_version(command: List[str]) -> str:
-    try:
-        result = subprocess.run(command, capture_output=True, check=False, text=True)
-    except OSError:
-        return ""
-
-    return "\n".join(part for part in [result.stdout, result.stderr] if part)
-
-
-def _major_version(version_output: str) -> str:
-    match = re.search(r"\b(\d{2,3})\.\d+", version_output)
-    return match.group(1) if match else ""
-
-
-def _candidate_chrome_binaries(chrome_binary: str | None = None) -> List[str]:
-    candidates = []
-    if chrome_binary:
-        candidates.append(chrome_binary)
-
-    env_binary = os.environ.get("CHROME_BINARY")
-    if env_binary and env_binary not in candidates:
-        candidates.append(env_binary)
-
-    for command in [
-        "google-chrome",
-        "google-chrome-stable",
-        "chrome",
-        "chromium",
-        "chromium-browser",
-    ]:
-        path = shutil.which(command)
-        if path and path not in candidates:
-            candidates.append(path)
-
-    return candidates
 
 
 def validate_script_lattes_runtime(
@@ -272,6 +255,24 @@ def _script_lattes_downloader(lattes_id: str, cache_dir: str) -> None:
     baixa_lattes.baixaCVLattes(lattes_id, cache_dir)
 
 
+# A curriculum page names its owner in the title. When the portal limits
+# access it serves its reCAPTCHA page instead (about 18 KB, no such title);
+# scriptLattes then builds a "Nome-nao-identificado" CV with no items. Such a
+# page is a failed download, never a cached curriculum (spec 023).
+_CURRICULUM_TITLE = re.compile(
+    rb"<title>\s*Curr\S*culo do Sistema de Curr\S*culos Lattes \("
+)
+
+
+def is_curriculum_page(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+    except OSError:
+        return False
+    return bool(_CURRICULUM_TITLE.search(head))
+
+
 def _download_lattes_to_cache(
     lattes_id: str, cache_dir: str, downloader: LattesDownloader
 ) -> None:
@@ -282,6 +283,39 @@ def _download_lattes_to_cache(
         raise ScriptLattesRuntimeError(
             f"scriptLattes did not create the cache file for Lattes ID {lattes_id}"
         )
+    if not is_curriculum_page(cached_file):
+        cached_file.unlink()  # tried again on the next run (spec 023)
+        raise AccessCheckPage(
+            f"The portal served no curriculum for Lattes ID {lattes_id} "
+            "(access check page)"
+        )
+
+
+def _note_access_check(
+    exc: BaseException, lattes_id: str, access_checked: Optional[List[str]]
+) -> None:
+    if access_checked is not None and isinstance(exc, AccessCheckPage):
+        access_checked.append(lattes_id)
+
+
+class _NotTried(Exception):
+    """Not requested: the portal was given up in this run (spec 024)."""
+
+
+def _guarded(stop: Optional[PortalStop], task: Callable[..., None], *args) -> None:
+    """Runs one curriculum request under the run's stop: none starts once the
+    portal is given up, and every outcome counts towards it (a failure or the
+    access check page is a failure)."""
+    if stop is not None and stop.should_stop():
+        raise _NotTried()
+    try:
+        task(*args)
+    except Exception:
+        if stop is not None:
+            stop.record(False)
+        raise
+    if stop is not None:
+        stop.record(True)
 
 
 def prefetch_lattes_cache(
@@ -289,6 +323,9 @@ def prefetch_lattes_cache(
     cache_dir: str,
     max_workers: int = DEFAULT_LATTES_PREFETCH_WORKERS,
     downloader: LattesDownloader | None = None,
+    stop: Optional[PortalStop] = None,
+    not_tried: Optional[List[str]] = None,
+    access_checked: Optional[List[str]] = None,
 ) -> List[str]:
     if max_workers < 1:
         raise ValueError("max_workers must be >= 1")
@@ -320,27 +357,45 @@ def prefetch_lattes_cache(
         f"{cache_dir} with {worker_count} worker(s)."
     )
 
+    skipped: List[str] = [] if not_tried is None else not_tried
     if worker_count == 1:
         failed_ids = []
         for lattes_id in missing_ids:
             try:
-                _download_lattes_to_cache(lattes_id, str(cache_path), downloader)
+                _guarded(
+                    stop,
+                    _download_lattes_to_cache,
+                    lattes_id,
+                    str(cache_path),
+                    downloader,
+                )
+            except _NotTried:
+                skipped.append(lattes_id)
             except Exception as exc:
                 logger.warning(
                     f"Failed to download Lattes {lattes_id}, skipping: {exc}"
                 )
                 failed_ids.append(lattes_id)
+                _note_access_check(exc, lattes_id, access_checked)
         if failed_ids:
             logger.warning(
                 f"Skipped {len(failed_ids)} curricula due to download errors: {failed_ids}"
             )
-        return [lid for lid in missing_ids if lid not in failed_ids]
+        _log_not_tried(skipped)
+        return [
+            lid for lid in missing_ids if lid not in failed_ids and lid not in skipped
+        ]
 
     failed_ids = []
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(
-                _download_lattes_to_cache, lattes_id, str(cache_path), downloader
+                _guarded,
+                stop,
+                _download_lattes_to_cache,
+                lattes_id,
+                str(cache_path),
+                downloader,
             ): lattes_id
             for lattes_id in missing_ids
         }
@@ -348,18 +403,260 @@ def prefetch_lattes_cache(
             lattes_id = futures[future]
             try:
                 future.result()
+            except _NotTried:
+                skipped.append(lattes_id)
             except Exception as exc:
                 logger.warning(
                     f"Failed to download Lattes {lattes_id}, skipping: {exc}"
                 )
                 failed_ids.append(lattes_id)
+                _note_access_check(exc, lattes_id, access_checked)
 
     if failed_ids:
         logger.warning(
             f"Skipped {len(failed_ids)} curricula due to download errors: {failed_ids}"
         )
+    _log_not_tried(skipped)
+    return [lid for lid in missing_ids if lid not in failed_ids and lid not in skipped]
 
-    return [lid for lid in missing_ids if lid not in failed_ids]
+
+def _log_not_tried(ids: List[str]) -> None:
+    if ids:
+        logger.info(
+            f"Not requested {len(ids)} curricula: the Lattes portal was given up "
+            "in this run; they are tried first in the next one."
+        )
+
+
+def refresh_lattes_cache(
+    lattes_ids: List[str],
+    cache_dir: str,
+    max_workers: int = DEFAULT_LATTES_PREFETCH_WORKERS,
+    downloader: LattesDownloader | None = None,
+    stop: Optional[PortalStop] = None,
+    access_checked: Optional[List[str]] = None,
+) -> Tuple[List[str], List[str], List[str]]:
+    """Downloads cached curricula again (spec 023). Each download goes to an
+    empty folder under ``cache/.refresh/``; the cached file is replaced only
+    when the new one arrived, so a failed refresh keeps the previous copy
+    (constitution, raw inputs rule). Returns (refreshed, failed, not_tried):
+    the last ones were not requested because the portal was given up."""
+    if not lattes_ids:
+        return [], [], []
+    if max_workers < 1:
+        raise ValueError("max_workers must be >= 1")
+    if downloader is None:
+        patch_script_lattes_runtime()
+        downloader = _script_lattes_downloader
+    cache_path = Path(cache_dir)
+    work = cache_path / ".refresh" / time.strftime("%Y%m%dT%H%M%S")
+    work.mkdir(parents=True, exist_ok=True)
+
+    def refresh_one(lattes_id: str) -> None:
+        folder = work / lattes_id
+        folder.mkdir(parents=True, exist_ok=True)
+        downloader(lattes_id, str(folder))
+        fresh = folder / lattes_id
+        if not fresh.exists():
+            raise ScriptLattesRuntimeError(
+                f"scriptLattes did not create the file for Lattes ID {lattes_id}"
+            )
+        if not is_curriculum_page(fresh):
+            # The cached copy stays: the portal's access check page is not a
+            # newer curriculum.
+            raise AccessCheckPage(
+                f"The portal served no curriculum for Lattes ID {lattes_id} "
+                "(access check page)"
+            )
+        os.replace(fresh, cache_path / lattes_id)
+
+    refreshed, failed, not_tried = [], [], []
+    try:
+        with ThreadPoolExecutor(
+            max_workers=min(max_workers, len(lattes_ids))
+        ) as executor:
+            futures = {
+                executor.submit(_guarded, stop, refresh_one, lid): lid
+                for lid in lattes_ids
+            }
+            for future in as_completed(futures):
+                lattes_id = futures[future]
+                try:
+                    future.result()
+                    refreshed.append(lattes_id)
+                except _NotTried:
+                    not_tried.append(lattes_id)
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to refresh Lattes {lattes_id}; keeping the cached "
+                        f"copy: {exc}"
+                    )
+                    failed.append(lattes_id)
+                    _note_access_check(exc, lattes_id, access_checked)
+    finally:
+        shutil.rmtree(cache_path / ".refresh", ignore_errors=True)
+    _log_not_tried(not_tried)
+    return sorted(refreshed), sorted(failed), sorted(not_tried)
+
+
+def rotate_lattes_downloads(
+    lattes_ids: List[str],
+    cache_dir: str,
+    manifest: IDownloadManifest,
+    share: float,
+    full: bool,
+    max_workers: int = DEFAULT_LATTES_PREFETCH_WORKERS,
+    downloader: LattesDownloader | None = None,
+    retry: Optional[AccessCheckRetrySettings] = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Dict[str, object]:
+    """Spec 023: downloads the curricula missing from the cache plus the share
+    of cached ones downloaded longest ago, and records the dates of the
+    successful downloads in the manifest. Spec 025: the ones that got the
+    access check page are asked again once, after a pause. Returns the
+    download counts."""
+    plan = plan_downloads(lattes_ids, manifest.dates(), share=share, full=full)
+    if retry is None:
+        retry = access_check_retry_settings()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    cache_path = Path(cache_dir)
+    failed: List[str] = []
+    not_tried: List[str] = []
+    checked: List[str] = []
+    # Spec 024: one stop for the new and the refreshed curricula (same portal);
+    # after 5 failures or access check pages in a row no request starts.
+    stop = portal_stop_settings().for_source("lattes")
+    if stop is not None:
+        stop.start()
+    if plan.new:
+        prefetch_lattes_cache(
+            plan.new,
+            cache_dir,
+            max_workers=max_workers,
+            downloader=downloader,
+            stop=stop,
+            not_tried=not_tried,
+            access_checked=checked,
+        )
+        for lattes_id in plan.new:
+            if (cache_path / lattes_id).exists():
+                manifest.record(lattes_id, now)
+            elif lattes_id not in not_tried:
+                failed.append(lattes_id)
+    if plan.refresh:
+        refreshed, refresh_failed, refresh_not_tried = refresh_lattes_cache(
+            plan.refresh,
+            cache_dir,
+            max_workers=max_workers,
+            downloader=downloader,
+            stop=stop,
+            access_checked=checked,
+        )
+        for lattes_id in refreshed:
+            manifest.record(lattes_id, now)
+        failed.extend(refresh_failed)
+        not_tried.extend(refresh_not_tried)
+    second = None
+    if checked and retry.enabled and not (stop is not None and stop.stopped):
+        second = _retry_access_checked(
+            plan, checked, cache_dir, manifest, now, retry, downloader, stop, sleep
+        )
+        failed = [i for i in failed if i not in second["done"]]
+        not_tried.extend(second["not_tried"])
+    manifest.save()
+    counts = download_counts(plan, failed, not_tried)
+    if second is not None:
+        counts["retried"] = len(second["ids"])
+        counts["recovered"] = len(second["recovered"])
+        counts["retried_ids"] = second["ids"]
+    logger.info(counts_line("lattes", counts))
+    if second is not None:
+        record_access_check_retry(
+            "lattes",
+            {
+                "source": "lattes",
+                "pause_s": retry.pause_s,
+                "workers": retry.workers,
+                "retried": counts["retried"],
+                "recovered": counts["recovered"],
+                "not_tried": len(second["not_tried"]),
+                "elapsed_s": second["elapsed_s"],
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+        )
+    if stop is not None and stop.stopped:
+        record_portal_stop("lattes", stop, counts)
+    return counts
+
+
+def _retry_access_checked(
+    plan,
+    checked: List[str],
+    cache_dir: str,
+    manifest: IDownloadManifest,
+    now: str,
+    retry: AccessCheckRetrySettings,
+    downloader: LattesDownloader | None,
+    stop: Optional[PortalStop],
+    sleep: Callable[[float], None],
+) -> Dict[str, object]:
+    """Spec 025: one more request, after the pause, for each curriculum that
+    got the access check page in the first pass; same caching rules and same
+    stop, whose count of failures in a row carries over (research R2, R4).
+    Returns the ids retried, the ones recovered, the ones not tried (stop)
+    and the ones no longer failed (recovered or not tried)."""
+    rejected = set(checked)
+    new_ids = [i for i in dict.fromkeys(plan.new) if i in rejected]
+    refresh_ids = [i for i in dict.fromkeys(plan.refresh) if i in rejected]
+    ids = new_ids + refresh_ids
+    logger.info(
+        f"Retrying {len(ids)} Lattes curricula that got the access check page, "
+        f"after {retry.pause_s / 60:g} min, with {retry.workers} worker(s): {ids}"
+    )
+    started = time.monotonic()
+    if stop is not None:
+        stop.wait(retry.pause_s)
+    else:
+        sleep(retry.pause_s)
+    cache_path = Path(cache_dir)
+    recovered: List[str] = []
+    not_tried: List[str] = []
+    if new_ids:
+        prefetch_lattes_cache(
+            new_ids,
+            cache_dir,
+            max_workers=retry.workers,
+            downloader=downloader,
+            stop=stop,
+            not_tried=not_tried,
+        )
+        for lattes_id in new_ids:
+            if (cache_path / lattes_id).exists():
+                manifest.record(lattes_id, now)
+                recovered.append(lattes_id)
+    if refresh_ids:
+        refreshed, _failed, refresh_not_tried = refresh_lattes_cache(
+            refresh_ids,
+            cache_dir,
+            max_workers=retry.workers,
+            downloader=downloader,
+            stop=stop,
+        )
+        for lattes_id in refreshed:
+            manifest.record(lattes_id, now)
+        recovered.extend(refreshed)
+        not_tried.extend(refresh_not_tried)
+    logger.info(
+        f"Second try for the access check page: {len(recovered)} of "
+        f"{len(ids)} recovered"
+    )
+    return {
+        "ids": sorted(ids),
+        "recovered": sorted(recovered),
+        "not_tried": sorted(not_tried),
+        "done": set(recovered) | set(not_tried),
+        "elapsed_s": round(time.monotonic() - started, 1),
+    }
 
 
 @task
@@ -539,8 +836,12 @@ def run_script_lattes_real(config_path: str):
 
         patch_script_lattes_runtime()
         logger.info(f"Starting real scriptLattes execution with config: {config_path}")
-        # Run with somente_json=True since we are an ETL pipeline
-        executar_scriptLattes(config_path, somente_json=True)
+        # Run with somente_json=True since we are an ETL pipeline.
+        # Spec 029: the library prints curriculum lines (phones, documents)
+        # on stdout and the public run log keeps them; drop them. stderr and
+        # the loguru messages are not touched.
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            executar_scriptLattes(config_path, somente_json=True)
         logger.info("Real scriptLattes execution finished.")
     except ImportError:
         logger.error("scriptLattes library not found. Please install it.")
@@ -582,9 +883,14 @@ def download_lattes_flow():
 
     effective_list_path = list_path
     if is_lattes_prefetch_enabled():
-        prefetch_lattes_cache(
+        # Spec 023: missing curricula plus a rotating share of cached ones.
+        share, full = refresh_settings()
+        rotate_lattes_downloads(
             lattes_ids,
             cache_dir,
+            JsonDownloadManifest(cache_dir=cache_dir),  # data/raw/lattes/
+            share,
+            full,
             max_workers=get_lattes_prefetch_workers(),
         )
         cache_path = Path(cache_dir)

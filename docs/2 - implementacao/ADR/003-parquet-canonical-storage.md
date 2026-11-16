@@ -1,6 +1,6 @@
 # ADR 003: Parquet como Formato de Armazenamento/Consumo dos Exports Canônicos
 
-* Status: Accepted (amended 2026-09-18 — see Amendment below)
+* Status: Accepted (amended 2026-09-18 and 2026-11-14 — see Amendments below)
 * Deciders: Claude, Paulo
 * Date: 2026-07-20
 
@@ -12,6 +12,22 @@
 > dashboard) remains in force: the dashboard keeps reading its own committed
 > copies in `src/data`, not the ETL archive. The conversion capability remains
 > available on demand via `python -m src.scripts.export_parquet`.
+
+> **Amendment (2026-11-14, feature 038-parquet-export-archive)**: the Parquet
+> layout is published again, as its own archive, `data/exports/exports_parquet.zip`,
+> next to `exports_canonical.zip` and committed with it by the weekly workflow.
+> The dashboard can no longer keep the JSON copies in git (two exports are over
+> GitHub's 100 MB per-file limit). The weekly phase `parquet_archive` builds it
+> from the top-level members of the `exports_canonical.zip` of the same run, so
+> every value already went through the safety net of spec 029; it copies that
+> archive's manifest and passes the same publishing gate. The column rule
+> changed: a column is written as JSON text when any value is nested or when its
+> values are of more than one kind, and then every value is encoded, so the
+> reader gets each value back with its original kind (the first-value rule
+> failed on `attribute_assertions_canonical.value_json`). Whole numbers are
+> 64-bit integers. The layout and the `.cols.json` sidecar are unchanged. Code:
+> `src/core/logic/parquet_layout.py`; the manual command
+> `python -m src.scripts.export_parquet` uses the same rule.
 
 Technical Story: Os exports canônicos em JSON somam ~255 MB (44 arquivos), e o dashboard irmão (`horizon_dashboard`) versiona cópias desses JSON em `src/data` (~322 MB no git). O repositório e o build ficaram pesados. Avaliou-se migrar o armazenamento/consumo para Parquet.
 

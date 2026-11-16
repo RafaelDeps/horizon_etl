@@ -4,8 +4,10 @@ from dotenv import load_dotenv
 from prefect import flow, get_run_logger, task
 
 from src.adapters.sources.sigpesq.adapter import SigPesqAdapter
+from src.core.logic.field_merge import sigpesq_source
 from src.core.logic.project_loader import ProjectLoader
 from src.core.logic.strategies.sigpesq_projects import SigPesqProjectMappingStrategy
+from src.flows.document_phase import document_phase, finish_report_listing
 from src.notifications.telegram import telegram_flow_state_handlers
 from src.tracking.recorder import tracking_recorder
 
@@ -37,16 +39,26 @@ def persist_projects():
     latest_file = max(files, key=os.path.getmtime)
     logger.info(f"Loading Projects from {latest_file}")
 
-    loader = ProjectLoader(mapping_strategy=SigPesqProjectMappingStrategy())
-    # `sigpesq_research_projects` não é nome livre: é a chave que
-    # ProjectEnrichmentLoader._load_code_index consulta para saber quais
-    # códigos de projeto foram aprovados pela diretoria. Sem esta run, aquele
-    # índice sai vazio e o filtro de aprovação do enriquecimento não funciona.
-    with tracking_recorder.run_context(
-        source_system="sigpesq_research_projects",
-        flow_name="sigpesq_projects",
-    ):
-        loader.process_file(latest_file)
+    # Each report row is one source document (spec 021); the phase is opened
+    # before the loader so its controllers bind to the shared connection.
+    with document_phase("sigpesq_project") as skip:
+        loader = ProjectLoader(mapping_strategy=SigPesqProjectMappingStrategy())
+        loader.document_skip = skip
+        # Branch 030: an undated SigPesq row; the highest Id wins a tie.
+        loader.claim_source_for_row = lambda row: sigpesq_source(row.get("Id"))
+        skip.on_rollback = loader.reset_caches
+        # `sigpesq_research_projects` não é nome livre: é a chave que
+        # ProjectEnrichmentLoader._load_code_index consulta para saber quais
+        # códigos de projeto foram aprovados pela diretoria. Sem esta run, aquele
+        # índice sai vazio e o filtro de aprovação do enriquecimento não funciona.
+        with tracking_recorder.run_context(
+            source_system="sigpesq_research_projects",
+            flow_name="sigpesq_projects",
+        ):
+            loader.process_file(latest_file)
+            finish_report_listing(skip, loader)
+    loader.team_synchronizer.log_lookup_summary("sigpesq_projects")
+    loader.person_matcher.log_match_summary("sigpesq_projects")
 
 
 @flow(name="Ingest SigPesq Projects", **telegram_flow_state_handlers())

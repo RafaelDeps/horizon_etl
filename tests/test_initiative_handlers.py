@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 from research_domain.domain.entities import Advisorship
@@ -382,7 +383,9 @@ def test_ensure_fellowship_updates_stale_value_on_existing_fellowship(
     )
     assert second is first
     assert second.value == 800.0
-    MockFellowshipController.return_value.update.assert_called_once()
+    # One update writes the sponsor of the new row (branch 036), the other
+    # the changed value.
+    assert MockFellowshipController.return_value.update.call_count == 2
 
 
 @patch("src.core.logic.initiative_handlers.FellowshipController")
@@ -424,3 +427,270 @@ def test_advisorship_handler_sets_cancelled_on_created_advisorship(
     assert created.cancelled is True
     assert created.cancellation_date is None
     MockAdvisorshipController.return_value.create.assert_called_once_with(created)
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_unchanged_advisorship_member_is_kept_not_reinserted(
+    _MockAdvisorshipController,
+    MockFellowshipController,
+):
+    """Spec 020 (FR-022): the same person, role and day keeps its row."""
+    from datetime import date
+
+    from research_domain.domain.entities.advisorship import AdvisorshipMember
+
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    person = MagicMock(id=42)
+    advisorship = Advisorship(name="Orientacao")
+    kept = AdvisorshipMember(
+        person_id=42, role_name="Student", start_date=date(2019, 1, 1)
+    )
+    advisorship.members = [kept]
+
+    with patch.object(handler, "_coerce_to_person", return_value=person):
+        handler._sync_advisorship_member(
+            advisorship,
+            person=person,
+            role_name="Student",
+            start_date=datetime(2019, 1, 1),
+        )
+        assert advisorship.members == [kept]
+
+        # A different start day still replaces the member.
+        handler._sync_advisorship_member(
+            advisorship,
+            person=person,
+            role_name="Student",
+            start_date=datetime(2020, 1, 1),
+        )
+    assert kept not in advisorship.members
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_deferred_members_are_written_once_with_the_last_value(
+    MockAdvisorshipController,
+    MockFellowshipController,
+):
+    """Spec 020 (FR-022): two rows on one existing advisorship in a phase."""
+    from datetime import date
+
+    from research_domain.domain.entities.advisorship import AdvisorshipMember
+
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    handler.defer_members = True
+    person = MagicMock(id=42)
+    advisorship = Advisorship(name="Orientacao")
+    advisorship.id = 136
+    kept = AdvisorshipMember(
+        person_id=42, role_name="Student", start_date=date(2015, 1, 1)
+    )
+    advisorship.members = [kept]
+
+    with patch.object(handler, "_coerce_to_person", return_value=person):
+        for year in (2017, 2015):  # the same work listed twice in one CV
+            handler._sync_advisorship_member(
+                advisorship,
+                person=person,
+                role_name="Student",
+                start_date=datetime(year, 1, 1),
+            )
+        assert advisorship.members == [kept]  # nothing written yet
+        assert handler.flush_members() == 1
+
+    assert advisorship.members == [kept]  # the last value equals the stored one
+    assert handler.defer_members is True
+
+
+# --- Spec 035: a matched advisorship keeps its stored name ------------------
+
+
+def _update_name(handler, stored_name, project_data):
+    """The name passed to update_initiative when an item is written over a
+    matched advisorship named ``stored_name``."""
+    existing = Advisorship(name=stored_name, status="active")
+    existing.id = 41
+    handler.create_or_update(
+        project_data=project_data,
+        existing_initiative=existing,
+        initiative_type_name="Advisorship",
+        initiative_type_id=7,
+        organization_id=9,
+    )
+    return handler.initiative_controller.update_initiative.call_args.kwargs["name"]
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_matched_advisorship_keeps_its_distinct_name(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    # The bare title is held by another row.
+    session = handler.initiative_controller._service._repository._session
+    session.execute.return_value.scalar.return_value = 258
+
+    name = _update_name(
+        handler,
+        "T | Orientacao Ana | 2019",
+        {
+            "title": "T",
+            "status": "active",
+            "student_names": ["Ana Estudante"],
+            "start_date": datetime(2020, 8, 1),
+            "metadata": {"sigpesq_id": 123},
+        },
+    )
+
+    assert name == "T | Orientacao Ana | 2019"
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_matched_advisorship_keeps_its_bare_title(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+
+    name = _update_name(handler, "T", {"title": "T", "status": "active"})
+
+    assert name == "T"
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_matched_advisorship_with_a_new_title_is_renamed_as_before(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    data = {
+        "title": "T",
+        "status": "active",
+        "student_names": ["Ana Estudante"],
+        "start_date": datetime(2020, 8, 1),
+    }
+
+    # The new title is free: the row takes it.
+    assert _update_name(handler, "Old", dict(data)) == "T"
+
+    # The new title is held by another row: the distinct name, as before.
+    session = handler.initiative_controller._service._repository._session
+    session.execute.return_value.scalar.return_value = 258
+    assert (
+        _update_name(handler, "Old", dict(data))
+        == "T | Orientacao Ana Estudante | 2020"
+    )
+
+
+# --- Spec 036: an item whose student text is not a name has no student ---
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_an_item_without_a_student_resolves_to_no_person(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    MockFellowshipController.return_value.get_all.return_value = []
+    person_matcher = MagicMock()
+    handler = AdvisorshipHandler(
+        initiative_controller=MagicMock(),
+        person_matcher=person_matcher,
+        entity_manager=MagicMock(),
+    )
+
+    assert handler._student_person({"student_names": []}) is None
+    assert handler.item_student({"student_names": []}) == (None, "")
+    person_matcher.match_or_create.assert_not_called()
+
+
+# --- Spec 036: a new fellowship is stored with its sponsor ---
+
+
+def _fellowship_handler(MockFellowshipController, stored=(), sponsor_id=3):
+    MockFellowshipController.return_value.get_all.return_value = list(stored)
+    entity_manager = MagicMock()
+    entity_manager.ensure_organization.return_value = sponsor_id
+    handler = AdvisorshipHandler(
+        initiative_controller=MagicMock(),
+        person_matcher=MagicMock(),
+        entity_manager=entity_manager,
+    )
+    return handler, MockFellowshipController.return_value
+
+
+def _fellowship_row(sponsor_name="CNPq"):
+    return {
+        "fellowship_data": {
+            "name": "JTC",
+            "sponsor_name": sponsor_name,
+            "value": 0.0,
+            "description": "Programa: JTC",
+        }
+    }
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_a_new_fellowship_gets_its_sponsor_written_after_it_is_created(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    handler, controller = _fellowship_handler(MockFellowshipController)
+    order = MagicMock()
+    order.attach_mock(controller.create, "create")
+    order.attach_mock(controller.update, "update")
+
+    fellowship = handler._ensure_fellowship(_fellowship_row())
+
+    # The library's constructor clears the sponsor of a new row; the handler
+    # writes it again once the row exists.
+    assert order.mock_calls == [call.create(fellowship), call.update(fellowship)]
+    assert fellowship.sponsor_id == 3
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_a_fellowship_stored_with_its_sponsor_is_found_in_the_next_run(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    stored = SimpleNamespace(
+        id=15,
+        name="JTC",
+        value=0.0,
+        sponsor_id=3,
+        sponsor=SimpleNamespace(name="CNPq"),
+    )
+    handler, controller = _fellowship_handler(MockFellowshipController, [stored])
+
+    assert handler._ensure_fellowship(_fellowship_row()) is stored
+    assert handler._ensure_fellowship(_fellowship_row(" cnpq ")) is stored
+    controller.create.assert_not_called()
+    controller.update.assert_not_called()
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+@patch("src.core.logic.initiative_handlers.AdvisorshipController")
+def test_a_fellowship_without_a_sponsor_is_created_once_and_found_again(
+    _MockAdvisorshipController, MockFellowshipController
+):
+    handler, controller = _fellowship_handler(MockFellowshipController)
+
+    first = handler._ensure_fellowship(_fellowship_row(sponsor_name=""))
+
+    controller.create.assert_called_once_with(first)
+    controller.update.assert_not_called()
+    assert first.sponsor_id is None
+
+    stored = SimpleNamespace(
+        id=19, name="JTC", value=0.0, sponsor_id=None, sponsor=None
+    )
+    later, later_controller = _fellowship_handler(MockFellowshipController, [stored])
+    later_controller.create.reset_mock()
+
+    assert later._ensure_fellowship(_fellowship_row(sponsor_name="")) is stored
+    later_controller.create.assert_not_called()

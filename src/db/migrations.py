@@ -21,6 +21,149 @@ MIGRATIONS: List[Tuple[str, str]] = [
         "0001_initiatives_enrichment_json",
         "ALTER TABLE initiatives ADD COLUMN enrichment_json TEXT",
     ),
+    # Spec 020: ETL-owned identity tables. They sit beside the eo_lib tables and
+    # never alter them, so consumers of the existing schema see no change.
+    (
+        "0002_horizon_ids",
+        "CREATE TABLE IF NOT EXISTS horizon_ids ("
+        " entity_type TEXT NOT NULL,"
+        " entity_id INTEGER NOT NULL,"
+        " horizon_id TEXT NOT NULL UNIQUE,"
+        " rule TEXT NOT NULL,"
+        " natural_key TEXT,"
+        " parent_horizon_id TEXT,"
+        " collision_suffix TEXT,"
+        " assigned_at TEXT NOT NULL,"
+        " UNIQUE (entity_type, entity_id))",
+    ),
+    (
+        "0003_horizon_id_candidates",
+        "CREATE TABLE IF NOT EXISTS horizon_id_candidates ("
+        " horizon_id TEXT NOT NULL,"
+        " candidate_id TEXT NOT NULL,"
+        " PRIMARY KEY (candidate_id, horizon_id))",
+    ),
+    (
+        "0004_horizon_id_aliases",
+        "CREATE TABLE IF NOT EXISTS horizon_id_aliases ("
+        " alias_horizon_id TEXT PRIMARY KEY,"
+        " horizon_id TEXT,"
+        " reason TEXT NOT NULL,"
+        " created_at TEXT NOT NULL,"
+        " updated_at TEXT NOT NULL)",
+    ),
+    (
+        "0005_horizon_merge_log",
+        "CREATE TABLE IF NOT EXISTS horizon_merge_log ("
+        " id INTEGER PRIMARY KEY,"
+        " entity_type TEXT NOT NULL,"
+        " loser_candidate_ids TEXT NOT NULL,"
+        " winner_entity_id INTEGER NOT NULL,"
+        " ingestion_run_id INTEGER,"
+        " merged_at TEXT NOT NULL,"
+        " consumed_at TEXT)",
+    ),
+    (
+        "0006_horizon_meta",
+        "CREATE TABLE IF NOT EXISTS horizon_meta ("
+        " key TEXT PRIMARY KEY,"
+        " value TEXT NOT NULL)",
+    ),
+    (
+        "0007_team_member_contributions",
+        "CREATE TABLE IF NOT EXISTS team_member_contributions ("
+        " team_id INTEGER NOT NULL,"
+        " person_id INTEGER NOT NULL,"
+        " role_id INTEGER NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " start_date TEXT,"
+        " PRIMARY KEY (team_id, person_id, role_id, document_key))",
+    ),
+    # Spec 021: what the ETL knows about each source document (a CV, a CNPq
+    # group page, a SigPesq row, a PJ file), so an unchanged one is skipped.
+    # ETL-owned, beside the eo_lib tables; keys are source-native, never ids.
+    (
+        "0008_source_document_states",
+        "CREATE TABLE IF NOT EXISTS source_document_states ("
+        " source_system TEXT NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " content_hash TEXT,"
+        " dependency_fingerprint TEXT,"
+        " rule_version INTEGER NOT NULL,"
+        " max_person_id INTEGER,"
+        " max_initiative_id INTEGER,"
+        " item_count INTEGER NOT NULL DEFAULT 0,"
+        " last_ingestion_run_id INTEGER,"
+        " processed_at TEXT,"
+        " last_seen_at TEXT NOT NULL,"
+        " status TEXT NOT NULL,"
+        " last_failure TEXT,"
+        " last_failure_at TEXT,"
+        " PRIMARY KEY (source_system, document_key))",
+    ),
+    (
+        "0009_source_document_items",
+        "CREATE TABLE IF NOT EXISTS source_document_items ("
+        " source_system TEXT NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " item_type TEXT NOT NULL,"
+        " item_ref TEXT NOT NULL,"
+        " is_subject INTEGER NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (source_system, document_key, item_type, item_ref))",
+    ),
+    (
+        "0010_source_document_items_index",
+        "CREATE INDEX IF NOT EXISTS ix_source_document_items_item"
+        " ON source_document_items (item_type, item_ref)",
+    ),
+    (
+        "0011_source_document_references",
+        "CREATE TABLE IF NOT EXISTS source_document_references ("
+        " source_system TEXT NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " kind TEXT NOT NULL,"
+        " lookup_key TEXT NOT NULL,"
+        " outcome TEXT NOT NULL,"
+        " score REAL,"
+        " PRIMARY KEY (source_system, document_key, kind, lookup_key))",
+    ),
+    (
+        # Spec 023: the date of the download a document's data comes from.
+        "0012_source_document_downloaded_at",
+        "ALTER TABLE source_document_states ADD COLUMN downloaded_at TEXT",
+    ),
+    (
+        # Branch 030: what each document says about the fields several
+        # documents write, so the winner never depends on processing order.
+        "0013_source_field_claims",
+        "CREATE TABLE IF NOT EXISTS source_field_claims ("
+        " source_system TEXT NOT NULL,"
+        " document_key TEXT NOT NULL,"
+        " entity_type TEXT NOT NULL,"
+        " entity_id INTEGER NOT NULL,"
+        " field TEXT NOT NULL,"
+        " value_json TEXT,"
+        " doc_date TEXT,"
+        " source_rank INTEGER NOT NULL,"
+        " tie_key TEXT NOT NULL,"
+        " PRIMARY KEY (source_system, document_key, entity_type, entity_id, field))",
+    ),
+    (
+        "0014_source_field_claims_index",
+        "CREATE INDEX IF NOT EXISTS ix_source_field_claims_entity"
+        " ON source_field_claims (entity_type, entity_id, field)",
+    ),
+    # Spec 037: LinkedIn profile links read from the maintainer's local list.
+    # ETL-owned, beside the library's person tables and never altering them:
+    # one row per person that has a link, one person per link.
+    (
+        "0015_person_linkedin_links",
+        "CREATE TABLE IF NOT EXISTS person_linkedin_links ("
+        " person_id INTEGER PRIMARY KEY,"
+        " linkedin_url TEXT NOT NULL UNIQUE,"
+        " listed_name TEXT NOT NULL,"
+        " updated_at TEXT NOT NULL)",
+    ),
 ]
 
 

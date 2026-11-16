@@ -1,3 +1,6 @@
+import json
+import re
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -17,7 +20,22 @@ from research_domain.controllers.controllers import (
 from research_domain.domain.entities import Advisorship
 from sqlalchemy import text
 
+from src.core.logic.advisorship_matching import (
+    StoredAdvisorship,
+    base_title,
+    pick_match,
+    widen,
+    year_range,
+)
+from src.core.logic.document_skip import claim, note_collision_resolved
 from src.core.logic.entity_manager import EntityManager
+from src.core.logic.field_merge import MERGED_FIELDS
+from src.core.logic.horizon_identity import (
+    canonical,
+    initiative_reference_key,
+    lattes_advisorship_key,
+    lattes_initiative_key,
+)
 from src.core.logic.initiative_handlers import (
     AdvisorshipHandler,
     StandardProjectHandler,
@@ -73,6 +91,8 @@ class ProjectLoader:
                 self.controller, self.person_matcher, self.entity_manager
             ),
         }
+        # Written by flush_change_log, at the end of each batch or phase.
+        self.handlers[Advisorship].defer_members = True
 
         # Ensure base environment
         self.initiative_type = self.entity_manager.ensure_initiative_type(
@@ -90,6 +110,19 @@ class ProjectLoader:
         self._existing_by_name = None
         self._existing_by_norm_name = None
         self._existing_by_identity = None
+        # Spec 035: the stored advisorships of each title, with their student
+        # and years (see ``_ensure_advisorship_index``).
+        self._advisorship_index = None
+
+        # Net change log (spec 020, FR-022). The same initiative is written by
+        # each CV that lists it, and each CV may carry another description: the
+        # end state is the same every run, but logging every write would record
+        # the same two "changes" forever. The state at first touch is kept and
+        # the log is written once, from the difference between that state and
+        # the final one. Callers that reuse one loader across many files set
+        # ``defer_change_log`` and call ``flush_change_log()`` at the end.
+        self.defer_change_log = False
+        self._pending_changes: Dict[tuple, Dict[str, Any]] = {}
 
     def _ensure_existing_initiatives(self) -> None:
         if self._existing_by_name is not None:
@@ -121,6 +154,153 @@ class ProjectLoader:
         self._existing_by_norm_name = existing_by_norm_name
         self._existing_by_identity = existing_by_identity
 
+    def reset_caches(self) -> None:
+        """After a rolled-back document (spec 021) the in-memory indexes may
+        point at rows that no longer exist; they are rebuilt on next use."""
+        self._existing_initiatives = None
+        self._existing_by_name = None
+        self._existing_by_norm_name = None
+        self._existing_by_identity = None
+        self._advisorship_index = None
+        self.person_matcher.reset_cache()
+        self.team_synchronizer.reset_lookup()
+        self.team_synchronizer.roles_cache.clear()
+        self.team_synchronizer.roles_cache.update(self.entity_manager.ensure_roles())
+
+    # ------------------------------------------------------------------
+    # Spec 035: advisorships of the same title
+    # ------------------------------------------------------------------
+
+    def _ensure_advisorship_index(self) -> Dict[str, list]:
+        """``base title -> [StoredAdvisorship]``, read once from the database
+        and kept up to date by ``_remember_advisorship``. The index, not the
+        database, answers inside a run: the members of an existing advisorship
+        and its dates are written later (deferred members, field merge).
+
+        The years of a stored advisorship cover its stored dates and every
+        date a source document claimed for it (branch 030 keeps them): the
+        field merge stores the dates of the newest document only, so a SigPesq
+        period of 2015-2016 becomes "2016" once a curriculum says so, and the
+        curriculum's 2015 item of the same work would stop matching."""
+        index = getattr(self, "_advisorship_index", None)
+        if index is not None:
+            return index
+        index = {}
+        session = self.controller._service._repository._session
+        rows = session.execute(
+            text(
+                "SELECT i.id, i.name, i.start_date, i.end_date, m.person_id, p.name "
+                "FROM initiatives i JOIN advisorships a ON a.id = i.id "
+                "LEFT JOIN advisorship_members m ON m.advisorship_id = a.id "
+                "AND m.role_name = 'Student' "
+                "LEFT JOIN persons p ON p.id = m.person_id "
+                "ORDER BY i.id, m.id"
+            )
+        ).fetchall()
+        claimed: Dict[Any, Any] = {}
+        for adv_id, value_json in session.execute(
+            text(
+                "SELECT entity_id, value_json FROM source_field_claims "
+                "WHERE entity_type = 'advisorship' "
+                "AND field IN ('start_date', 'end_date')"
+            )
+        ).fetchall():
+            try:
+                value = json.loads(value_json) if value_json else None
+            except (TypeError, ValueError):
+                value = value_json
+            claimed[adv_id] = widen(claimed.get(adv_id), year_range(value, None))
+        seen = set()
+        for adv_id, name, start, end, person_id, person_name in rows:
+            if adv_id in seen:
+                continue
+            seen.add(adv_id)
+            index.setdefault(base_title(name), []).append(
+                StoredAdvisorship(
+                    id=adv_id,
+                    name=name or "",
+                    student_id=person_id,
+                    student_name=normalize_text(person_name),
+                    years=widen(year_range(start, end), claimed.get(adv_id)),
+                )
+            )
+        self._advisorship_index = index
+        return index
+
+    def _item_student(self, project_data: Dict[str, Any]) -> tuple:
+        """(person id or None, normalized name) of the item's student, asked
+        once per item to the advisorship handler."""
+        if "_item_student" not in project_data:
+            handler = self.handlers[Advisorship]
+            project_data["_item_student"] = tuple(handler.item_student(project_data))
+        return project_data["_item_student"]
+
+    def _load_advisorship(self, advisorship_id: Any) -> Optional[Any]:
+        try:
+            return self.adv_controller.get_by_id(advisorship_id)
+        except Exception:
+            return None
+
+    def _match_stored_advisorship(
+        self, title: Optional[str], project_data: Optional[Dict[str, Any]]
+    ) -> Optional[Any]:
+        """The stored advisorship of this title that belongs to the item's
+        student and years, or None (the item is then a new advisorship)."""
+        if not title:
+            return None
+        candidates = self._ensure_advisorship_index().get(base_title(title)) or []
+        if not candidates:
+            return None
+        data = project_data if project_data is not None else {}
+        student_id, student_name = self._item_student(data) if data else (None, "")
+        match = pick_match(
+            student_id,
+            student_name,
+            year_range(data.get("start_date"), data.get("end_date")),
+            candidates,
+        )
+        if match is None:
+            return None
+        found = self._load_advisorship(match.id)
+        if found is None:
+            candidates.remove(match)
+        return found
+
+    def _remember_advisorship(
+        self, initiative: Any, title: Optional[str], project_data: Dict[str, Any]
+    ) -> None:
+        """Puts the advisorship just written in the index, with the item's
+        student and with its years widened by the item's years."""
+        adv_id = getattr(initiative, "id", None)
+        if adv_id is None:
+            return
+        name = getattr(initiative, "name", None)
+        if not isinstance(name, str) or not name:
+            name = title or ""
+        entries = self._ensure_advisorship_index().setdefault(base_title(name), [])
+        student_id, student_name = self._item_student(project_data)
+        years = year_range(project_data.get("start_date"), project_data.get("end_date"))
+        for position, entry in enumerate(entries):
+            if entry.id == adv_id:
+                has_student = student_id is not None or bool(student_name)
+                entries[position] = StoredAdvisorship(
+                    id=adv_id,
+                    name=name,
+                    student_id=student_id if has_student else entry.student_id,
+                    student_name=student_name if has_student else entry.student_name,
+                    years=widen(entry.years, years),
+                )
+                return
+        entries.append(
+            StoredAdvisorship(
+                id=adv_id,
+                name=name,
+                student_id=student_id,
+                student_name=student_name,
+                years=years,
+            )
+        )
+
     def _ensure_person_cache(self) -> None:
         if self.person_matcher._persons_cache:
             return
@@ -137,10 +317,130 @@ class ProjectLoader:
             df = df.fillna("")
         except Exception as e:
             logger.error(f"Failed to read Excel file {file_path}: {e}")
+            # The report is then not a complete listing (spec 021, R8).
+            self.read_failures = getattr(self, "read_failures", 0) + 1
             return
 
         records = df.to_dict("records")
         self.process_records(records, source_file=file_path)
+
+    def _tracking_key(self, identity_key, title, row_dict, model_class, source_file):
+        """source_record_id of a row (spec 020). A Lattes row carries the CV
+        it came from, because the same project or advisorship appears in each
+        participant's CV with different details; SigPesq rows keep their
+        codes."""
+        key = identity_key or title or self._row_label(row_dict)
+        if not (identity_key or "").startswith("lattes "):
+            return key
+        if model_class is Advisorship:
+            return lattes_advisorship_key(source_file, identity_key, row_dict)
+        return lattes_initiative_key(source_file, identity_key)
+
+    _STATE_FIELDS = (
+        "name",
+        "status",
+        "description",
+        "start_date",
+        "end_date",
+        "parent_id",
+    )
+    defer_change_log = False
+    # Spec 021: set by the SigPesq flows, where each report row is one source
+    # document. The Lattes flows leave it None: their document is the CV.
+    document_skip = None
+    # Branch 030: row -> (date, source rank, tie key) of a report row's claims;
+    # set by the SigPesq flows. The Lattes flows set it on the CV document.
+    claim_source_for_row = None
+
+    def _row_document_key(self, row_dict, source_file) -> str:
+        project_data = self.mapping_strategy.map_row(row_dict)
+        return self._tracking_key(
+            project_data.get("identity_key"),
+            project_data.get("title"),
+            row_dict,
+            project_data.get("model_class", Initiative),
+            source_file,
+        )
+
+    @property
+    def _pending(self) -> Dict[tuple, Dict[str, Any]]:
+        # Tests build loaders with __new__; the pending map is created lazily.
+        return self.__dict__.setdefault("_pending_changes", {})
+
+    def _initiative_states(self, ids) -> Dict[int, Dict[str, Any]]:
+        """Stored values of the logged initiative columns, read with SQL so the
+        before and after snapshots have the same types."""
+        from sqlalchemy import text
+
+        ids = [int(i) for i in ids if i is not None]
+        states: Dict[int, Dict[str, Any]] = {}
+        session = self.controller._service._repository._session
+        cols = ", ".join(self._STATE_FIELDS)
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            marks = ", ".join(f":i{n}" for n in range(len(chunk)))
+            rows = session.execute(
+                text(f"SELECT id, {cols} FROM initiatives WHERE id IN ({marks})"),
+                {f"i{n}": v for n, v in enumerate(chunk)},
+            )
+            for row in rows:
+                states[row[0]] = dict(zip(self._STATE_FIELDS, row[1:]))
+        return states
+
+    def flush_change_log(self) -> int:
+        """Writes the net change log of everything touched since the last
+        flush. Returns the number of change log rows written."""
+        advisorship_handler = getattr(self, "handlers", {}).get(Advisorship)
+        if advisorship_handler is not None and hasattr(
+            advisorship_handler, "flush_members"
+        ):
+            advisorship_handler.flush_members()
+        pending = self._pending
+        self._pending_changes = {}
+        if not pending:
+            return 0
+        current = self._initiative_states(
+            entry["initiative_id"] for entry in pending.values()
+        )
+        written = 0
+        for (entity_type, initiative_id), entry in pending.items():
+            after_state = current.get(initiative_id, {})
+            if entry["before"] is None:
+                tracking_recorder.record_change(
+                    source_record_id=entry["source_record_id"],
+                    canonical_entity_type=entity_type,
+                    canonical_entity_id=initiative_id,
+                    operation="create",
+                    changed_fields=[
+                        key
+                        for key, value in entry["tracked"].items()
+                        if value not in (None, [], "")
+                    ],
+                    after={"initiative_id": initiative_id, **entry["tracked"]},
+                    reason=entry["reason"],
+                )
+                written += 1
+                continue
+            changed = [
+                field
+                for field in self._STATE_FIELDS
+                if canonical(entry["before"].get(field))
+                != canonical(after_state.get(field))
+            ]
+            if not changed:
+                continue
+            tracking_recorder.record_change(
+                source_record_id=entry["source_record_id"],
+                canonical_entity_type=entity_type,
+                canonical_entity_id=initiative_id,
+                operation="update",
+                changed_fields=changed,
+                before={f: entry["before"].get(f) for f in changed},
+                after={f: after_state.get(f) for f in changed},
+                reason=entry["reason"],
+            )
+            written += 1
+        return written
 
     def process_records(
         self, records: list[Dict[str, Any]], source_file: Optional[str] = None
@@ -170,24 +470,47 @@ class ProjectLoader:
             "skipped_reasons": {},
         }
 
+        # Spec 023: a report is downloaded whole each run; its rows date from it.
+        from src.core.logic.document_skip import file_download_date
+
+        report_date = file_download_date(source_file) if self.document_skip else None
         for row_dict in records:
-            try:
-                self._process_row(
+            skip = self.document_skip
+            if skip is None:
+                self._process_row_safely(
                     row_dict,
                     existing_by_name,
                     existing_by_identity,
                     stats,
-                    source_file=source_file,
-                    existing_by_norm_name=existing_by_norm_name,
+                    source_file,
+                    existing_by_norm_name,
                 )
-            except Exception as e:
-                logger.warning(
-                    f"PERDIDO por erro: {self._row_label(row_dict)}"
-                    + (f" [{source_file}]" if source_file else "")
-                    + f" — {type(e).__name__}: {e}"
-                )
-                stats["failed"] += 1
-                self._rollback_session()
+                continue
+            with skip.document(
+                self._row_document_key(row_dict, source_file),
+                downloaded_at=report_date,
+            ) as doc:
+                if doc.unchanged(self._change_content(row_dict)):
+                    stats["skipped_unchanged"] = stats.get("skipped_unchanged", 0) + 1
+                    continue
+                doc.begin()
+                if self.claim_source_for_row is not None:
+                    doc.claim_source = self.claim_source_for_row(row_dict)
+                if not self._process_row_safely(
+                    row_dict,
+                    existing_by_name,
+                    existing_by_identity,
+                    stats,
+                    source_file,
+                    existing_by_norm_name,
+                ):
+                    doc.mark_partial("row failed")
+            if self._existing_by_name is None:
+                # The row was rolled back and reset_caches dropped the indexes.
+                self._ensure_existing_initiatives()
+                existing_by_name = self._existing_by_name
+                existing_by_norm_name = self._existing_by_norm_name
+                existing_by_identity = self._existing_by_identity
 
         new_persons_count = (
             len(self.person_matcher._persons_cache) - initial_persons_count
@@ -212,6 +535,8 @@ class ProjectLoader:
                 f"{source_file or 'origem desconhecida'} — veja os warnings acima"
             )
         self.last_stats = dict(stats)
+        if not self.defer_change_log:
+            self.flush_change_log()
 
     def recalculate_all_parent_statuses(self) -> None:
         """
@@ -344,6 +669,49 @@ class ProjectLoader:
             f"Recalculation complete. Processed {processed_count} parents, updated {updated_count}."
         )
 
+    def _change_content(self, row_dict: dict):
+        """What is compared to decide whether a row changed: the strategy's
+        own content when it gives one (branch 036: SigPesq project rows with
+        reordered name lists), otherwise the row as read."""
+        change_content = getattr(self.mapping_strategy, "change_content", None)
+        if callable(change_content):
+            return change_content(row_dict)
+        return row_dict
+
+    def _process_row_safely(
+        self,
+        row_dict,
+        existing_by_name,
+        existing_by_identity,
+        stats,
+        source_file,
+        existing_by_norm_name,
+    ) -> bool:
+        try:
+            self._process_row(
+                row_dict,
+                existing_by_name,
+                existing_by_identity,
+                stats,
+                source_file=source_file,
+                existing_by_norm_name=existing_by_norm_name,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"PERDIDO por erro: {self._row_label(row_dict)}"
+                + (f" [{source_file}]" if source_file else "")
+                + f" — {type(e).__name__}: {e}"
+            )
+            stats["failed"] += 1
+            self._rollback_session()
+            # Inside a document (a Lattes CV) the lost row fails it: committed,
+            # the row's items would look removed (spec 021, research R4).
+            from src.core.logic.document_skip import mark_partial
+
+            mark_partial(f"row: {type(e).__name__}: {e}")
+            return False
+
     def _process_row(
         self,
         row_dict: Dict[str, Any],
@@ -369,12 +737,17 @@ class ProjectLoader:
         # registro que permite auditar depois o que ficou de fora — e é dele
         # que o enriquecimento por documento descobre quais códigos a diretoria
         # recusou, para não recriá-los pela porta dos fundos.
+        tracking_key = self._tracking_key(
+            identity_key, title, row_dict, model_class, source_file
+        )
+        # The document this row came from, for team membership (spec 020).
+        project_data["_document_key"] = tracking_key
         source_record = tracking_recorder.record_source_record(
             source_entity_type=(
                 "advisorship" if model_class is Advisorship else "initiative"
             ),
             payload=row_dict,
-            source_record_id=identity_key or title or self._row_label(row_dict),
+            source_record_id=tracking_key,
             source_file=source_file,
             source_path=source_file,
         )
@@ -454,7 +827,15 @@ class ProjectLoader:
             identity_key=identity_key,
             title=title,
             existing_by_norm_name=existing_by_norm_name,
+            project_data=project_data,
         )
+
+        # TD-029 (branch 030): a project whose title is held by an advisorship
+        # keeps the plain name, as in a rebuild (projects load first there).
+        if existing is None and model_class is not Advisorship and title:
+            self._free_name_held_by_advisorship(
+                title, existing_by_name, existing_by_norm_name
+            )
 
         # Casou com uma linha cujo nome é o mesmo escrito de outra forma:
         # atualiza o resto, mas NÃO renomeia. Renomear é exatamente o que
@@ -471,6 +852,22 @@ class ProjectLoader:
                     )
                     title = nome_persistido
                     project_data["title"] = nome_persistido
+
+        # The row the handler will update: the advisorship handler may still
+        # find one by its disambiguated title when the loader found none, and
+        # its state must be taken now, or the update is logged as a create.
+        updated = existing
+        if updated is None and hasattr(handler, "find_existing"):
+            updated = handler.find_existing(project_data)
+        change_key = (
+            "advisorship" if model_class is Advisorship else "initiative",
+            getattr(updated, "id", None),
+        )
+        if updated is not None and change_key not in self._pending:
+            self._pending[change_key] = {
+                "before": self._initiative_states([updated.id]).get(updated.id, {}),
+                "initiative_id": updated.id,
+            }
 
         initiative = handler.create_or_update(
             project_data=project_data,
@@ -522,10 +919,30 @@ class ProjectLoader:
                     existing_by_identity, resolved_identity, initiative
                 )
 
+        if initiative and model_class is Advisorship:
+            self._remember_advisorship(initiative, title, project_data)
+
         if initiative:
             canonical_entity_type = (
                 "advisorship" if model_class is Advisorship else "initiative"
             )
+            # Branch 030: the fields several documents write are decided from
+            # every document's claim at the end of the document.
+            for claimed_field in MERGED_FIELDS:
+                claim(
+                    canonical_entity_type,
+                    getattr(initiative, "id", None),
+                    claimed_field,
+                    project_data.get(claimed_field),
+                )
+            if canonical_entity_type == "advisorship" and "cancelled" in project_data:
+                # Only SigPesq workplans say whether an advisorship was cancelled.
+                claim(
+                    "advisorship",
+                    getattr(initiative, "id", None),
+                    "cancelled",
+                    project_data["cancelled"],
+                )
             tracking_recorder.record_entity_match(
                 source_record_id=getattr(source_record, "id", None),
                 canonical_entity_type=canonical_entity_type,
@@ -550,24 +967,13 @@ class ProjectLoader:
                 selected_attributes=tracked_attrs,
                 selection_reason="loader_selected_values",
             )
-            tracking_recorder.record_change(
-                source_record_id=getattr(source_record, "id", None),
-                canonical_entity_type=canonical_entity_type,
-                canonical_entity_id=initiative.id,
-                operation="create" if not existing else "update",
-                changed_fields=[
-                    key
-                    for key, value in tracked_attrs.items()
-                    if value not in (None, [], "")
-                ],
-                before=(
-                    {"existing_initiative_id": getattr(existing, "id", None)}
-                    if existing
-                    else None
-                ),
-                after={"initiative_id": initiative.id, **tracked_attrs},
-                reason=f"{self.mapping_strategy.__class__.__name__} applied",
+            entry = self._pending.setdefault(
+                (canonical_entity_type, initiative.id),
+                {"before": None, "initiative_id": initiative.id},
             )
+            entry["source_record_id"] = getattr(source_record, "id", None)
+            entry["tracked"] = tracked_attrs
+            entry["reason"] = f"{self.mapping_strategy.__class__.__name__} applied"
 
         # 3.5 Link Advisorship members to Parent Project
         if parent_id and parent_initiative:
@@ -595,7 +1001,25 @@ class ProjectLoader:
                 initiative, project_data, rg_name
             )
 
-    def _resolve_existing_initiative(
+    def _resolve_existing_initiative(self, **kwargs) -> Optional[Any]:
+        """Resolves an initiative (see ``_lookup_existing_initiative``) and,
+        inside a source document (spec 021), records the resolution."""
+        found = self._lookup_existing_initiative(**kwargs)
+        from src.core.logic.document_skip import document_reference
+
+        document_reference(
+            "initiative",
+            f"{kwargs.get('identity_key') or ''}|title:"
+            f"{normalize_text(kwargs.get('title') or '')}",
+            (
+                initiative_reference_key(getattr(found, "name", None))
+                if found is not None
+                else "not_found"
+            ),
+        )
+        return found
+
+    def _lookup_existing_initiative(
         self,
         *,
         existing_by_name: Dict[str, Any],
@@ -604,11 +1028,21 @@ class ProjectLoader:
         identity_key: Optional[str],
         title: Optional[str],
         existing_by_norm_name: Optional[Dict[str, Any]] = None,
+        project_data: Optional[Dict[str, Any]] = None,
     ) -> Optional[Any]:
         if identity_key:
             candidate = existing_by_identity.get(identity_key)
             if self._candidate_matches_model(candidate, model_class):
                 return candidate
+
+        # Spec 035: the title of an advisorship is the title of the work, and
+        # many students share one ("Estágio Supervisionado Obrigatório"). A
+        # stored advisorship of that title is this item's only for the same
+        # student and years; the name alone never decides. The same work in
+        # the advisor's and the co-advisor's curriculum has the same student
+        # and stays one advisorship.
+        if model_class is Advisorship:
+            return self._match_stored_advisorship(title, project_data)
 
         if title:
             candidate = existing_by_name.get(title)
@@ -619,28 +1053,99 @@ class ProjectLoader:
         if exact is not None:
             return exact
 
-        # Última tentativa: mesma coisa escrita de outro jeito. Só depois de o
-        # exato falhar, para que a grafia idêntica sempre tenha precedência.
-        #
-        # NÃO vale para orientações, e a diferença é de significado. No projeto,
-        # o nome identifica o projeto: "PROJETO X" e "Projeto X" são a mesma
-        # coisa e devem virar uma linha só. Na orientação, o nome é o título do
-        # TRABALHO, e o mesmo trabalho aparece legitimamente em mais de um
-        # currículo — o do orientador e o do coorientador —, cada um trazendo
-        # participantes diferentes. Fundir pelo título faz a linha sobrevivente
-        # ficar só com os participantes de quem escreveu por último: medido, 100
-        # orientações fundidas custaram 200 vínculos, um orientador por fusão.
-        # A desambiguação das orientações já é feita pelo AdvisorshipHandler,
-        # por aluno, ano e código.
-        if model_class is Advisorship:
-            return None
-
+        # Last attempt: the same name written another way (projects only).
         if title and existing_by_norm_name:
             candidate = existing_by_norm_name.get(normalize_text(title))
             if self._candidate_matches_model(candidate, model_class):
                 return candidate
 
         return None
+
+    def _advisorship_title_data(self, session, advisorship_id: int) -> Dict[str, Any]:
+        """The values the advisorship's own loader used for its title: its
+        latest tracked student names and start date, and the workplan Id of a
+        SigPesq advisorship."""
+        data: Dict[str, Any] = {}
+        rows = session.execute(
+            text(
+                "SELECT aa.attribute_name, aa.value_json, sr.source_system, "
+                "sr.raw_payload_json FROM attribute_assertions aa "
+                "JOIN source_records sr ON sr.id = aa.source_record_id "
+                "WHERE aa.canonical_entity_type = 'advisorship' "
+                "AND aa.canonical_entity_id = :id "
+                "AND aa.attribute_name IN ('student_names', 'start_date') "
+                "ORDER BY sr.id DESC"
+            ),
+            {"id": advisorship_id},
+        ).fetchall()
+        for name, value_json, system, payload in rows:
+            if name in data:
+                continue
+            value = (
+                json.loads(value_json) if isinstance(value_json, str) else value_json
+            )
+            if name == "start_date":
+                match = re.match(r"^(\d{4})-(\d{2})-(\d{2})", str(value or ""))
+                value = datetime(*map(int, match.groups())) if match else None
+            data[name] = value
+            if system == "sigpesq_advisorships" and "metadata" not in data:
+                raw = json.loads(payload) if isinstance(payload, str) else payload
+                if isinstance(raw, dict) and raw.get("Id") is not None:
+                    data["metadata"] = {"sigpesq_id": raw.get("Id")}
+        return data
+
+    def _free_name_held_by_advisorship(
+        self, title: str, existing_by_name, existing_by_norm_name
+    ) -> None:
+        session = self.controller._service._repository._session
+        row = session.execute(
+            text("SELECT id FROM initiatives WHERE name = :name LIMIT 1"),
+            {"name": title},
+        ).fetchone()
+        if not row:
+            return
+        advisorship_id = row[0]
+        try:
+            if self.adv_controller.get_by_id(advisorship_id) is None:
+                return
+        except Exception:
+            return
+        new_name = AdvisorshipHandler._build_disambiguated_advisorship_title(
+            None, title, self._advisorship_title_data(session, advisorship_id)
+        )
+        session.execute(
+            text("UPDATE initiatives SET name = :n WHERE id = :id"),
+            {"n": new_name, "id": advisorship_id},
+        )
+        tracking_recorder.record_change(
+            source_record_id=None,
+            canonical_entity_type="advisorship",
+            canonical_entity_id=advisorship_id,
+            operation="update",
+            changed_fields=["name"],
+            before={"name": title},
+            after={"name": new_name},
+            reason="TD-029: a project keeps its title; advisorship renamed",
+        )
+        logger.warning(
+            "title collision: project '{}' kept its title; advisorship {} renamed "
+            "to '{}'",
+            title[:80],
+            advisorship_id,
+            new_name[:120],
+        )
+        held = existing_by_name.pop(title, None)
+        if held is not None:
+            existing_by_name[new_name] = held
+            try:
+                held.name = new_name
+            except Exception:
+                pass
+        if existing_by_norm_name is not None:
+            key = normalize_text(title)
+            if getattr(existing_by_norm_name.get(key), "id", None) == advisorship_id:
+                existing_by_norm_name.pop(key, None)
+        note_collision_resolved()
 
     def _candidate_matches_model(self, candidate: Optional[Any], model_class) -> bool:
         if candidate is None:

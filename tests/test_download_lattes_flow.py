@@ -64,7 +64,10 @@ def test_prefetch_lattes_cache_downloads_only_missing_ids(tmp_path):
 
     def fake_downloader(lattes_id, target_cache_dir):
         downloaded.append((lattes_id, target_cache_dir))
-        (cache_dir / lattes_id).write_text("downloaded")
+        # A curriculum page names its owner in the title (spec 023 checks it).
+        (cache_dir / lattes_id).write_text(
+            "<title>Currículo do Sistema de Currículos Lattes (Nome)</title>"
+        )
 
     result = prefetch_lattes_cache(
         [cached_id, *missing_ids],
@@ -79,57 +82,21 @@ def test_prefetch_lattes_cache_downloads_only_missing_ids(tmp_path):
     )
 
 
-def test_validate_script_lattes_runtime_rejects_driver_browser_major_mismatch(
-    tmp_path, monkeypatch
-):
-    chromedriver = tmp_path / "chromedriver"
-    chrome = tmp_path / "chrome"
-    chromedriver.write_text("")
-    chrome.write_text("")
+def test_validate_script_lattes_runtime_accepts_playwright_chromium(monkeypatch):
+    monkeypatch.setattr(
+        "src.flows.lattes.download._check_playwright_chromium", lambda: True
+    )
 
-    def fake_version(command):
-        if command == [str(chromedriver), "--version"]:
-            return "ChromeDriver 144.0.7559.109"
-        if command == [str(chrome), "--version"]:
-            return "Google Chrome for Testing 147.0.7727.55"
-        raise AssertionError(f"unexpected command: {command}")
-
-    monkeypatch.setattr("src.flows.lattes.download._read_command_version", fake_version)
-
-    with pytest.raises(ScriptLattesRuntimeError, match="reports major version"):
-        validate_script_lattes_runtime(str(chromedriver), str(chrome))
+    assert validate_script_lattes_runtime() == "playwright-chromium"
 
 
-def test_validate_script_lattes_runtime_skips_auto_discovered_mismatches(
-    tmp_path, monkeypatch
-):
-    chromedriver = tmp_path / "chromedriver"
-    old_chrome = tmp_path / "old-chrome"
-    matching_chromium = tmp_path / "matching-chromium"
-    chromedriver.write_text("")
-    old_chrome.write_text("")
-    matching_chromium.write_text("")
-    monkeypatch.delenv("CHROME_BINARY", raising=False)
+def test_validate_script_lattes_runtime_rejects_missing_chromium(monkeypatch):
+    monkeypatch.setattr(
+        "src.flows.lattes.download._check_playwright_chromium", lambda: False
+    )
 
-    def fake_which(command):
-        return {
-            "google-chrome": str(old_chrome),
-            "chromium": str(matching_chromium),
-        }.get(command)
-
-    def fake_version(command):
-        if command == [str(chromedriver), "--version"]:
-            return "ChromeDriver 147.0.7727.55"
-        if command == [str(old_chrome), "--version"]:
-            return "Google Chrome 144.0.7559.109"
-        if command == [str(matching_chromium), "--version"]:
-            return "Chromium 147.0.7727.55"
-        raise AssertionError(f"unexpected command: {command}")
-
-    monkeypatch.setattr("src.flows.lattes.download.shutil.which", fake_which)
-    monkeypatch.setattr("src.flows.lattes.download._read_command_version", fake_version)
-
-    assert validate_script_lattes_runtime(str(chromedriver)) == str(matching_chromium)
+    with pytest.raises(ScriptLattesRuntimeError, match="playwright install chromium"):
+        validate_script_lattes_runtime()
 
 
 def test_download_lattes_flow(tmp_path, monkeypatch):
@@ -145,25 +112,28 @@ def test_download_lattes_flow(tmp_path, monkeypatch):
         )
     )
 
-    prefetch_calls = []
+    rotate_calls = []
 
-    def fake_prefetch(lattes_ids, cache_dir, max_workers, chrome_binary):
-        prefetch_calls.append((lattes_ids, cache_dir, max_workers, chrome_binary))
-        return lattes_ids
+    def fake_rotate(lattes_ids, cache_dir, manifest, share, full, max_workers):
+        rotate_calls.append((lattes_ids, cache_dir, max_workers))
+        for lattes_id in lattes_ids:
+            (tmp_path / "cache" / lattes_id).write_text("cached")
+        return {}
 
-    def fake_run_script_lattes(config_path, chrome_binary):
+    def fake_run_script_lattes(config_path):
         output_dir = tmp_path / "data" / "lattes_json"
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "00_Paulo_8400407353673370.json").write_text("{}")
         (output_dir / "01_Daniel_9583314331960942.json").write_text("{}")
 
+    (tmp_path / "cache").mkdir()
     monkeypatch.setenv("HORIZON_LATTES_DOWNLOAD_WORKERS", "2")
     monkeypatch.setattr(
         "src.flows.lattes.download.validate_script_lattes_runtime",
-        lambda _chromedriver: "/tmp/chrome",
+        lambda: "playwright-chromium",
     )
     monkeypatch.setattr(
-        "src.flows.lattes.download.prefetch_lattes_cache", fake_prefetch
+        "src.flows.lattes.download.rotate_lattes_downloads", fake_rotate
     )
     monkeypatch.setattr(
         "src.flows.lattes.download.run_script_lattes_real", fake_run_script_lattes
@@ -175,14 +145,11 @@ def test_download_lattes_flow(tmp_path, monkeypatch):
     # Verify
     assert os.path.exists("lattes.config")
     assert os.path.isdir("data/lattes_json")
-    assert prefetch_calls == [
-        (
-            ["8400407353673370", "9583314331960942"],
-            str(tmp_path / "cache"),
-            2,
-            "/tmp/chrome",
-        )
+    assert rotate_calls == [
+        (["8400407353673370", "9583314331960942"], str(tmp_path / "cache"), 2)
     ]
+    # Every curriculum reached the cache, so scriptLattes gets the whole list.
+    assert not os.path.exists("lattes_effective.list")
 
     # Check if a JSON file was created (based on the mock data in the flow)
     # The flow mocks IDs, but scriptLattes might prefix them with numbers/names
@@ -233,3 +200,37 @@ def test_bounded_baixa_cv_lattes_skips_connection_resets(tmp_path, monkeypatch):
         baixa_lattes.baixaCVLattes("9583314331960942", str(tmp_path))
 
     assert len(attempts) == 3
+
+
+def test_script_lattes_prints_stay_out_of_the_run_log(monkeypatch, capsys):
+    """Spec 029: scriptLattes prints curriculum lines (phones, documents) on
+    stdout, which the public run log keeps. They are dropped; the loguru
+    summary stays."""
+    import sys
+    import types
+
+    from loguru import logger
+
+    from src.flows.lattes.download import run_script_lattes_real
+
+    def fake_run(config_path, somente_json=False):
+        print("Telefone: (00) 00000-0000 CPF 000.000.000-00")
+
+    package = types.ModuleType("scriptLattes")
+    run_module = types.ModuleType("scriptLattes.run")
+    run_module.executar_scriptLattes = fake_run
+    package.run = run_module
+    monkeypatch.setitem(sys.modules, "scriptLattes", package)
+    monkeypatch.setitem(sys.modules, "scriptLattes.run", run_module)
+    monkeypatch.setattr(
+        "src.flows.lattes.download.patch_script_lattes_runtime", lambda: None
+    )
+    messages = []
+    sink_id = logger.add(lambda message: messages.append(str(message)))
+    try:
+        run_script_lattes_real.fn("config.cfg")
+    finally:
+        logger.remove(sink_id)
+
+    assert "00000-0000" not in capsys.readouterr().out
+    assert any("scriptLattes execution finished" in m for m in messages)

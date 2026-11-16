@@ -19,7 +19,11 @@ from src.core.logic.advisorship_canonical_values import (
     resolve_advisorship_canonical_values,
 )
 from src.core.logic.export_campus_resolver import ExportCampusResolver
-from src.core.logic.pii_anonymizer import scrub_pii_deep, scrub_source_record_payload
+from src.core.logic.pii_anonymizer import (
+    keyed_export_hash,
+    scrub_pii_deep,
+    scrub_source_record_payload,
+)
 from src.core.ports.export_sink import IExportSink
 from src.research_domain_compat import AdvisorshipRole
 from src.tracking.entities import (
@@ -360,6 +364,8 @@ class CanonicalDataExporter:
         export_dict.setdefault("birthday", None)
         export_dict.setdefault("cnpq_url", None)
         export_dict.setdefault("google_scholar_url", None)
+        # Spec 037: always present, filled from the ETL's own table of links.
+        export_dict.setdefault("linkedin_url", None)
         export_dict.setdefault("resume", None)
         export_dict.setdefault("citation_names", None)
         return export_dict
@@ -522,6 +528,24 @@ class CanonicalDataExporter:
                 role_map, row_data.get("person_id"), row_data.get("role_name")
             )
         return role_map
+
+    def _fetch_person_linkedin_links(self, session: Any) -> dict[Any, str]:
+        """``person id -> LinkedIn profile link`` (spec 037). The table is
+        the ETL's own and may not exist in a database created before it."""
+        if session is None:
+            return {}
+        try:
+            rows = session.execute(
+                text("SELECT person_id, linkedin_url FROM person_linkedin_links")
+            ).fetchall()
+        except Exception as exc:
+            logger.info(f"No LinkedIn links to export: {exc}")
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            return {}
+        return {self._normalize_person_id(row[0]): row[1] for row in rows}
 
     def _fetch_person_institutional_email_flags(self, session: Any) -> dict[Any, bool]:
         if session is None:
@@ -867,7 +891,12 @@ class CanonicalDataExporter:
                     "selection_reason": record.get("selection_reason"),
                     "asserted_at": record.get("asserted_at"),
                     "value": record.get("value_json"),
-                    "value_hash": record.get("value_hash"),
+                    # Published hashes carry a key (spec 029); stored ones stay.
+                    "value_hash": (
+                        keyed_export_hash(record["value_hash"])
+                        if record.get("value_hash")
+                        else None
+                    ),
                 }
 
             for row in session.execute(
@@ -949,6 +978,9 @@ class CanonicalDataExporter:
                     "campus", self._resolve_record_campus(item, entity_type)
                 )
             item = scrub_pii_deep(item)
+            for hash_field in ("payload_hash", "value_hash"):
+                if item.get(hash_field):
+                    item[hash_field] = keyed_export_hash(item[hash_field])
             if entity_type == "source_record":
                 payload = item.get("raw_payload_json")
                 if payload is not None:
@@ -1432,12 +1464,15 @@ class CanonicalDataExporter:
             session
         )
 
+        person_linkedin_links = self._fetch_person_linkedin_links(session)
+
         researchers_by_id: dict[Any, dict[str, Any]] = {}
         for researcher in researchers:
             researcher_dict = self._build_researcher_base_export_dict(researcher)
             researcher_id = self._normalize_person_id(researcher_dict.get("id"))
             if researcher_id is None:
                 continue
+            researcher_dict["linkedin_url"] = person_linkedin_links.get(researcher_id)
             researchers_by_id[researcher_id] = researcher_dict
 
         original_researcher_count = len(researchers_by_id)
@@ -1475,6 +1510,9 @@ class CanonicalDataExporter:
                         continue
                     researchers_by_id[person_id] = (
                         self._build_researcher_base_export_dict(person)
+                    )
+                    researchers_by_id[person_id]["linkedin_url"] = (
+                        person_linkedin_links.get(person_id)
                     )
                     added_participant_count += 1
             except Exception as exc:
@@ -1858,6 +1896,9 @@ class CanonicalDataExporter:
                 }
             )
 
+        # Free text (descriptions, enrichment, partner names) can carry e-mails
+        # and phones typed by people; scrub every field before writing.
+        serialized_data = scrub_pii_deep(serialized_data)
         logger.info(f"Exporting {len(serialized_data)} enriched Initiatives...")
         self.sink.export(serialized_data, output_path)
         logger.info(f"Successfully exported enriched Initiatives to {output_path}")
@@ -2284,6 +2325,7 @@ class CanonicalDataExporter:
                 }
             )
 
+        final_data = scrub_pii_deep(final_data)
         logger.info(
             f"Filtered export: {len(final_data)} parent projects with advisorships (excluded {len(projects_map) - len([p for p in projects_map.values() if p.get('advisorships')])} projects without advisorships)"
         )

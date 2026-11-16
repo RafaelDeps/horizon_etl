@@ -50,3 +50,48 @@ def test_consolidate_knowledge_areas_and_teams(tmp_path: Path):
     survivor_id = remaining_team_ids[0]
     assert cur.execute("SELECT team_id FROM initiative_teams WHERE initiative_id = 50").fetchone()[0] == survivor_id
     assert cur.execute("SELECT team_id FROM team_members WHERE person_id = 99").fetchone()[0] == survivor_id
+
+
+def test_reference_merges_are_logged(tmp_path: Path):
+    """Spec 020 (research R7): knowledge area and team merges log the loser."""
+    import json
+
+    from src.db.migrations import MIGRATIONS
+
+    db_path = tmp_path / "refs_log.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE knowledge_areas (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE group_knowledge_areas (group_id INTEGER, area_id INTEGER);
+        CREATE TABLE initiative_knowledge_areas (initiative_id INTEGER, area_id INTEGER);
+        CREATE TABLE researcher_knowledge_areas (researcher_id INTEGER, area_id INTEGER);
+        CREATE TABLE teams (id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+                            short_name TEXT, organization_id INTEGER);
+        CREATE TABLE team_members (id INTEGER PRIMARY KEY, person_id INTEGER,
+                                   team_id INTEGER, role_id INTEGER,
+                                   start_date DATETIME, end_date DATETIME);
+        CREATE TABLE initiative_teams (initiative_id INTEGER, team_id INTEGER);
+        CREATE TABLE research_groups (id INTEGER PRIMARY KEY);
+        INSERT INTO knowledge_areas VALUES (1, 'Física'), (2, 'Fisica');
+        INSERT INTO teams (id, name, description) VALUES (100, 'Conecta FAPES', 'rich'),
+                                                         (200, 'Conecta Fapes', NULL);
+        """
+    )
+    conn.execute(dict(MIGRATIONS)["0005_horizon_merge_log"])
+    conn.commit()
+    conn.close()
+
+    consolidator = ReferenceConsolidator(str(db_path))
+    consolidator.consolidate_knowledge_areas()
+    consolidator.consolidate_teams()
+
+    check = sqlite3.connect(db_path)
+    rows = check.execute(
+        "SELECT entity_type, loser_candidate_ids, winner_entity_id "
+        "FROM horizon_merge_log ORDER BY id"
+    ).fetchall()
+    check.close()
+    assert [(t, w) for t, _, w in rows] == [("knowledge_area", 1), ("team", 100)]
+    assert json.loads(rows[0][1]) == ["knowledge-area:fisica"]
+    assert json.loads(rows[1][1])[0].startswith("team:h:")

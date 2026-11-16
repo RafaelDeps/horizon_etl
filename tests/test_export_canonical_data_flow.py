@@ -1,6 +1,9 @@
+import json
+import os
 from contextlib import ExitStack
 from unittest.mock import patch
 
+from src.core.logic.horizon_identity import HORIZON_RULE_VERSION
 from src.flows.exports.canonical_data import export_canonical_data_flow
 
 
@@ -95,11 +98,19 @@ def test_export_canonical_data_flow_calls_tracking_exports_individually(tmp_path
             stack.enter_context(
                 patch(f"src.flows.exports.canonical_data.{_graph_flow}")
             )
+        horizon_ids_task = stack.enter_context(
+            patch("src.flows.exports.canonical_data.export_horizon_ids_task")
+        )
         stack.enter_context(patch("src.flows.exports.canonical_data.zip_exports_task"))
+        # Spec 038: the Parquet archive follows the JSON archive.
+        parquet_task = stack.enter_context(
+            patch("src.flows.exports.canonical_data.parquet_archive_task")
+        )
         makedirs = stack.enter_context(patch("os.makedirs"))
         export_canonical_data_flow.fn(output_dir=output_dir, campus="Serra")
 
     makedirs.assert_called_once_with(output_dir, exist_ok=True)
+    parquet_task.assert_called_once_with(output_dir)
     organizations_task.assert_called_once_with(output_dir)
     campuses_task.assert_called_once_with(output_dir, "Serra")
     knowledge_areas_task.assert_called_once_with(output_dir)
@@ -124,3 +135,212 @@ def test_export_canonical_data_flow_calls_tracking_exports_individually(tmp_path
     fellowships_task.assert_called_once_with(output_dir)
     advisorship_analytics_task.assert_called_once_with(output_dir)
     people_relationship_graph_flow.assert_called_once_with(output_dir=output_dir)
+    horizon_ids_task.assert_called_once_with(output_dir)
+
+
+def test_horizon_ids_file_is_written_stable_and_zipped(tmp_path, monkeypatch):
+    """Spec 020: the id file has one row per entity, is identical across two
+    exports apart from generated_at, and lands in the export zip."""
+    import json
+    import zipfile
+
+    from src.flows.exports.canonical_data import (
+        export_horizon_ids_task,
+        zip_exports_task,
+    )
+    from tests.test_horizon_id_assigner import _assign, _build
+
+    db = tmp_path / "ids.db"
+    _build(db, order_seed=4)
+    _, rows = _assign(db)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db}")
+    out = tmp_path / "exports"
+    out.mkdir()
+
+    export_horizon_ids_task.fn(str(out))
+    first = json.loads((out / "horizon_ids_canonical.json").read_text())
+    export_horizon_ids_task.fn(str(out))
+    second = json.loads((out / "horizon_ids_canonical.json").read_text())
+
+    assert len(first["ids"]) == len(rows)
+    assert set(first["ids"][0]) == {
+        "entity_type",
+        "id",
+        "horizon_id",
+        "rule",
+        "natural_key",
+        "parent_horizon_id",
+    }
+    first.pop("generated_at")
+    second.pop("generated_at")
+    assert first == second
+
+    aliases = json.loads((out / "horizon_id_aliases_canonical.json").read_text())
+    assert aliases["aliases"] == [] and aliases["rule_version"] == HORIZON_RULE_VERSION
+
+    zip_exports_task.fn(str(out))
+    with zipfile.ZipFile(out / "exports_canonical.zip") as zf:
+        assert "horizon_ids_canonical.json" in zf.namelist()
+        assert "horizon_id_aliases_canonical.json" in zf.namelist()
+
+
+def test_horizon_ids_export_without_ids_writes_nothing(tmp_path, monkeypatch):
+    from src.flows.exports.canonical_data import export_horizon_ids_task
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'empty.db'}")
+    export_horizon_ids_task.fn(str(tmp_path))
+    assert not (tmp_path / "horizon_ids_canonical.json").exists()
+    assert not (tmp_path / "horizon_id_aliases_canonical.json").exists()
+
+
+def test_document_states_file_follows_the_contract(tmp_path, monkeypatch):
+    """Spec 021: source_document_states_canonical.json lists keys, statuses
+    and dates only, sorted, with a null processed_at for a document never
+    processed (contracts/source-document-states-export.md)."""
+    import sqlite3
+
+    from src.db.migrations import MIGRATIONS
+    from src.flows.exports.canonical_data import export_horizon_ids_task
+
+    db = tmp_path / "states.db"
+    con = sqlite3.connect(db)
+    con.execute(dict(MIGRATIONS)["0008_source_document_states"])
+    con.execute(dict(MIGRATIONS)["0012_source_document_downloaded_at"])
+    con.executemany(
+        "INSERT INTO source_document_states (source_system, document_key, "
+        "content_hash, rule_version, last_seen_at, processed_at, status, "
+        "last_failure) VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
+        [
+            (
+                "lattes_projects",
+                "9860697624155451",
+                "h1",
+                "2026-10-24T02:58:11Z",
+                "2026-10-24T02:58:11Z",
+                "inactive",
+                None,
+            ),
+            (
+                "cnpq_group",
+                "4439471564090237",
+                "h2",
+                "2026-11-07T03:10:44Z",
+                "2026-10-31T03:12:02Z",
+                "active",
+                None,
+            ),
+            (
+                "lattes_projects",
+                "1191009329970047",
+                None,
+                "2026-11-07T03:10:44Z",
+                None,
+                "active",
+                "unidentified",
+            ),
+        ],
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db}")
+    out = tmp_path / "exports"
+    out.mkdir()
+
+    export_horizon_ids_task.fn(str(out))
+    payload = json.loads((out / "source_document_states_canonical.json").read_text())
+
+    assert set(payload) == {"rule_version", "generated_at", "documents"}
+    docs = payload["documents"]
+    assert [(d["source_system"], d["document_key"]) for d in docs] == [
+        ("cnpq_group", "4439471564090237"),
+        ("lattes_projects", "1191009329970047"),
+        ("lattes_projects", "9860697624155451"),
+    ]
+    for doc in docs:
+        assert set(doc) == {
+            "source_system",
+            "document_key",
+            "status",
+            "last_seen_at",
+            "processed_at",
+            "downloaded_at",  # spec 023
+        }
+    assert docs[1]["processed_at"] is None
+    assert all(d["downloaded_at"] is None for d in docs)  # not read since spec 023
+    assert docs[2]["status"] == "inactive"
+    # Keys, statuses and dates only: no failure details, no hashes.
+    text_out = json.dumps(payload)
+    assert "unidentified" not in text_out and "h1" not in text_out
+
+
+def _key_sets(value, prefix=""):
+    """Every key path of a JSON document: the record fields, nested ones too."""
+    out = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            out.add(prefix + key)
+            out |= _key_sets(item, prefix + key + ".")
+    elif isinstance(value, list):
+        for item in value:
+            out |= _key_sets(item, prefix + "[].")
+    return out
+
+
+def test_existing_exports_keep_their_fields_with_horizon_ids(tmp_path):
+    """Spec 020 (FR-015): the same database exported before and after
+    assign_horizon_ids gives the same fields in every existing file; only the
+    two new files are added. Runs the real phases on two local CVs."""
+    import glob
+    import shutil
+    import subprocess
+    import sys
+
+    import pytest
+
+    from tests.test_idempotent_rerun import CVS, REPO, _env
+
+    if len(CVS) < 2:
+        pytest.skip("no local Lattes JSON")
+    work = tmp_path / "work"
+    (work / "data" / "lattes_json").mkdir(parents=True)
+    for cv in sorted(CVS, key=os.path.getsize)[:2]:
+        shutil.copy(cv, work / "data" / "lattes_json")
+    env = _env(tmp_path / "fields.db")
+
+    def run(*args):
+        done = subprocess.run(
+            [sys.executable, *args], cwd=work, env=env, capture_output=True, text=True
+        )
+        assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+
+    def export(name):
+        out = work / name
+        run(os.path.join(REPO, "app.py"), "export_canonical", str(out))
+        return {
+            os.path.basename(p): _key_sets(json.load(open(p, encoding="utf-8")))
+            for p in glob.glob(str(out / "*_canonical.json"))
+        }
+
+    run(os.path.join(REPO, "db", "create_db.py"))
+    run(os.path.join(REPO, "app.py"), "ingest_lattes_projects")
+    # The export also needs a research group, which the CVs do not create.
+    import sqlite3
+
+    con = sqlite3.connect(tmp_path / "fields.db")
+    (team_id,) = con.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM teams").fetchone()
+    con.execute("INSERT INTO teams (id, name) VALUES (?, 'Grupo Teste')", (team_id,))
+    con.execute(
+        "INSERT INTO research_groups (id, cnpq_url) VALUES "
+        "(?, 'http://dgp.cnpq.br/dgp/espelhogrupo/123')",
+        (team_id,),
+    )
+    con.commit()
+    con.close()
+    before = export("before")
+    run(os.path.join(REPO, "app.py"), "assign_horizon_ids")
+    after = export("after")
+
+    new_files = {"horizon_ids_canonical.json", "horizon_id_aliases_canonical.json"}
+    assert len(before) > 10  # the comparison covers the real export set
+    assert set(after) - set(before) == new_files
+    assert {name: after[name] for name in before} == before
