@@ -91,6 +91,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Spec 040: tell the Slack channel the weekly started. Runs with the
+      # runner's python3 (standard library only); never fails the run.
+      - name: "Notify Slack: start"
+        continue-on-error: true
+        env:
+          HORIZON_SLACK_WEBHOOK_URL: ${{ secrets.HORIZON_SLACK_WEBHOOK_URL }}
+        run: python3 -m src.scripts.notify_slack start
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -150,6 +158,7 @@ jobs:
         run: make weekly-flows
 
       - name: Commit the export archives if changed
+        id: archives
         if: success()
         run: |
           set -euo pipefail
@@ -174,12 +183,16 @@ jobs:
           done
           if [ "$STAGED" -eq 0 ] || git diff --cached --quiet; then
             echo "No changes to the export archives; nothing to commit."
+            # Spec 040: the Slack end notice says the archives did not change.
+            echo "commit=unchanged" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore(exports): update the export archives from weekly run $(date -u +%Y-%m-%d)"
           git push origin "HEAD:${{ github.ref_name }}"
+          # Spec 040: the Slack end notice links this commit.
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       # Spec 029: the artifact is public, so it is built as an allow-list. The
       # database, raw downloads and Lattes cache go in one encrypted bundle;
@@ -210,3 +223,26 @@ jobs:
       - name: Stop Prefect server
         if: always()
         run: docker compose down -v
+
+      # Spec 040: tell the Slack channel how the weekly ended, whatever happened
+      # before (passed, failed, cancelled). Last step, never fails the run, and
+      # never prints the webhook. If checkout itself failed the script is not on
+      # the runner, so a minimal message is sent with curl.
+      - name: "Notify Slack: end"
+        if: always()
+        continue-on-error: true
+        env:
+          HORIZON_SLACK_WEBHOOK_URL: ${{ secrets.HORIZON_SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          ARCHIVE_COMMIT: ${{ steps.archives.outputs.commit }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f src/scripts/notify_slack.py ]; then
+            python3 -m src.scripts.notify_slack end
+          elif [ -n "${HORIZON_SLACK_WEBHOOK_URL// /}" ]; then
+            RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            PAYLOAD=$(printf '{"text":"❌ Weekly do Horizon ETL falhou antes do checkout (branch: %s) <%s|Ver a run>"}' "$GITHUB_REF_NAME" "$RUN_URL")
+            curl -s -o /dev/null -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$HORIZON_SLACK_WEBHOOK_URL" || true
+          else
+            echo "::warning::Slack não configurado (HORIZON_SLACK_WEBHOOK_URL vazio); aviso pulado."
+          fi

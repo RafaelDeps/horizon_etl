@@ -29,6 +29,7 @@ missing optional manual input (bolsistas, projetos, corpo docente) degrades
 gracefully without failing the weekly run.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -158,6 +159,34 @@ _ARCHIVE_GATE = (
     "people_relationship_graph",
 )
 SKIPPED = "skipped"
+
+# Spec 040: the phase results of the last weekly, read by the Slack notice of
+# the GitHub Actions workflow (src/scripts/notify_slack.py).
+PHASE_SUMMARY_PATH = "data/reports/weekly_phase_summary.json"
+
+
+def _write_phase_summary(results: list, path: str) -> None:
+    """Writes the phase results as JSON; a write error is only a warning."""
+    failed = [r for r in results if not r["ok"]]
+    summary = {
+        "phases": [
+            {
+                "name": r["name"],
+                "ok": bool(r["ok"]),
+                "critical": bool(r["critical"]),
+                "rc": r["rc"],
+            }
+            for r in results
+        ],
+        "critical_failed": [r["name"] for r in failed if r["critical"]],
+        "failed": [r["name"] for r in failed],
+    }
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        logger.warning("Weekly phase summary not written: {}", exc)
 
 
 def _archive_blockers(results) -> list:
@@ -448,6 +477,7 @@ def run_weekly(
     retries = read_access_check_retries()
     for line in _access_check_retry_lines(retries):
         logger.info("  {}", line)
+    _write_phase_summary(results, PHASE_SUMMARY_PATH)
 
     try:
         _notify(results, crit_failed, finalize=finalize, stops=stops, retries=retries)

@@ -304,3 +304,72 @@ def test_the_playwright_chromium_install_is_kept():
     at = names.index("Install Playwright Chromium")
     assert names.index("Create virtual environment and install dependencies") < at
     assert at < names.index("Validate required secrets")
+
+
+# --- Spec 040: Slack notice at the start and at the end of the weekly --------
+
+SLACK_SECRET = "${{ secrets.HORIZON_SLACK_WEBHOOK_URL }}"
+
+
+def test_slack_start_notice_comes_right_after_checkout():
+    _, steps = _steps()
+    names = [s.get("name") for s in steps]
+    at = names.index("Notify Slack: start")
+    assert names[at - 1] == "Checkout repository"
+    assert names[at + 1] == "Set up Python"
+    step = steps[at]
+    assert step["continue-on-error"] is True
+    assert step["run"].strip() == "python3 -m src.scripts.notify_slack start"
+    assert step["env"]["HORIZON_SLACK_WEBHOOK_URL"] == SLACK_SECRET
+
+
+def test_slack_end_notice_is_last_and_always_runs():
+    _, steps = _steps()
+    step = steps[-1]
+    assert step["name"] == "Notify Slack: end"
+    assert step["if"] == "always()"
+    assert step["continue-on-error"] is True
+    assert step["env"] == {
+        "HORIZON_SLACK_WEBHOOK_URL": SLACK_SECRET,
+        "JOB_STATUS": "${{ job.status }}",
+        "ARCHIVE_COMMIT": "${{ steps.archives.outputs.commit }}",
+        "GITHUB_TOKEN": "${{ github.token }}",
+    }
+    assert "python3 -m src.scripts.notify_slack end" in step["run"]
+    assert "src/scripts/notify_slack.py" in step["run"]  # curl fallback otherwise
+    assert "curl" in step["run"]
+
+
+def test_archive_commit_step_exposes_the_commit():
+    _, steps = _steps()
+    step = _step(steps, "Commit the export archives if changed")
+    assert step["id"] == "archives"
+    run = step["run"]
+    assert 'echo "commit=unchanged" >> "$GITHUB_OUTPUT"' in run
+    assert 'echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"' in run
+    assert run.index("commit=unchanged") < run.index("exit 0")
+    assert run.index("git push") < run.index("commit=$(git rev-parse HEAD)")
+
+
+def test_the_webhook_is_only_in_the_notice_steps():
+    workflow, steps = _steps()
+    assert "HORIZON_SLACK_WEBHOOK_URL" not in (
+        workflow["jobs"]["run-etl"].get("env") or {}
+    )
+    using = [
+        s["name"]
+        for s in steps
+        if "secrets.HORIZON_SLACK_WEBHOOK_URL" in str(s.get("env") or {})
+        or "secrets.HORIZON_SLACK_WEBHOOK_URL" in (s.get("run") or "")
+    ]
+    assert using == ["Notify Slack: start", "Notify Slack: end"]
+
+
+def test_no_step_prints_the_webhook():
+    import re
+
+    _, steps = _steps()
+    # The value ($VAR or ${VAR...}), not the name in a warning text.
+    printing = re.compile(r"\b(echo|printf|cat)\b[^\n]*\$\{?HORIZON_SLACK_WEBHOOK_URL")
+    for step in steps:
+        assert not printing.search(step.get("run") or ""), step.get("name")

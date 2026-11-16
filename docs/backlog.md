@@ -681,7 +681,10 @@ these differences remain, none of them in a field the merge decides:
   local and never versioned (maintainer's decision of 2026-11-13), so the
   weekly of GitHub Actions exports `linkedin_url` empty and only a local run
   carries the links. Publishing them through the workflow needs the list, or
-  the links, to reach it. Status: Open, decision needed.
+  the links, to reach it. Status: Closed on 2026-11-16: the maintainer's
+  manager approved publishing the list, and `data/linkedin_run/linkedin.list`
+  is versioned on main (commits d6b5eb9 and a95856c); the CI weekly of branch
+  039 stored 243 links.
 - **TD-054 — The Parquet archive grows the repository history**: the weekly
   workflow commits `exports_parquet.zip` (about 51 MB on 2026-11-14) next to
   `exports_canonical.zip` in every run in which the data changed (branch 038).
