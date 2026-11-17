@@ -202,7 +202,8 @@ description: "Task list for spec 040: Slack notice of the GitHub Actions weekly"
   - their result line;
   - 0 matches of `hooks.slack.com` in the run log.
   - Result: Fork run 43967598607 on 040-slack-weekly-notice (workflow_dispatch, 2026-11-16 22:11 UTC to 2026-11-17 00:05 UTC, 1h54): success. "Notify Slack: start" and "Notify Slack: end" both succeeded, with no Slack warning. The maintainer confirmed both messages in the channel (start, then end with "passou", the time, the run link and the archive commit 605ad2f). The run log has 0 occurrences of hooks.slack.com; the webhook shows only as ***.
-- [ ] T022 Fork run with a forced failure before the ETL (only when the maintainer asks). Follow quickstart section 3.2, on a throwaway branch deleted afterwards, and record that the end message said "falhou" with the step name.
+- [X] T022 Fork run with a forced failure before the ETL (only when the maintainer asks). Follow quickstart section 3.2, on a throwaway branch deleted afterwards, and record that the end message said "falhou" with the step name.
+  - Result: Throwaway branch 040-forced-failure (from 040, one extra step "Forced failure (spec 040 test)" running exit 1 right after the start notice); fork run 43985420836: failure. The forced step failed and every later step was skipped (Python, restore, weekly flows, archive commit); "Notify Slack: end" still ran and succeeded with no Slack warning. The maintainer confirmed both messages in the channel: start, then end with "falhou" and the step name. The run log has 0 occurrences of hooks.slack.com. The branch was deleted on the fork and locally.
 
 ---
 
