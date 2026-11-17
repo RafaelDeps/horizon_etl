@@ -196,11 +196,12 @@ description: "Task list for spec 040: Slack notice of the GitHub Actions weekly"
   - Result: 1553 passed, 10 skipped, 0 failed in 6m41 (logs/pytest_040_full.log): the 1514 of T001 plus 39 new. A first full run left data/reports/weekly_phase_summary.json behind: four older test files (test_weekly_orchestrator_finalize, test_rule_version_guard, test_sqlite_settings, conftest users) run run_weekly without the per-file fixture. The fixture moved to tests/conftest.py (autouse, suite-wide), the stray file was deleted, and the rerun left nothing under data/ (git status shows only the export zips of the local weeklies).
 - [X] T020 Run quickstart.md section 2: the dry run for start, passou, passou com avisos, falhou and cancelada. Record the five texts with the fork links replaced by `<link>`.
   - Result: Dry runs with the system python3 (no venv), run link and fake commit: start '🟡 Weekly do Horizon ETL começou / Branch: main · agendada / <link|Ver a run>'; passou '✅ … passou / Branch: main · tempo: 1h 52min / Zips: <link|bdf8f86> / <link|Ver a run>'; passou com avisos '⚠️ … / Zips: não mudaram / Fases com falha: openalex_citations / …'; falhou '❌ … / Passo: Run weekly flows / Fases críticas: sigpesq / …'; cancelada '⏹️ … cancelada / Branch: main · tempo: 1h 52min / <link|Ver a run>'. Real call without the secret: the warning line, exit 0.
-- [ ] T021 Fork run, normal (only when the maintainer asks; RafaelDeps fork only; push without force). Follow quickstart section 3.1 and record:
+- [X] T021 Fork run, normal (only when the maintainer asks; RafaelDeps fork only; push without force). Follow quickstart section 3.1 and record:
   - the run id and its result;
   - that the two messages arrived (the maintainer confirms in the channel);
   - their result line;
   - 0 matches of `hooks.slack.com` in the run log.
+  - Result: Fork run 43967598607 on 040-slack-weekly-notice (workflow_dispatch, 2026-11-16 22:11 UTC to 2026-11-17 00:05 UTC, 1h54): success. "Notify Slack: start" and "Notify Slack: end" both succeeded, with no Slack warning. The maintainer confirmed both messages in the channel (start, then end with "passou", the time, the run link and the archive commit 605ad2f). The run log has 0 occurrences of hooks.slack.com; the webhook shows only as ***.
 - [ ] T022 Fork run with a forced failure before the ETL (only when the maintainer asks). Follow quickstart section 3.2, on a throwaway branch deleted afterwards, and record that the end message said "falhou" with the step name.
 
 ---
