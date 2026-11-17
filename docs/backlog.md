@@ -690,3 +690,17 @@ these differences remain, none of them in a field the merge decides:
   archives as release assets, rewrite old archive history, or keep them in a
   separate data repository. Status: Open, accepted for now (maintainer's
   decision of 2026-11-14).
+- **TD-055 — The weekly stopped on a Snap Store outage**: the step "Install
+  Chromium for Lattes (Selenium)" ran `apt-get install chromium-browser`, which
+  on the Ubuntu runner installs the Chromium snap. Nothing used that browser
+  (the Lattes download and the SigPesq agent open the Playwright Chromium),
+  but on 2026-11-16 the Snap Store failed and the step stopped 4 of 5 fork
+  runs on main (43884759079, 43888936897, 43900663973, 43908662006,
+  43916614948) before the ETL started. Status: Closed by branch 039: the step
+  and the `CHROME_BINARY` / `CHROMEDRIVER_PATH` variables were removed from the
+  workflow.
+- **TD-056 — The `selenium` dependency is no longer used**: `requirements.txt`
+  and `pyproject.toml` still list `selenium>=4.0.0`, but no code imports it
+  since scriptLattes moved to Playwright (branch 039 checked `src/`, `app.py`
+  and the installed packages). Removing it changes the installed packages and
+  was left out of branch 039. Status: Open.

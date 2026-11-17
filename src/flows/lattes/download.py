@@ -150,9 +150,7 @@ def _check_playwright_chromium() -> bool:
         return False
 
 
-def validate_script_lattes_runtime(
-    chromedriver_path: str = "./chromedriver", chrome_binary: str | None = None
-) -> str:
+def validate_script_lattes_runtime() -> str:
     """Validate that Playwright Chromium is available for scriptLattes."""
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
@@ -169,7 +167,7 @@ def validate_script_lattes_runtime(
     return "playwright-chromium"
 
 
-def patch_script_lattes_runtime(chrome_binary: str | None = None) -> None:
+def patch_script_lattes_runtime() -> None:
     try:
         import scriptLattes.baixaLattes as baixa_lattes
     except ImportError as exc:
