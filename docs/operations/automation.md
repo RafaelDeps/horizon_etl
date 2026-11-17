@@ -32,6 +32,8 @@ A workflow depende destes secrets do GitHub:
 - `SIGPESQ_PASSWORD`
 - `HORIZON_TELEGRAM_BOT_TOKEN`
 - `HORIZON_TELEGRAM_CHAT_ID`
+- `HORIZON_SLACK_WEBHOOK_URL` (opcional, spec 040; sem ele o aviso no Slack e
+  apenas pulado)
 
 ## Origem das credenciais SigPesq
 
@@ -71,6 +73,43 @@ uma mensagem final com:
 - resumo de duplicidades
 - warnings estruturados por fonte
 - resumo do tracking, quando disponivel
+
+## Aviso no Slack (spec 040)
+
+A weekly do GitHub Actions avisa um canal do Slack duas vezes, por qualquer
+branch em que rodar (main ou branches de spec), com o nome da branch:
+
+- **ao comecar** (passo "Notify Slack: start", logo depois do checkout): branch,
+  se foi `agendada` ou `manual`, e o link da run;
+- **ao terminar** (passo "Notify Slack: end", sempre o ultimo, roda mesmo depois
+  de falha ou cancelamento): o resultado, a branch, o tempo total e o link da
+  run. O resultado e um destes:
+  - `passou`: mostra o commit dos zips (hash curto com link) ou "nao mudaram";
+  - `passou com avisos`: igual, mais as fases nao criticas que falharam;
+  - `falhou`: o primeiro passo que falhou e, se foi "Run weekly flows", as
+    fases criticas que falharam;
+  - `cancelada`.
+
+As mensagens nao citam ninguem nem mostram totais de dados. Runs locais
+(`make weekly-flows`) nao avisam. O Telegram continua igual.
+
+As fases vem de `data/reports/weekly_phase_summary.json`, que a weekly grava
+ao final; o passo que falhou vem da API do GitHub da propria run.
+
+### Como configurar
+
+1. Em https://api.slack.com/apps, criar um app (**Create New App** → **From
+   scratch** → **Pick features**) com o escopo `incoming-webhook`.
+2. Em **Incoming Webhooks**, clicar em **Add New Webhook to Workspace** e
+   escolher o canal. O webhook posta so nesse canal; para trocar de canal, criar
+   outro webhook e trocar o secret.
+3. Salvar a Webhook URL como secret `HORIZON_SLACK_WEBHOOK_URL` em **Settings →
+   Secrets and variables → Actions**.
+
+A URL e uma credencial: o script `src/scripts/notify_slack.py` nunca a
+imprime, e os dois passos do aviso tem `continue-on-error`. Sem o secret, ou
+com o Slack fora do ar, a run so mostra um `::warning::` e termina com o mesmo
+resultado que teria sem o aviso.
 
 ## Artefatos publicados
 

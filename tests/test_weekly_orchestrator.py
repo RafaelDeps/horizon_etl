@@ -543,3 +543,57 @@ def test_a_failed_parquet_archive_leaves_the_run_green():
     seen = []
     assert _run_weekly_with(fail=["parquet_archive"], seen=seen) == 0
     assert "anonymize_backfill" in seen
+
+
+# --- Spec 040: the weekly writes a phase summary for the Slack notice --------
+
+
+def test_run_weekly_writes_the_phase_summary(_phase_summary_in_tmp):
+    import json
+
+    fake = _fake_run_factory(fail_cmd="ingest_lattes_projects", rc=1)
+    with (
+        patch("src.notifications.telegram.send_telegram_message", return_value=True),
+        patch.object(wo.subprocess, "run", side_effect=fake),
+    ):
+        rc = wo.run_weekly()
+
+    assert rc == 0
+    summary = json.loads(_phase_summary_in_tmp.read_text(encoding="utf-8"))
+    names = [p[0] for p in wo._PHASES]
+    assert [p["name"] for p in summary["phases"]] == names
+    for phase in summary["phases"]:
+        assert set(phase) == {"name", "ok", "critical", "rc"}
+    failed = [p for p in summary["phases"] if not p["ok"]]
+    assert summary["failed"] == [p["name"] for p in failed]
+    assert summary["critical_failed"] == [p["name"] for p in failed if p["critical"]]
+    assert summary["failed"] and not summary["critical_failed"]
+
+
+def test_a_skipped_phase_is_written_as_skipped(_phase_summary_in_tmp):
+    import json
+
+    fake = _fake_run_factory(fail_cmd="export_canonical", rc=1)
+    with (
+        patch("src.notifications.telegram.send_telegram_message", return_value=True),
+        patch.object(wo.subprocess, "run", side_effect=fake),
+    ):
+        rc = wo.run_weekly()
+
+    assert rc == 1
+    summary = json.loads(_phase_summary_in_tmp.read_text(encoding="utf-8"))
+    zip_phase = next(p for p in summary["phases"] if p["name"] == "zip_exports")
+    assert zip_phase["rc"] == "skipped"
+    assert "export_canonical" in summary["critical_failed"]
+
+
+def test_a_summary_write_error_does_not_change_the_result(tmp_path, monkeypatch):
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("x")
+    monkeypatch.setattr(wo, "PHASE_SUMMARY_PATH", str(blocker / "summary.json"))
+    fake = _fake_run_factory()
+    with (
+        patch("src.notifications.telegram.send_telegram_message", return_value=True),
+        patch.object(wo.subprocess, "run", side_effect=fake),
+    ):
+        assert wo.run_weekly() == 0

@@ -16,6 +16,17 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _phase_summary_in_tmp(tmp_path, monkeypatch):
+    """Spec 040: run_weekly writes its phase summary for the Slack notice;
+    every test that runs it writes to its own folder, never data/reports/."""
+    import src.flows.pipelines.weekly_orchestrator as orchestrator
+
+    path = tmp_path / "weekly_phase_summary.json"
+    monkeypatch.setattr(orchestrator, "PHASE_SUMMARY_PATH", str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
 def _no_rule_version_reset(monkeypatch, tmp_path_factory):
     """run_weekly may rebuild DATABASE_URL when its rule version differs
     (spec 020, FR-024). Tests fake the phases: never let that touch the
