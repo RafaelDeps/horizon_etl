@@ -419,6 +419,13 @@ so no test run before it leaves a local database half under the new rules.
     - Counts: people 18,443; initiatives 15,545; articles 8,079; productions 3,732.
   - The maintainer confirmed that the channel got only the two messages of the main run and none from the branch runs. Accepted.
 
+- [X] T039 Fix the CI lint failure found after the merge into fork main.
+  - The CI run of the push (44284192954) failed in "Run Linting": the format check covers the changed `.py` files, and 3 of the 27 were not formatted.
+    - `src/core/logic/strategies/lattes_advisorships.py` and `src/core/logic/strategies/lattes_projects.py`: black and isort. This was already the case before 041; the check showed it because 041 changed these files.
+    - `tests/test_canonical_exporter.py`: black, for the new year test of T038. Its import order was already wrong before 041.
+  - Fix: `isort` and `black` on the 3 files. Only spacing, line breaks and import order change.
+  - Check: black and isort pass on all 27 `.py` files changed since c5ffe55; `flake8 --select=E9,F63,F7,F82` gives 0; full suite 1847 passed, 10 skipped.
+
 ---
 
 ## Dependencies & Execution Order

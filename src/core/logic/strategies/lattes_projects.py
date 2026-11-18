@@ -1,10 +1,11 @@
-from typing import Any, Dict, List
 from datetime import datetime
+from typing import Any, Dict, List
 
-from .base import ProjectMappingStrategy
 from src.adapters.sources.lattes_parser import LattesParser
 from src.core.logic.initiative_identity import build_identity_key
 from src.core.logic.person_name_rules import is_name_fragment
+
+from .base import ProjectMappingStrategy
 
 
 class LattesProjectMappingStrategy(ProjectMappingStrategy):
@@ -12,7 +13,9 @@ class LattesProjectMappingStrategy(ProjectMappingStrategy):
     Strategy for mapping Lattes JSON project data to canonical domain models.
     """
 
-    def __init__(self, target_researcher_name: str, researcher_roles: Dict[str, str] = None):
+    def __init__(
+        self, target_researcher_name: str, researcher_roles: Dict[str, str] = None
+    ):
         super().__init__()
         self.parser = LattesParser()
         self.target_researcher_name = target_researcher_name
@@ -28,14 +31,14 @@ class LattesProjectMappingStrategy(ProjectMappingStrategy):
         """
         start_year = row.get("start_year")
         end_year = row.get("end_year")
-        
+
         start_date = None
         if start_year:
             try:
                 start_date = datetime.strptime(f"{start_year}-01-01", "%Y-%m-%d")
             except ValueError:
                 pass
-                
+
         end_date = None
         if end_year:
             try:
@@ -45,20 +48,20 @@ class LattesProjectMappingStrategy(ProjectMappingStrategy):
 
         # Identify roles from raw members
         raw_members = row.get("raw_members", [])
-        
+
         coordinator_name = None
         student_names = []
         researcher_names = []
-        
+
         for m in raw_members:
             m_name = m.get("nome", "")
             # Branch 041: "D", "J" or "-" in the member list are not people.
             if is_name_fragment(m_name):
                 continue
             m_role = m.get("papel", "Integrante").lower()
-            
+
             if "coordenador" in m_role:
-                if not coordinator_name: 
+                if not coordinator_name:
                     coordinator_name = m_name
                 else:
                     researcher_names.append(m_name)
@@ -66,9 +69,12 @@ class LattesProjectMappingStrategy(ProjectMappingStrategy):
                 student_names.append(m_name)
             else:
                 researcher_names.append(m_name)
-                
+
         # If no coordinator found but target researcher is marked as coordinator in Lattes
-        if not coordinator_name and (row.get("role") == "Coordenador" or self.researcher_roles.get(row.get("name")) == "Coordenador"):
+        if not coordinator_name and (
+            row.get("role") == "Coordenador"
+            or self.researcher_roles.get(row.get("name")) == "Coordenador"
+        ):
             coordinator_name = self.target_researcher_name
             # remove from researchers if present
             researcher_names = [
@@ -83,37 +89,36 @@ class LattesProjectMappingStrategy(ProjectMappingStrategy):
             self.parser.normalize_title(coordinator_name)
             != self.target_researcher_name_normalized
         ):
-             if not any(
-                 self.parser.normalize_title(n)
-                 == self.target_researcher_name_normalized
-                 for n in researcher_names + student_names
-             ):
-                 researcher_names.append(self.target_researcher_name)
+            if not any(
+                self.parser.normalize_title(n) == self.target_researcher_name_normalized
+                for n in researcher_names + student_names
+            ):
+                researcher_names.append(self.target_researcher_name)
 
         # Extract sponsors
         raw_sponsors = row.get("raw_sponsors", [])
         sponsor_name = None
         if raw_sponsors:
-             sponsor_name = raw_sponsors[0].get("nome")
+            sponsor_name = raw_sponsors[0].get("nome")
 
         return {
             "title": row.get("name"),
-            "status": row.get("status"), # Lattes parser standardizes this
+            "status": row.get("status"),  # Lattes parser standardizes this
             "start_date": start_date,
             "end_date": end_date,
             "description": row.get("description"),
-            "value": 0.0, # Lattes doesn't reliably provide project value
+            "value": 0.0,  # Lattes doesn't reliably provide project value
             "coordinator_name": coordinator_name,
             "researcher_names": researcher_names,
             "student_names": student_names,
-            "research_group_name": None, # Lattes doesn't link projects to research groups reliably
+            "research_group_name": None,  # Lattes doesn't link projects to research groups reliably
             "metadata": {
                 "external_partner": sponsor_name,
                 "project_nature": row.get("nature"),
                 "initiative_type_name": row.get("initiative_type_name"),
                 "source_system": "lattes_projects",
             },
-            "campus_name": None, # Lattes doesn't provide campus
+            "campus_name": None,  # Lattes doesn't provide campus
             "identity_key": build_identity_key(
                 [
                     "lattes_project",

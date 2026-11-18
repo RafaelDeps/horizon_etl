@@ -1716,10 +1716,23 @@ def test_export_articles_blanks_implausible_years():
     """Branch 041: the database keeps the source year (0 from the crawler);
     the export shows no fake year."""
     exporter, _ = _make_exporter()
-    columns = ("id", "title", "doi", "year", "type", "journal_conference", "volume", "pages")
+    columns = (
+        "id",
+        "title",
+        "doi",
+        "year",
+        "type",
+        "journal_conference",
+        "volume",
+        "pages",
+    )
     rows = [
-        SimpleNamespace(**dict(zip(columns, (1, "A", None, 2015, "JOURNAL", "", None, "")))),
-        SimpleNamespace(**dict(zip(columns, (2, "R.. ", None, 0, "CONFERENCE_EVENT", "", None, "")))),
+        SimpleNamespace(
+            **dict(zip(columns, (1, "A", None, 2015, "JOURNAL", "", None, "")))
+        ),
+        SimpleNamespace(
+            **dict(zip(columns, (2, "R.. ", None, 0, "CONFERENCE_EVENT", "", None, "")))
+        ),
     ]
     session = MagicMock()
     session.execute.return_value.fetchall.return_value = rows
