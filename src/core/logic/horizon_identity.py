@@ -33,7 +33,10 @@ from src.core.logic.initiative_identity import normalize_text
 # 6 (branch 036): the student of a Lattes advisorship is stored under the
 # clean name, so persons named with the title of a work, an academic title or
 # a link are renamed by one rebuild.
-HORIZON_RULE_VERSION = 6
+# 7 (branch 041): advisors of academic degrees, students split on "/", project
+# members, Lattes titles and article years are read by new rules, so a
+# database written before is rebuilt once.
+HORIZON_RULE_VERSION = 7
 
 # Similarity (rapidfuzz token_sort_ratio, 0-100) at which two names or titles
 # are the same thing: PersonMatcher's fuzzy threshold, and the "key corrected"

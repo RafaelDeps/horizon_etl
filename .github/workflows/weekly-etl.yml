@@ -237,8 +237,11 @@ jobs:
           ARCHIVE_COMMIT: ${{ steps.archives.outputs.commit }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # Spec 041: only runs on main send; the script checks it itself.
           if [ -f src/scripts/notify_slack.py ]; then
             python3 -m src.scripts.notify_slack end
+          elif [ "${GITHUB_REF_NAME:-}" != "main" ]; then
+            echo "::notice::Slack pulado: a branch ${GITHUB_REF_NAME:-(desconhecida)} não é a main."
           elif [ -n "${HORIZON_SLACK_WEBHOOK_URL// /}" ]; then
             RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             PAYLOAD=$(printf '{"text":"❌ Weekly do Horizon ETL falhou antes do checkout (branch: %s) <%s|Ver a run>"}' "$GITHUB_REF_NAME" "$RUN_URL")

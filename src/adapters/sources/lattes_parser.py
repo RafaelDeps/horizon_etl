@@ -12,6 +12,7 @@ from src.core.logic.professional_activity_rules import (
     split_institution,
 )
 from src.core.logic.student_name_rules import CleanedName, clean_student_name
+from src.core.logic.title_rules import fix_lost_dash
 
 
 @dataclass
@@ -66,7 +67,7 @@ class LattesParser:
         items = biblio.get("artigos_periodicos", [])
         parsed = []
         for item in items:
-            title = item.get("titulo")
+            title = fix_lost_dash(item.get("titulo"))
             parsed.append(
                 {
                     "title": title,
@@ -90,7 +91,7 @@ class LattesParser:
         items = biblio.get("trabalhos_completos_congressos", [])
         parsed = []
         for item in items:
-            title = item.get("titulo")
+            title = fix_lost_dash(item.get("titulo"))
             parsed.append(
                 {
                     "title": title,
@@ -316,7 +317,7 @@ class LattesParser:
                 for item in items:
                     if not isinstance(item, dict):
                         continue
-                    title = (item.get("titulo") or "").strip()
+                    title = fix_lost_dash((item.get("titulo") or "").strip())
                     if not title:
                         continue
                     parsed.append(
@@ -338,7 +339,7 @@ class LattesParser:
         projects_list = data.get(projects_key, [])
 
         for p in projects_list:
-            name = p.get("name") or p.get("nome")
+            name = fix_lost_dash(p.get("name") or p.get("nome"))
             start_year_str = p.get("ano_inicio")
             end_year_str = p.get("ano_conclusao")
 
@@ -473,7 +474,7 @@ class LattesParser:
         """
         parsed = []
         for item in items:
-            title = item.get("titulo")
+            title = fix_lost_dash(item.get("titulo"))
             # Try specific keys first, then generic
             student = self._advisorship_student(item)
 
@@ -530,6 +531,7 @@ class LattesParser:
                         "title": title,
                         "normalized_title": self.normalize_title(title),
                         "student_name": student.name,
+                        "student_names": list(student.names),
                         "student_name_kinds": student.kinds,
                         "year": year,
                         "start_year": start_year,
@@ -588,7 +590,7 @@ class LattesParser:
                 canonical_type = "Post-Doc Supervision"
 
             # Extract common fields
-            title = item.get("titulo")
+            title = fix_lost_dash(item.get("titulo"))
             student = self._advisorship_student(item)
 
             start_year_str = item.get("ano_inicio")
@@ -613,6 +615,7 @@ class LattesParser:
                         "title": title,
                         "normalized_title": self.normalize_title(title),
                         "student_name": student.name,
+                        "student_names": list(student.names),
                         "student_name_kinds": student.kinds,
                         "year": year,
                         "start_year": start_year,

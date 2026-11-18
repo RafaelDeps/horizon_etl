@@ -49,6 +49,9 @@ STUDENT_NAME_KINDS = (
     ("not_a_name", "not a name"),
     ("several", "several"),
     ("uncut", "uncut"),
+    # Branch 041: fields split into several students, citations cut.
+    ("split", "split"),
+    ("citation", "citation"),
 )
 _student_name_counts: Counter = Counter()
 

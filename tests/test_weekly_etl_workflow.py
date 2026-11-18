@@ -373,3 +373,76 @@ def test_no_step_prints_the_webhook():
     printing = re.compile(r"\b(echo|printf|cat)\b[^\n]*\$\{?HORIZON_SLACK_WEBHOOK_URL")
     for step in steps:
         assert not printing.search(step.get("run") or ""), step.get("name")
+
+
+# --- Spec 041: Slack notices only from runs on main --------------------------
+
+
+def test_slack_start_step_has_no_branch_condition():
+    # The branch check lives in the script, so the notice reaches the log.
+    _, steps = _steps()
+    step = _step(steps, "Notify Slack: start")
+    assert "if" not in step
+
+
+def _run_end_fallback(tmp_path, branch, webhook="https://example.invalid/hook"):
+    """Runs the end step's shell block where the script is missing (a failed
+    checkout), with a fake curl that records its calls."""
+    import os
+    import subprocess
+
+    _, steps = _steps()
+    script = _step(steps, "Notify Slack: end")["run"]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "curl_calls"
+    fake = bin_dir / "curl"
+    fake.write_text(f'#!/bin/sh\necho called >> "{calls}"\n')
+    fake.chmod(0o755)
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "HORIZON_SLACK_WEBHOOK_URL": webhook,
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "RafaelDeps/horizon_etl",
+        "GITHUB_RUN_ID": "1",
+    }
+    if branch is not None:
+        env["GITHUB_REF_NAME"] = branch
+    work = tmp_path / "work"
+    work.mkdir()
+    result = subprocess.run(
+        ["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True
+    )
+    sent = calls.exists()
+    return result, sent
+
+
+def test_end_fallback_sends_on_main(tmp_path):
+    result, sent = _run_end_fallback(tmp_path, "main")
+    assert result.returncode == 0
+    assert sent
+    assert "Slack pulado" not in result.stdout
+
+
+def test_end_fallback_warns_on_main_without_webhook(tmp_path):
+    result, sent = _run_end_fallback(tmp_path, "main", webhook="")
+    assert not sent
+    assert "Slack não configurado" in result.stdout
+
+
+def test_end_fallback_skips_other_branches(tmp_path):
+    result, sent = _run_end_fallback(tmp_path, "041-dashboard-visible-fixes")
+    assert result.returncode == 0
+    assert not sent
+    assert (
+        "::notice::Slack pulado: a branch 041-dashboard-visible-fixes não é a main."
+        in result.stdout
+    )
+
+
+def test_end_fallback_skips_an_unknown_branch(tmp_path):
+    result, sent = _run_end_fallback(tmp_path, None)
+    assert not sent
+    assert (
+        "::notice::Slack pulado: a branch (desconhecida) não é a main." in result.stdout
+    )

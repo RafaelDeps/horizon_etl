@@ -160,3 +160,35 @@ def test_a_doi_with_spaces_or_a_trailing_full_stop_matches(session):
     spaced = "http://dx.doi.org/10.3390 / fishes6030031"
     assert _find_article(session, "Other", 2020, spaced) == 1
     assert _find_article(session, "Other", 2020, "10.3390/fishes6030031.") == 1
+
+
+def test_a_failed_article_rolls_back_and_the_next_one_is_ingested():
+    """Branch 041: one failing article is rolled back, so the session stays
+    usable and the rest of the curriculum is ingested."""
+    from unittest.mock import MagicMock, patch
+
+    from src.flows.lattes.projects import ingest_articles_task
+
+    session = MagicMock()
+    session.execute.return_value.scalar.return_value = 1
+    ctrl = MagicMock()
+    ctrl._service._repository._session = session
+    ctrl.create_article.side_effect = [Exception("NOT NULL"), MagicMock(id=7)]
+    articles = [
+        {"title": "Bad", "year": None, "type": "Journal", "doi": None},
+        {"title": "Good", "year": 2020, "type": "Journal", "doi": None},
+    ]
+    with (
+        patch("src.flows.lattes.projects.ArticleController", return_value=ctrl),
+        patch("src.flows.lattes.projects.tracking_recorder"),
+        patch("src.flows.lattes.projects._find_article", return_value=None),
+        patch("src.flows.lattes.projects.mark_partial") as partial,
+        patch("src.flows.lattes.projects.carry"),
+    ):
+        ingest_articles_task(
+            articles, MagicMock(id=3, name="X"), [], MagicMock(), "cv.json"
+        )
+
+    session.rollback.assert_called_once()
+    assert ctrl.create_article.call_count == 2
+    partial.assert_called_once()

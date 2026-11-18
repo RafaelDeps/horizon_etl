@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import date, datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from eo_lib import Initiative, InitiativeController, Person
 from eo_lib.domain import Role
@@ -329,6 +329,22 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         )
         return self._coerce_to_person(student_person)
 
+    def _student_persons(
+        self, project_data: Dict[str, Any], first: Optional[Any]
+    ) -> List[Any]:
+        """Branch 041: the item's students. The first is the one already
+        resolved (``_student_person``, used for matching); each further name of
+        a split field is resolved the same way."""
+        people = [first] if first else []
+        for name in (project_data.get("student_names") or [])[1:]:
+            if not (isinstance(name, str) and name.strip()):
+                continue
+            match = self.person_matcher.match_or_create(name, strict_match=True)
+            match = self._coerce_to_person(match)
+            if match:
+                people.append(match)
+        return people
+
     def item_student(self, project_data: Dict[str, Any]) -> tuple:
         """Spec 035: the student of an advisorship item as the matching rule
         compares it: (person id or None, normalized name or "")."""
@@ -483,19 +499,30 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         person: Optional[Any],
         role_name: str,
         start_date: Optional[Any],
+        persons: Optional[List[Any]] = None,
     ) -> None:
-        person = self._coerce_to_person(person)
+        """Sets the members of one role. ``persons`` (branch 041) gives every
+        person of the role, for an item with several students; otherwise the
+        role holds ``person`` alone, as before."""
+        people: List[Any] = []
+        for candidate in persons if persons is not None else [person]:
+            candidate = self._coerce_to_person(candidate)
+            if candidate and all(p.id != candidate.id for p in people):
+                people.append(candidate)
+        person = people[0] if people else None
 
         if self.defer_members and getattr(initiative, "id", None):
             self._pending_members[(initiative.id, role_name)] = (
                 initiative,
-                person,
+                people,
                 start_date,
             )
             return
 
         if advisorship_supports_members_api(initiative):
             members = list(getattr(initiative, "members", []) or [])
+            day = str(start_date or "")[:10]
+            wanted = {p.id for p in people}
             current = [
                 member
                 for member in members
@@ -503,27 +530,30 @@ class AdvisorshipHandler(BaseInitiativeHandler):
             ]
             # The same person in the same role from the same day: keep the row
             # instead of deleting and re-inserting it (spec 020, FR-022).
-            if (
-                person
-                and len(current) == 1
-                and getattr(current[0], "person_id", None) == person.id
-                and getattr(current[0], "end_date", None) is None
-                and str(getattr(current[0], "start_date", None) or "")[:10]
-                == str(start_date or "")[:10]
-            ):
+            kept = [
+                member
+                for member in current
+                if getattr(member, "person_id", None) in wanted
+                and getattr(member, "end_date", None) is None
+                and str(getattr(member, "start_date", None) or "")[:10] == day
+            ]
+            kept_ids = {getattr(member, "person_id", None) for member in kept}
+            if people and len(kept) == len(current) and kept_ids == wanted:
                 return
-            retained_members = [
+            initiative.members = [
                 member
                 for member in members
-                if getattr(member, "role_name", None) != role_name
+                if getattr(member, "role_name", None) != role_name or member in kept
             ]
-            initiative.members = retained_members
 
-            if not person:
+            missing = [p for p in people if p.id not in kept_ids]
+            if not missing:
                 return
-
             role = self._get_or_create_advisorship_role(role_name)
-            initiative.add_member(person=person, role=role, start_date=start_date)
+            for new_person in missing:
+                initiative.add_member(
+                    person=new_person, role=role, start_date=start_date
+                )
             return
 
         if role_name == AdvisorshipRole.STUDENT.value:
@@ -547,11 +577,12 @@ class AdvisorshipHandler(BaseInitiativeHandler):
         deferred, self.defer_members = self.defer_members, False
         try:
             for key in sorted(pending, key=lambda k: (k[0], k[1])):
-                initiative, person, start_date = pending[key]
+                initiative, people, start_date = pending[key]
                 try:
                     self._sync_advisorship_member(
                         initiative,
-                        person=person,
+                        person=people[0] if people else None,
+                        persons=people,
                         role_name=key[1],
                         start_date=start_date,
                     )
@@ -718,6 +749,7 @@ class AdvisorshipHandler(BaseInitiativeHandler):
             self._sync_advisorship_member(
                 initiative,
                 person=student_person,
+                persons=self._student_persons(project_data, first=student_person),
                 role_name=AdvisorshipRole.STUDENT.value,
                 start_date=start_date,
             )

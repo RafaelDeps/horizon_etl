@@ -125,8 +125,64 @@ def test_the_student_name_summary_reports_every_kind_and_starts_again():
 
     assert line == (
         "student names: title 1, link 1, work title 1, footnote 0, "
-        "not a name 1, several 1, uncut 0"
+        "not a name 1, several 1, uncut 0, split 0, citation 0"
     )
     logger.info.assert_called_once_with(line)
-    assert module.log_student_name_summary(MagicMock()).endswith("uncut 0")
+    assert module.log_student_name_summary(MagicMock()).endswith(
+        "uncut 0, split 0, citation 0"
+    )
     assert "work title 0" in module.log_student_name_summary(MagicMock())
+
+
+# --- Spec 041: several students in one field ---------------------------------
+
+
+def test_every_student_reaches_the_team_and_the_key_keeps_the_joined_text():
+    from src.core.logic.initiative_identity import build_identity_key
+
+    row = {
+        "title": "Iniciação Científica",
+        "student_name": "Gladston Campos",
+        "student_names": ["Gladston Campos", "Niase Borjaille"],
+        "start_year": 2020,
+        "type_name": "Scientific Initiation",
+    }
+    mapped = LattesAdvisorshipMappingStrategy("Ana Supervisora").map_row(row)
+
+    assert mapped["student_names"] == ["Gladston Campos", "Niase Borjaille"]
+    before = build_identity_key(
+        [
+            "lattes_advisorship",
+            "Iniciação Científica",
+            "Ana Supervisora",
+            "Gladston Campos/Niase Borjaille",
+            2020,
+            "Scientific Initiation",
+        ]
+    )
+    assert mapped["identity_key"] == before
+
+
+def test_one_student_keeps_todays_key():
+    row = {"title": "TCC", "student_name": "Maria da Silva", "start_year": 2021}
+    old = LattesAdvisorshipMappingStrategy("Ana Supervisora").map_row(row)
+    new = LattesAdvisorshipMappingStrategy("Ana Supervisora").map_row(
+        dict(row, student_names=["Maria da Silva"])
+    )
+
+    assert new["identity_key"] == old["identity_key"]
+    assert new["student_names"] == old["student_names"] == ["Maria da Silva"]
+
+
+def test_the_summary_counts_split_fields_and_citations():
+    logger = MagicMock()
+    module.log_student_name_summary(MagicMock())
+    module.count_student_names(
+        [
+            {"student_name_kinds": ("split",)},
+            {"student_name_kinds": ("citation", "work_title")},
+        ]
+    )
+    line = module.log_student_name_summary(logger)
+    assert "split 1" in line
+    assert "citation 1" in line

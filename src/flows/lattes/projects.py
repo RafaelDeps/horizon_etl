@@ -3,7 +3,6 @@ import gc
 import glob
 import json
 import os
-import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -39,6 +38,7 @@ from src.core.logic.horizon_identity import (
     normalize_doi,
 )
 from src.core.logic.initiative_identity import normalize_text
+from src.core.logic.person_name_rules import advisor_name
 from src.core.logic.pii_anonymizer import scrub_pii_deep
 from src.core.logic.professional_activity_rules import activity_key
 from src.core.logic.project_loader import ProjectLoader
@@ -635,6 +635,9 @@ def ingest_articles_task(
                     mark_partial(f"article link: {link_err}")
 
         except Exception as art_err:
+            # Branch 041: undo the failed flush, so one bad article never
+            # fails the rest of the curriculum (PendingRollbackError).
+            session.rollback()
             logger.error(f"Failed to ingest article {art.get('title')}: {art_err}")
             mark_partial(f"article: {art_err}")
 
@@ -678,11 +681,10 @@ def ingest_education_task(
             description = edu_data.get("description", "")
 
             if description:
-                adv_match = re.search(
-                    r"Orientador:\s*([^.;)]+)", description, re.IGNORECASE
-                )
-                if adv_match:
-                    adv_name = adv_match.group(1).strip()
+                # Branch 041: read past the academic titles; the old capture
+                # stopped at the first full stop and stored "Prof" or "Dr".
+                adv_name = advisor_name(description)
+                if adv_name:
                     adv_res = resolve_or_create_researcher(
                         researcher_ctrl,
                         all_researchers,
@@ -691,11 +693,8 @@ def ingest_education_task(
                     if adv_res:
                         advisor_id = getattr(adv_res, "id")
 
-                co_match = re.search(
-                    r"Co-?orientador:\s*([^.;)]+)", description, re.IGNORECASE
-                )
-                if co_match:
-                    co_name = co_match.group(1).strip()
+                co_name = advisor_name(description, co=True)
+                if co_name:
                     co_res = resolve_or_create_researcher(
                         researcher_ctrl,
                         all_researchers,

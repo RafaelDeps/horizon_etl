@@ -9,6 +9,10 @@ Called only by the two notice steps of ``.github/workflows/weekly-etl.yml``:
   first failed step and the critical phases when it failed, and the archive
   commit (or "não mudaram") when it passed.
 
+Spec 041: only runs on ``main`` (``NOTIFY_BRANCH``) send; a run on any other
+branch prints a ``::notice::`` naming the branch and sends nothing, so the
+validation runs of feature branches do not disturb the channel.
+
 The webhook comes only from ``HORIZON_SLACK_WEBHOOK_URL`` and is never printed.
 The script always exits 0: a missing secret or a Slack error is only a
 ``::warning::`` line, so the notice can never change the weekly's result.
@@ -30,6 +34,7 @@ import urllib.request
 from typing import Mapping, Optional
 
 WEBHOOK_VARIABLE = "HORIZON_SLACK_WEBHOOK_URL"
+NOTIFY_BRANCH = "main"
 PHASE_SUMMARY_PATH = "data/reports/weekly_phase_summary.json"
 WEEKLY_FLOWS_STEP = "Run weekly flows"
 JOB_NAME = "run-etl"
@@ -47,6 +52,7 @@ _RESULTS = {
 WARN_NOT_CONFIGURED = (
     f"::warning::Slack não configurado ({WEBHOOK_VARIABLE} vazio); aviso pulado."
 )
+NOTICE_OTHER_BRANCH = "::notice::Slack pulado: a branch {branch} não é a main."
 WARN_REFUSED = "::warning::Slack recusou a mensagem (HTTP {code}); aviso pulado."
 WARN_NO_ANSWER = "::warning::Slack não respondeu; aviso pulado."
 WARN_INTERNAL = "::warning::Aviso do Slack não montado (erro interno); aviso pulado."
@@ -246,6 +252,10 @@ def main(argv=None) -> int:
 
     if args.dry_run:
         print(text)
+        return 0
+    branch = (env.get("GITHUB_REF_NAME") or "").strip()
+    if branch != NOTIFY_BRANCH:
+        print(NOTICE_OTHER_BRANCH.format(branch=branch or "(desconhecida)"))
         return 0
     webhook = (env.get(WEBHOOK_VARIABLE) or "").strip()
     if not webhook:

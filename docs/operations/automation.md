@@ -76,8 +76,8 @@ uma mensagem final com:
 
 ## Aviso no Slack (spec 040)
 
-A weekly do GitHub Actions avisa um canal do Slack duas vezes, por qualquer
-branch em que rodar (main ou branches de spec), com o nome da branch:
+A weekly do GitHub Actions avisa um canal do Slack duas vezes, so quando roda
+na `main` (inclusive a run agendada), com o nome da branch:
 
 - **ao comecar** (passo "Notify Slack: start", logo depois do checkout): branch,
   se foi `agendada` ou `manual`, e o link da run;
@@ -92,6 +92,12 @@ branch em que rodar (main ou branches de spec), com o nome da branch:
 
 As mensagens nao citam ninguem nem mostram totais de dados. Runs locais
 (`make weekly-flows`) nao avisam. O Telegram continua igual.
+
+Desde a spec 041, runs em qualquer outra branch (as branches de spec usadas
+para validar) nao mandam nada: os dois passos so escrevem no log
+`::notice::Slack pulado: a branch <nome> não é a main.` e a run termina com o
+mesmo resultado. Assim as varias runs de validacao nao incomodam o canal. A
+branch que avisa e a constante `NOTIFY_BRANCH` de `src/scripts/notify_slack.py`.
 
 As fases vem de `data/reports/weekly_phase_summary.json`, que a weekly grava
 ao final; o passo que falhou vem da API do GitHub da propria run.

@@ -694,3 +694,138 @@ def test_a_fellowship_without_a_sponsor_is_created_once_and_found_again(
 
     assert later._ensure_fellowship(_fellowship_row(sponsor_name="")) is stored
     later_controller.create.assert_not_called()
+
+
+# --- Spec 041: an advisorship keeps every student of a split field ----------
+
+
+def _student_rows(advisorship):
+    return sorted(
+        m.person_id
+        for m in advisorship.members
+        if getattr(m, "role_name", None) == "Student"
+    )
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+def test_several_students_give_one_member_each_and_are_kept(MockFellowshipController):
+    from datetime import date
+
+    from research_domain.domain.entities.advisorship import AdvisorshipMember
+
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    ana, bia = MagicMock(id=41), MagicMock(id=42)
+    advisorship = Advisorship(name="Orientacao")
+    supervisor = AdvisorshipMember(
+        person_id=7, role_name="Supervisor", start_date=date(2019, 1, 1)
+    )
+    advisorship.members = [supervisor]
+
+    with (
+        patch.object(handler, "_coerce_to_person", side_effect=lambda p: p),
+        patch.object(
+            handler, "_get_or_create_advisorship_role", return_value=MagicMock()
+        ),
+        patch.object(
+            Advisorship,
+            "add_member",
+            lambda self, person, role, start_date: self.members.append(
+                AdvisorshipMember(
+                    person_id=person.id, role_name="Student", start_date=start_date
+                )
+            ),
+        ),
+    ):
+        handler._sync_advisorship_member(
+            advisorship,
+            person=ana,
+            persons=[ana, bia],
+            role_name="Student",
+            start_date=datetime(2019, 1, 1),
+        )
+        assert _student_rows(advisorship) == [41, 42]
+        assert supervisor in advisorship.members
+        rows = list(advisorship.members)
+
+        # The same students on the same day: no row is written again.
+        handler._sync_advisorship_member(
+            advisorship,
+            person=ana,
+            persons=[ana, bia],
+            role_name="Student",
+            start_date=datetime(2019, 1, 1),
+        )
+        assert advisorship.members == rows
+
+        # One student fewer: only that one is removed.
+        handler._sync_advisorship_member(
+            advisorship,
+            person=ana,
+            persons=[ana],
+            role_name="Student",
+            start_date=datetime(2019, 1, 1),
+        )
+        assert _student_rows(advisorship) == [41]
+        assert [m for m in advisorship.members if m.person_id == 41] == [
+            m for m in rows if m.person_id == 41
+        ]
+
+
+@patch("src.core.logic.initiative_handlers.FellowshipController")
+def test_several_students_are_deferred_and_flushed_together(MockFellowshipController):
+    from research_domain.domain.entities.advisorship import AdvisorshipMember
+
+    MockFellowshipController.return_value.get_all.return_value = []
+    handler = _advisorship_handler()
+    handler.defer_members = True
+    ana, bia = MagicMock(id=41), MagicMock(id=42)
+    advisorship = Advisorship(name="Orientacao")
+    advisorship.id = 9
+    advisorship.members = []
+
+    with (
+        patch.object(handler, "_coerce_to_person", side_effect=lambda p: p),
+        patch.object(
+            handler, "_get_or_create_advisorship_role", return_value=MagicMock()
+        ),
+        patch.object(
+            Advisorship,
+            "add_member",
+            lambda self, person, role, start_date: self.members.append(
+                AdvisorshipMember(
+                    person_id=person.id, role_name="Student", start_date=start_date
+                )
+            ),
+        ),
+    ):
+        handler._sync_advisorship_member(
+            advisorship,
+            person=ana,
+            persons=[ana, bia],
+            role_name="Student",
+            start_date=datetime(2019, 1, 1),
+        )
+        assert advisorship.members == []
+        assert handler.flush_members() == 1
+    assert _student_rows(advisorship) == [41, 42]
+
+
+def test_the_item_resolves_every_further_student():
+    handler = _advisorship_handler()
+    ana, bia = MagicMock(id=41), MagicMock(id=42)
+    handler.person_matcher.match_or_create.return_value = bia
+    with patch.object(handler, "_coerce_to_person", side_effect=lambda p: p):
+        people = handler._student_persons(
+            {"student_names": ["Ana Lima", "Bia Souza"]}, first=ana
+        )
+        assert people == [ana, bia]
+        handler.person_matcher.match_or_create.assert_called_once_with(
+            "Bia Souza", strict_match=True
+        )
+        # One student: nothing more is resolved.
+        handler.person_matcher.match_or_create.reset_mock()
+        assert handler._student_persons({"student_names": ["Ana Lima"]}, first=ana) == [
+            ana
+        ]
+        handler.person_matcher.match_or_create.assert_not_called()

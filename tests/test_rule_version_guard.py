@@ -99,6 +99,32 @@ def test_a_database_written_before_spec_036_needs_a_reset(tmp_path):
     assert rule_version_requires_reset(str(db)) is True
 
 
+def test_a_database_written_before_spec_041_needs_a_reset(tmp_path):
+    # Spec 041: version 6 stored degree advisors cut at the first full stop
+    # ("Prof", "Dr"), students joined by "/" as one person, one-letter project
+    # members, "?" in place of a dash in Lattes titles and year 0.
+    db = tmp_path / "v6.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE horizon_meta SET value = '6' WHERE key = 'rule_version'")
+    con.commit()
+    con.close()
+    assert HORIZON_RULE_VERSION == 7
+    assert rule_version_requires_reset(str(db)) is True
+
+
+def test_a_database_written_under_version_7_needs_no_reset(tmp_path):
+    db = tmp_path / "v7.db"
+    _build(db, order_seed=1)
+    _assign(db)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE horizon_meta SET value = '7' WHERE key = 'rule_version'")
+    con.commit()
+    con.close()
+    assert rule_version_requires_reset(str(db)) is False
+
+
 def test_weekly_resets_once_before_the_phases(
     tmp_path, monkeypatch, _no_rule_version_reset
 ):

@@ -347,3 +347,82 @@ def test_no_flow_or_makefile_calls_the_notice():
         text = path.read_text(encoding="utf-8")
         for call in calls:
             assert call not in text, (path, call)
+
+
+# --- Spec 041: notices only from runs on main --------------------------------
+
+
+def _record_sends(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        ns, "send", lambda text, webhook, **k: sent.append(text) or True
+    )
+    return sent
+
+
+@pytest.mark.parametrize("event", ["start", "end"])
+@pytest.mark.parametrize("webhook", [FAKE_WEBHOOK, None])
+def test_main_branch_keeps_spec_040_behaviour(
+    monkeypatch, capsys, tmp_path, event, webhook
+):
+    _set_env(monkeypatch, JOB_STATUS="success", GITHUB_REF_NAME="main")
+    monkeypatch.setenv("GITHUB_ENV", str(tmp_path / "github_env"))
+    if webhook:
+        monkeypatch.setenv("HORIZON_SLACK_WEBHOOK_URL", webhook)
+    else:
+        monkeypatch.delenv("HORIZON_SLACK_WEBHOOK_URL", raising=False)
+    sent = _record_sends(monkeypatch)
+    assert ns.main([event]) == 0
+    out = capsys.readouterr()
+    assert "Slack pulado" not in out.out
+    if webhook:
+        assert len(sent) == 1
+    else:
+        assert sent == []
+        assert "Slack não configurado" in out.out
+    assert "hooks.slack.com" not in out.out + out.err
+
+
+@pytest.mark.parametrize("event", ["start", "end"])
+@pytest.mark.parametrize("webhook", [FAKE_WEBHOOK, None])
+@pytest.mark.parametrize(
+    "branch, shown",
+    [
+        ("041-dashboard-visible-fixes", "041-dashboard-visible-fixes"),
+        ("", "(desconhecida)"),
+        (None, "(desconhecida)"),
+    ],
+)
+def test_other_branches_send_nothing(
+    monkeypatch, capsys, tmp_path, event, webhook, branch, shown
+):
+    _set_env(monkeypatch, JOB_STATUS="success")
+    monkeypatch.setenv("GITHUB_ENV", str(tmp_path / "github_env"))
+    if branch is None:
+        monkeypatch.delenv("GITHUB_REF_NAME", raising=False)
+    else:
+        monkeypatch.setenv("GITHUB_REF_NAME", branch)
+    if webhook:
+        monkeypatch.setenv("HORIZON_SLACK_WEBHOOK_URL", webhook)
+    else:
+        monkeypatch.delenv("HORIZON_SLACK_WEBHOOK_URL", raising=False)
+    monkeypatch.setattr(
+        ns.urllib.request, "urlopen", lambda *a, **k: pytest.fail("must not send")
+    )
+    sent = _record_sends(monkeypatch)
+    assert ns.main([event]) == 0
+    out = capsys.readouterr()
+    assert sent == []
+    assert f"::notice::Slack pulado: a branch {shown} não é a main." in out.out
+    assert "Slack não configurado" not in out.out
+    assert "hooks.slack.com" not in out.out + out.err
+
+
+def test_dry_run_prints_the_text_on_any_branch(monkeypatch, capsys):
+    _set_env(monkeypatch, JOB_STATUS="success", GITHUB_REF_NAME="feature-x")
+    assert ns.main(["end", "--dry-run"]) == 0
+    assert "Weekly do Horizon ETL" in capsys.readouterr().out
+
+
+def test_notify_branch_is_main():
+    assert ns.NOTIFY_BRANCH == "main"

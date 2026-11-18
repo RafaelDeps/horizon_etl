@@ -49,7 +49,14 @@ class LattesAdvisorshipMappingStrategy(ProjectMappingStrategy):
 
         # Lattes specifies the student directly
         student_name = row.get("student_name")
-        student_names = [student_name] if student_name else []
+        # Branch 041: a field split into several students gives them all; the
+        # key keeps them joined by " / ", which normalizes like the source text.
+        student_names = list(row.get("student_names") or []) or (
+            [student_name] if student_name else []
+        )
+        key_student = (
+            " / ".join(student_names) if len(student_names) > 1 else student_name
+        )
         
         # Sponsorship / Fellowship
         fellowship_data = None
@@ -89,7 +96,7 @@ class LattesAdvisorshipMappingStrategy(ProjectMappingStrategy):
                     "lattes_advisorship",
                     row.get("title"),
                     self.advisor_name,
-                    student_name,
+                    key_student,
                     start_year or end_year,
                     row.get("type_name"),
                 ]

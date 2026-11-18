@@ -651,7 +651,11 @@ these differences remain, none of them in a field the merge decides:
   name ("Ph", "D", "1"), from the advisor and co-advisor fields of academic
   educations; 9 in project teams (8 not a name, 1 with several people).
   The rule of `src/core/logic/student_name_rules.py` could be applied
-  there. Status: Open.
+  there. Status: Implemented by branch 041 for the advisor and co-advisor
+  fields (`advisor_name` in `src/core/logic/person_name_rules.py` reads past
+  the academic titles; the old capture stopped at the first full stop, which
+  gave "Prof", "Dr", "Ph", "M") and for one-letter project members, which are
+  skipped; validation pending.
 - **TD-049 — Advisorships are stored with the type "Research Project"**:
   `ProjectLoader` writes every row with its own initiative type, which is
   always "Research Project"; 11,367 of 11,876 advisorships carry it (509
@@ -670,7 +674,11 @@ these differences remain, none of them in a field the merge decides:
   curricula hold several people ("A/B/C", "A; B", "A, B e C", "X
   Co-orientador: Y") and each is stored as one person with that text.
   Splitting them needs an advisorship with more than one student, which
-  branch 035 does not allow. Status: Open.
+  branch 035 does not allow. Status: Partly implemented by branch 041: a field
+  joined by "/" whose parts are all names of two words or more gives one
+  student each (52 fields on 2026-11-17), and an advisorship keeps every
+  student; validation pending. Fields joined by ";", "," or " e ", and
+  "Co-orientador:" fields, are still stored as written (TD-058).
 - **TD-052 — LinkedIn links are matched by exact name only**: the local list
   of branch 037 has the name and the link, no other key. A person stored
   under another spelling is not found (34 of 182 names on 2026-11-13), and a
@@ -707,3 +715,38 @@ these differences remain, none of them in a field the merge decides:
   since scriptLattes moved to Playwright (branch 039 checked `src/`, `app.py`
   and the installed packages). Removing it changes the installed packages and
   was left out of branch 039. Status: Open.
+- **TD-057 — One-word texts kept as students of Lattes advisorships**: texts
+  that are not people but are not title fragments either stay as students:
+  "Vários", "FAPEC", "Inovafiltros", a link ("www.es.estacio.br") and comma
+  lists with no spaces ("AngeloBarros,CrisleiPaula,…"); 6 such persons among
+  the 12 one-word students of 2026-11-16 (the other 6 are first names such
+  as "Pedro"; branch 041, research R4). Status: Open.
+- **TD-058 — Several students joined by ";", "," or " e "**: branch 041 splits
+  only "/" (TD-051). " e " also joins words inside real names and titles, so
+  splitting on it needs its own rule (one clear case on 2026-11-17: "GUTTO
+  GABRIEL KUSTER LUBE e MAURÍCIO G. PINHEIRO GUERRA"). Status: Open.
+- **TD-059 — "?" in place of quotation marks and broken encoding in Lattes
+  titles**: the downloaded curricula hold "?" where the source had quotation
+  marks ("?FESTA DOS PESCADORES?", about 200 titles) and broken encoding
+  ("ADUBAÃ?Ã?O"). Branch 041 restores only the dash (" ? " between two
+  words); pairing quotation marks next to real questions is ambiguous.
+  Status: Open.
+- **TD-060 — Initiatives with two teams holding the same person**: 15,582
+  `initiative_teams` rows for 15,550 initiatives on 2026-11-16; initiative
+  7622 listed its coordinator twice in the export (start 2019 and 2020).
+  Since branch 041 the export lists each person once across the teams of an
+  initiative (earliest start, latest end); the second team is still stored.
+  Status: Open.
+- **TD-061 — Second pass over the same curricula changes a few links**: found
+  by the two local runs of branch 041 (2026-11-17). A document is processed
+  again when only its dependency fingerprint changes; on the populated
+  database the person matcher then resolves a citation-form name ("FONTES,
+  Alexandre Gomes", "ORLANDO, MARCOS TADEU D'AZEREDO", "MONTEIRO, MAXWELL") to
+  the curriculum owner instead of the separate person created by the rebuild.
+  Result: about 40 `team_members` rows move to the other person. The same
+  pass replaced the Lattes advisorship "A dimensão ambiental na educação…"
+  (Raphael Magalhães Gomes Moreira → Ana Paula de Jesus Santana, 2016) by a
+  name-keyed copy, because the curriculum holds four near-duplicate entries.
+  A rebuild and an incremental run therefore differ in these rows.
+  Out of scope of 041 (the same person under two spellings).
+  Status: Open.

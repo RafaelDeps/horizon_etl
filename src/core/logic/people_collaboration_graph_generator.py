@@ -148,6 +148,10 @@ class PeopleCollaborationGraphGenerator:
         article_count: int = 0,
         advisorship_count: int = 0,
     ) -> None:
+        # Spec 041 (research R6): a curriculum owner listed as their own
+        # student is a source error; it never becomes an edge to themselves.
+        if a == b:
+            return
         if not G.has_node(a) or not G.has_node(b):
             return
         if G.has_edge(a, b):

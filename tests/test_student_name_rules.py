@@ -72,7 +72,7 @@ CASES = [
     (E_HEAD, E_HEAD, ("several",)),
     (COMMA_HEAD, COMMA_HEAD, ("several",)),
     (INITIALS_LIST, INITIALS_LIST, ("several",)),
-    (SLASH, SLASH, ("several",)),
+    (SLASH, "Rafael Scopel Paviotti", ("split",)),
     (SEMICOLON, SEMICOLON, ("several",)),
     (CO_ADVISOR, CO_ADVISOR, ("several",)),
     ("Roseanne Gomes Gonçalves2", "Roseanne Gomes Gonçalves", ("footnote",)),
@@ -110,4 +110,85 @@ def test_a_clean_name_is_left_alone(raw):
 
 def test_several_people_keep_their_text_apart_from_a_link():
     cleaned = clean_student_name("Ana Costa/Bia Lima http://lattes")
-    assert cleaned == CleanedName("Ana Costa/Bia Lima", ("link", "several"))
+    assert cleaned == CleanedName("Ana Costa", ("link", "split"))
+    assert cleaned.names == ("Ana Costa", "Bia Lima")
+
+
+# --- Spec 041: several students split on "/", citations cut ------------------
+# contracts/dashboard-fixes.md, section 3.
+
+SPLITS = [
+    (
+        "Gladston Campos/Niase Borjaille",
+        ("Gladston Campos", "Niase Borjaille"),
+        ("split",),
+    ),
+    (
+        "Carlos José Rocha Silva / Renato Barros Vasconcelos",
+        ("Carlos José Rocha Silva", "Renato Barros Vasconcelos"),
+        ("split",),
+    ),
+    (
+        "Eliane N. Oliveira / Laiane C. Vettorazzi / Lidyan Procópio",
+        ("Eliane N. Oliveira", "Laiane C. Vettorazzi", "Lidyan Procópio"),
+        ("split",),
+    ),
+    (
+        "Ederson de Souza. Nitretação a plasma em ferro fundido branco classe III "
+        "A ASTM A 532 (orientador: Prof. MSc. Orlando Preti; coorientador: Prof. Dr",
+        ("Ederson de Souza",),
+        ("citation", "work_title"),
+    ),
+    (
+        "Vitor de Sá Nunes. Desenvolvimento de um sistema de monitoramento remoto "
+        "- Um sistema hardware/software de alerta para transbordamentos (PT00005990)",
+        ("Vitor de Sá Nunes",),
+        ("work_title",),
+    ),
+    (
+        "Juliana Guzzo Pignaton Schneider / Rafael Cardinot Araújo. Fatores "
+        "Influenciadores Da Evasão No Ensino Superior",
+        ("Juliana Guzzo Pignaton Schneider", "Rafael Cardinot Araújo"),
+        ("work_title", "split"),
+    ),
+    (
+        "Bruno Giacomin/Glício Baptista/Ilvécio Luis Rosi/Rodrigo Mai. Vantagens "
+        "da Implantação do Processo de R&S na Empresa",
+        ("Bruno Giacomin", "Glício Baptista", "Ilvécio Luis Rosi", "Rodrigo Mai"),
+        ("work_title", "split"),
+    ),
+    (
+        "Emanuela V. Souza / Rhamila O. Dassié / Edivaldo Antonio",
+        ("Emanuela V. Souza", "Rhamila O. Dassié", "Edivaldo Antonio"),
+        ("split",),
+    ),
+    ("Maria Silva / Xavier", ("Maria Silva / Xavier",), ("several",)),
+    ("Ana Lima", ("Ana Lima",), ()),
+    ("Acadêmicos do 6 periodo", (), ("not_a_name",)),
+]
+
+
+@pytest.mark.parametrize("raw, names, kinds", SPLITS)
+def test_split_and_citation_table(raw, names, kinds):
+    cleaned = clean_student_name(raw)
+    assert cleaned.names == names
+    assert cleaned.kinds == kinds
+    assert cleaned.name == (names[0] if names else None)
+
+
+@pytest.mark.parametrize(
+    "raw", [raw for raw, _, _ in CASES] + [raw for raw, _, _ in SPLITS]
+)
+def test_names_follow_name(raw):
+    cleaned = clean_student_name(raw)
+    if cleaned.name is None:
+        assert cleaned.names == ()
+    else:
+        assert cleaned.names[0] == cleaned.name
+
+
+@pytest.mark.parametrize("raw, names, kinds", SPLITS)
+def test_a_split_name_is_left_alone(raw, names, kinds):
+    if "split" in kinds:
+        for name in names:
+            assert clean_student_name(name).names == (name,)

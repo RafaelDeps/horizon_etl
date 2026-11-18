@@ -70,3 +70,58 @@ def test_ingest_file_creates_researcher_when_lattes_match_is_missing(
         name="Leonardo Azevedo Scardua",
     )
     researcher_ctrl.get_all.assert_not_called()
+
+
+# --- Spec 041: the advisor of a degree is read past its academic titles -----
+
+
+def _education_names(description):
+    from src.flows.lattes import projects as module
+
+    called = []
+
+    def fake_resolve(ctrl, index, name=None, **kwargs):
+        called.append(name)
+        return MagicMock(id=len(called) + 100)
+
+    researcher = MagicMock(id=1)
+    researcher.name = "Dona do Currículo"
+    entity_manager = MagicMock()
+    entity_manager.ensure_organization.return_value = 5
+    entity_manager.ensure_education_type.return_value = 6
+    ctrl = MagicMock()
+    with (
+        patch.object(module, "resolve_or_create_researcher", side_effect=fake_resolve),
+        patch.object(module, "tracking_recorder"),
+    ):
+        module.ingest_education_task(
+            [
+                {
+                    "degree": "Mestrado",
+                    "institution": "Universidade X",
+                    "course_name": "Engenharia",
+                    "start_year": 2010,
+                    "end_year": 2012,
+                    "description": description,
+                }
+            ],
+            researcher,
+            [],
+            entity_manager,
+            ctrl,
+            "data/lattes_json/1_X_1234567890123456.json",
+        )
+    return called
+
+
+def test_the_advisor_and_co_advisor_are_stored_without_titles():
+    called = _education_names(
+        "Título: Um estudo. Orientador: Prof. Dr. José Antônio da Silva. "
+        "Coorientador: Dr. Wanderley Cardoso Celeste."
+    )
+    assert called == ["José Antônio da Silva", "Wanderley Cardoso Celeste"]
+
+
+def test_no_person_is_created_for_an_advisor_that_is_not_a_name():
+    assert _education_names("Orientador: -.") == []
+    assert _education_names("Orientador: Prof.") == []

@@ -4,6 +4,7 @@ from datetime import datetime
 from .base import ProjectMappingStrategy
 from src.adapters.sources.lattes_parser import LattesParser
 from src.core.logic.initiative_identity import build_identity_key
+from src.core.logic.person_name_rules import is_name_fragment
 
 
 class LattesProjectMappingStrategy(ProjectMappingStrategy):
@@ -51,6 +52,9 @@ class LattesProjectMappingStrategy(ProjectMappingStrategy):
         
         for m in raw_members:
             m_name = m.get("nome", "")
+            # Branch 041: "D", "J" or "-" in the member list are not people.
+            if is_name_fragment(m_name):
+                continue
             m_role = m.get("papel", "Integrante").lower()
             
             if "coordenador" in m_role:

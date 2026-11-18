@@ -24,6 +24,7 @@ from src.core.logic.pii_anonymizer import (
     scrub_pii_deep,
     scrub_source_record_payload,
 )
+from src.core.logic.title_rules import plausible_year
 from src.core.ports.export_sink import IExportSink
 from src.research_domain_compat import AdvisorshipRole
 from src.tracking.entities import (
@@ -1790,6 +1791,10 @@ class CanonicalDataExporter:
             # Identify Research Group
             research_group_data = None
 
+            # Spec 041: one entry per person across every team of the
+            # initiative (an initiative may hold the same person in two
+            # teams), with the earliest start and the latest end.
+            person_map = {}  # person_id -> member_data
             try:
                 teams = self.initiative_ctrl.get_teams(item.id)
                 for t_dict in teams:
@@ -1816,9 +1821,10 @@ class CanonicalDataExporter:
                         members = team_ctrl.get_members(t_id)
 
                         # Aggregate roles by person
-                        person_map = {}  # person_id -> member_data
                         for m in members:
                             p_id = m.person_id
+                            start = m.start_date.isoformat() if m.start_date else None
+                            end = m.end_date.isoformat() if m.end_date else None
                             if p_id not in person_map:
                                 person_map[p_id] = {
                                     "person_id": p_id,
@@ -1826,25 +1832,37 @@ class CanonicalDataExporter:
                                         m.person.name if m.person else "Unknown"
                                     ),
                                     "roles": [],  # Collect role names here
-                                    "start_date": (
-                                        m.start_date.isoformat()
-                                        if m.start_date
-                                        else None
-                                    ),
-                                    "end_date": (
-                                        m.end_date.isoformat() if m.end_date else None
-                                    ),
+                                    "start_date": start,
+                                    "end_date": end,
+                                    "_open": end is None,
                                 }
+                            else:
+                                entry = person_map[p_id]
+                                if start and (
+                                    entry["start_date"] is None
+                                    or start < entry["start_date"]
+                                ):
+                                    entry["start_date"] = start
+                                if end is None:
+                                    entry["_open"] = True
+                                    entry["end_date"] = None
+                                elif not entry["_open"] and (
+                                    entry["end_date"] is None or end > entry["end_date"]
+                                ):
+                                    entry["end_date"] = end
 
                             role_name = m.role.name if m.role else "Member"
                             if role_name not in person_map[p_id]["roles"]:
                                 person_map[p_id]["roles"].append(role_name)
 
-                        # Add aggregated members to team_list
-                        for p_data in person_map.values():
-                            team_list.append(p_data)
             except Exception as e:
                 logger.warning(f"Could not fetch teams for initiative {item.id}: {e}")
+
+            # Add aggregated members to team_list (what was read before an
+            # error is kept, as before).
+            for p_data in person_map.values():
+                p_data.pop("_open", None)
+                team_list.append(p_data)
 
             serialized_data.append(
                 {
@@ -1948,6 +1966,9 @@ class CanonicalDataExporter:
         data = []
         for row in rows:
             item = {column: getattr(row, column) for column in columns}
+            # Branch 041: the database keeps the year as the source wrote it
+            # (the crawler gives some items 0); the export shows no fake year.
+            item["year"] = plausible_year(item["year"])
             raw_type = item.get("type")
             if raw_type is not None:
                 try:

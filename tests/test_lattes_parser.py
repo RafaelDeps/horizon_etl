@@ -362,8 +362,25 @@ def test_advisorship_student_is_cleaned_in_both_paths(parser, shape):
     assert parsed["B"]["student_name_kinds"] == ("title",)
     assert parsed["C"]["student_name"] == "Maria da Silva"
     assert parsed["C"]["student_name_kinds"] == ()
-    assert parsed["D"]["student_name"] == SEVERAL
-    assert parsed["D"]["student_name_kinds"] == ("several",)
+    # Branch 041: a field with several students joined by "/" is split.
+    assert parsed["D"]["student_name"] == "Rafael Scopel Paviotti"
+    assert parsed["D"]["student_name_kinds"] == ("split",)
+
+
+@pytest.mark.parametrize("shape", [_nested, _flat])
+def test_advisorship_gives_every_student(parser, shape):
+    parsed = {
+        row["title"]: row
+        for row in parser.parse_advisorships(shape(_advisorship_items()))
+    }
+
+    assert parsed["D"]["student_names"] == [
+        "Rafael Scopel Paviotti",
+        "Sidarta Barroso Veloso",
+    ]
+    assert parsed["C"]["student_names"] == ["Maria da Silva"]
+    assert parsed["A"]["student_names"] == ["Guilherme Lopes de Oliveira"]
+    assert parsed["E"]["student_names"] == []
 
 
 @pytest.mark.parametrize("shape", [_nested, _flat])
@@ -392,3 +409,61 @@ def test_advisorship_parsing_does_not_change_the_curriculum_item(parser, shape):
     parser.parse_advisorships(shape(items))
 
     assert items == _advisorship_items()
+
+
+# --- Spec 041: lost dashes in titles, implausible years ----------------------
+
+LOST = "Laboratório no Ifes ? Campus Ibatiba"
+FIXED = "Laboratório no Ifes – Campus Ibatiba"
+QUESTION = "Ifes Portas Abertas: por qual delas entrar?"
+
+
+def test_project_titles_get_their_dash(parser):
+    data = {
+        "projetos_pesquisa": [{"nome": LOST, "ano_inicio": "2020"}],
+        "projetos_extensao": [{"nome": QUESTION, "ano_inicio": "2020"}],
+    }
+    assert parser.parse_research_projects(data)[0]["name"] == FIXED
+    assert parser.parse_extension_projects(data)[0]["name"] == QUESTION
+
+
+@pytest.mark.parametrize("shape", [_nested, _flat])
+def test_advisorship_titles_get_their_dash(parser, shape):
+    items = [
+        {"titulo": LOST, "orientando": "Maria da Silva"},
+        {"titulo": QUESTION, "orientando": "Ana Lima"},
+    ]
+    titles = [row["title"] for row in parser.parse_advisorships(shape(items))]
+    assert titles == [FIXED, QUESTION]
+
+
+def test_article_and_conference_titles_and_years(parser):
+    data = {
+        "producao_bibliografica": {
+            "artigos_periodicos": [
+                {"titulo": LOST, "ano": "2015"},
+                {"titulo": "Artigo antigo", "ano": "1890"},
+            ],
+            "trabalhos_completos_congressos": [
+                {"titulo": QUESTION, "ano": 2019},
+                {"titulo": "R.. ", "ano": 0},
+            ],
+        }
+    }
+    articles = parser.parse_articles(data)
+    papers = parser.parse_conference_papers(data)
+
+    assert articles[0]["title"] == FIXED
+    assert articles[0]["normalized_title"] == parser.normalize_title(LOST)
+    assert articles[0]["year"] == 2015
+    # The database keeps the year as the source wrote it (articles.year is
+    # NOT NULL); the export blanks implausible years (canonical_exporter).
+    assert articles[1]["year"] == 1890
+    assert papers[0]["title"] == QUESTION
+    assert papers[0]["year"] == 2019
+    assert papers[1]["year"] == 0
+
+
+def test_technical_production_titles_get_their_dash(parser):
+    data = {"producao_tecnica": {"outras": [{"titulo": LOST, "ano": "2018"}]}}
+    assert parser.parse_technical_productions(data)[0]["title"] == FIXED
