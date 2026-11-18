@@ -389,7 +389,7 @@ so no test run before it leaves a local database half under the new rules.
     - The same pass replaced one Lattes advisorship by a name-keyed copy (advisorship:lattes:h:b2d5d5635c9f retired, advisorship:h:fb16cfe336dd back). The curriculum holds four near-duplicate entries of that work.
     - Horizon ids: 75,930 entities (+2), aliases 10,467 (unchanged), history from the database.
     - No change in persons, initiatives, articles, advisorships or any 041 check.
-- [ ] T037 Fork validation (ask the maintainer first; only on the RafaelDeps fork, never upstream; push without force): quickstart.md section 5.
+- [X] T037 Fork validation (ask the maintainer first; only on the RafaelDeps fork, never upstream; push without force): quickstart.md section 5.
   - Two weekly runs on `041-dashboard-visible-fixes`. Record for each:
     - the run id and result;
     - that the Slack channel got no message (the maintainer confirms);
@@ -397,6 +397,27 @@ so no test run before it leaves a local database half under the new rules.
     - the checks of section 3 on the run's archives;
     - `grep -c hooks.slack.com` on the log (expected 0).
   - After the maintainer merges into fork main, record that one run on main sent both messages.
+  - **Run 1** (44211232427, 2026-11-18, commit 6fea3c3): success, 1 h 45 min.
+    - Slack: `::notice::Slack pulado: a branch 041-dashboard-visible-fixes não é a main.` in both notice steps; `grep -c hooks.slack.com` = 0.
+    - First run on the branch, so there was no earlier database to restore ("restore: rebuilt — no successful run"). The database was rebuilt, with id history from the zip.
+    - The Lattes portal served its access check page for 28 curricula. 25 came from the cache; 3 had no data (processed 432, failed 3, download). This is not a 041 effect.
+    - Horizon ids: 74,512 entities; 11,632 aliases.
+    - Checks (section 3): fragment people 0; degrees with a fragment advisor 0; "/" people 2 (both advisors, as in T035); repeated team person 0; self-edges 0 in the 5 graphs; lost dashes 0; bad years 0; kept by decision: 1 titleless article and 3 workplans ending before they start.
+    - Counts: people 18,311; initiatives 15,166; articles 7,694; productions 3,732 → 3,681. They are lower because of the 3 curricula above.
+  - **Run 2** (44224995587, 2026-11-18): success, 53 min.
+    - Slack: the same notice in both steps; `grep -c hooks.slack.com` = 0.
+    - Restored run 1's database, raw files and cache; incremental. Lattes: 435 curricula, 0 failed (projects processed 94, skipped 341; advisorships processed 50, skipped 385).
+    - Horizon ids: 75,926 entities (T035: 75,928); 10,220 aliases; history from the database.
+    - The same checks as run 1, with the same results.
+    - Counts: people 18,444; initiatives 15,544; articles 8,078; productions 3,732. All equal or higher than run 1, and within ±5 of the local T035 run (sources one day later).
+  - **Merge**: fork main was fast-forwarded to the branch (c5ffe55..633278b), without force and with no merge commit.
+  - **Run on main** (44284207136, 2026-11-18): success, 58 min.
+    - Slack: both notice steps ran on main with the webhook set. Neither printed "Slack pulado" or a warning, so both messages were sent. `grep -c hooks.slack.com` = 0.
+    - It restored the database of the last main run (44030931902). The rule-version guard rebuilt it once (6 → 7). Lattes: 435 curricula, 0 failed.
+    - Horizon ids: 75,926 entities; 10,222 aliases.
+    - Checks (section 3): the same results as the two branch runs.
+    - Counts: people 18,443; initiatives 15,545; articles 8,079; productions 3,732.
+  - The maintainer confirmed that the channel got only the two messages of the main run and none from the branch runs. Accepted.
 
 ---
 
