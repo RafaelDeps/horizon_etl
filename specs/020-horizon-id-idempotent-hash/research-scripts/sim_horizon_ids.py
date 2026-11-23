@@ -2,6 +2,7 @@
 
 Read-only. Usage: python -I sim_horizon_ids.py <db>
 """
+
 import hashlib
 import re
 import sqlite3
@@ -87,7 +88,10 @@ for iid, name, tname in q(
     pick = None
     for ss, st, rid in ms:
         if rid.startswith("sigpesq workplan|"):
-            pick = ("sigpesq_workplan", f"advisorship:sigpesq-pt:{rid.split('|',1)[1].replace('|','-')}")
+            pick = (
+                "sigpesq_workplan",
+                f"advisorship:sigpesq-pt:{rid.split('|',1)[1].replace('|','-')}",
+            )
             break
         if rid.startswith("sigpesq project|"):
             pick = ("sigpesq_code", f"initiative:sigpesq-pj:{rid.split('|',1)[1]}")
@@ -97,7 +101,11 @@ for iid, name, tname in q(
             break
     if not pick:
         for ss, st, rid in ms:
-            if rid.startswith("lattes project|") or rid.startswith("lattes advisorship|") or rid.startswith("sigpesq advisorship|"):
+            if (
+                rid.startswith("lattes project|")
+                or rid.startswith("lattes advisorship|")
+                or rid.startswith("sigpesq advisorship|")
+            ):
                 origin = "lattes" if rid.startswith("lattes") else "sigpesq"
                 pick = (f"{origin}_identity", f"{et}:{origin}:h:{h(rid)}")
                 break
@@ -135,7 +143,9 @@ for eid, rid, et, title, sy in q(
 for eid, rid, inst, sy, ey, role, bond in q(
     "select id, researcher_id, institution_name, start_year, end_year, role_function, bond from professional_activities"
 ):
-    ids["professional_activity"][eid] = f"{P.get(rid,'?')}/activity:h:{h(inst, sy, ey, role, bond)}"
+    ids["professional_activity"][
+        eid
+    ] = f"{P.get(rid,'?')}/activity:h:{h(inst, sy, ey, role, bond)}"
     rule["professional_activity"]["parent+inst+years+role+bond"] += 1
 for eid, rid, title, year in q("select id, researcher_id, title, year from awards"):
     ids["award"][eid] = f"{P.get(rid,'?')}/award:h:{h(title, year)}"
@@ -154,7 +164,10 @@ for iid, tid in q("select initiative_id, team_id from initiative_teams"):
 for tid, name in q("select id, name from teams"):
     if tid in G:
         continue
-    inits = sorted(ids["initiative"].get(i) or ids["advisorship"].get(i) or "?" for i in team_init.get(tid, []))
+    inits = sorted(
+        ids["initiative"].get(i) or ids["advisorship"].get(i) or "?"
+        for i in team_init.get(tid, [])
+    )
     if inits:
         ids["team"][tid] = f"{inits[0]}/team"
         rule["team"]["initiative"] += 1
@@ -163,10 +176,16 @@ for tid, name in q("select id, name from teams"):
         rule["team"]["name"] += 1
 
 # --- reference tables
-for t, et in [("knowledge_areas", "knowledge-area"), ("organizations", "organization"),
-              ("organizational_units", "campus"), ("initiative_types", "initiative-type"),
-              ("production_types", "production-type"), ("roles", "role"),
-              ("languages", "language"), ("education_types", "education-type")]:
+for t, et in [
+    ("knowledge_areas", "knowledge-area"),
+    ("organizations", "organization"),
+    ("organizational_units", "campus"),
+    ("initiative_types", "initiative-type"),
+    ("production_types", "production-type"),
+    ("roles", "role"),
+    ("languages", "language"),
+    ("education_types", "education-type"),
+]:
     for rid, name in q(f"select id, name from {t}"):
         ids[et][rid] = f"{et}:{slug(name)}"
         rule[et]["slug"] += 1
@@ -179,14 +198,20 @@ for rid, name, value in q("select id, name, value from fellowships"):
 
 # --- report
 allc = Counter()
-print(f"{'entity':24} {'rows':>6} {'collisions':>10} {'rows in collisions':>18}  rules / example")
+print(
+    f"{'entity':24} {'rows':>6} {'collisions':>10} {'rows in collisions':>18}  rules / example"
+)
 for et, m in ids.items():
     c = Counter(m.values())
     allc.update(c)
     bad = {k: v for k, v in c.items() if v > 1}
     ex = next(iter(bad), "")
-    print(f"{et:24} {len(m):6} {len(bad):10} {sum(bad.values()):18}  {dict(rule[et])} {ex[:60]}")
+    print(
+        f"{et:24} {len(m):6} {len(bad):10} {sum(bad.values()):18}  {dict(rule[et])} {ex[:60]}"
+    )
 cross = sum(1 for v in allc.values() if v > 1)
 unknown_parent = sum(1 for m in ids.values() for v in m.values() if v.startswith("?"))
-print("ids shared across types:", cross, "| children without parent id:", unknown_parent)
+print(
+    "ids shared across types:", cross, "| children without parent id:", unknown_parent
+)
 print("max id length:", max(len(v) for m in ids.values() for v in m.values()))

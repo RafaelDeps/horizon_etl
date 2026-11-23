@@ -2,7 +2,7 @@ import os
 
 from eo_lib.domain.base import Base
 from eo_lib.infrastructure.database.postgres_client import PostgresClient
-from sqlalchemy import text, Table, Column, Integer, ForeignKey, DateTime
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, Table, text
 
 # Try to load .env for local configuration
 try:
@@ -22,7 +22,6 @@ from eo_lib.domain.entities import (
     Team,
     TeamMember,
 )
-
 from research_domain import (
     Campus,
     CampusController,
@@ -36,13 +35,17 @@ from research_domain import (
     University,
     UniversityController,
 )
+
 # Workaround: Import directly from controllers module since not exported in __init__
 from research_domain.controllers.controllers import (
     AdvisorshipController,
     FellowshipController,
 )
+from research_domain.domain.entities import (  # Import new entities
+    Advisorship,
+    Fellowship,
+)
 
-from research_domain.domain.entities import Advisorship, Fellowship # Import new entities
 from src.tracking.entities import (  # noqa: F401
     AttributeAssertion,
     EntityChangeLog,
@@ -61,7 +64,9 @@ if "initiative_knowledge_areas" not in Base.metadata.tables:
     initiative_knowledge_areas = Table(
         "initiative_knowledge_areas",
         Base.metadata,
-        Column("initiative_id", Integer, ForeignKey("initiatives.id"), primary_key=True),
+        Column(
+            "initiative_id", Integer, ForeignKey("initiatives.id"), primary_key=True
+        ),
         Column("area_id", Integer, ForeignKey("knowledge_areas.id"), primary_key=True),
     )
 

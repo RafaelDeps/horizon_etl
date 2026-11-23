@@ -21,12 +21,15 @@ def _make_conn(sql: str) -> sqlite3.Connection:
 
 # --- _discover_pii_columns ---
 
+
 def test_discover_pii_columns_finds_identification_id():
     conn = _make_conn(
         "CREATE TABLE persons (id INTEGER PRIMARY KEY, name TEXT, identification_id TEXT);"
     )
     cols = _discover_pii_columns(conn)
-    assert any(c["table"] == "persons" and c["column"] == "identification_id" for c in cols)
+    assert any(
+        c["table"] == "persons" and c["column"] == "identification_id" for c in cols
+    )
 
 
 def test_discover_pii_columns_finds_email():
@@ -46,21 +49,26 @@ def test_discover_pii_columns_ignores_non_pii():
 
 
 def test_discover_pii_columns_multiple_tables():
-    conn = _make_conn("""
+    conn = _make_conn(
+        """
         CREATE TABLE persons (id INTEGER PRIMARY KEY, identification_id TEXT);
         CREATE TABLE person_emails (id INTEGER PRIMARY KEY, email TEXT);
-    """)
+    """
+    )
     cols = _discover_pii_columns(conn)
     assert len(cols) == 2
 
 
 # --- _anonymize_table_column ---
 
+
 def test_anonymize_table_column_anonymizes_cpf():
-    conn = _make_conn("""
+    conn = _make_conn(
+        """
         CREATE TABLE persons (id INTEGER PRIMARY KEY, identification_id TEXT);
         INSERT INTO persons VALUES (1, '12345678901');
-    """)
+    """
+    )
     stats = _anonymize_table_column(conn, "persons", "identification_id", "cpf")
     row = conn.execute("SELECT identification_id FROM persons WHERE id=1").fetchone()[0]
     assert is_anonymized_cpf(row)
@@ -69,10 +77,12 @@ def test_anonymize_table_column_anonymizes_cpf():
 
 
 def test_anonymize_table_column_anonymizes_email():
-    conn = _make_conn("""
+    conn = _make_conn(
+        """
         CREATE TABLE person_emails (id INTEGER PRIMARY KEY, email TEXT);
         INSERT INTO person_emails VALUES (1, 'user@example.com');
-    """)
+    """
+    )
     stats = _anonymize_table_column(conn, "person_emails", "email", "email")
     row = conn.execute("SELECT email FROM person_emails WHERE id=1").fetchone()[0]
     assert is_anonymized_email(row)
@@ -80,41 +90,49 @@ def test_anonymize_table_column_anonymizes_email():
 
 
 def test_anonymize_table_column_skips_null():
-    conn = _make_conn("""
+    conn = _make_conn(
+        """
         CREATE TABLE persons (id INTEGER PRIMARY KEY, identification_id TEXT);
         INSERT INTO persons VALUES (1, NULL);
-    """)
+    """
+    )
     stats = _anonymize_table_column(conn, "persons", "identification_id", "cpf")
     assert stats["skipped_null"] == 1
     assert stats["anonymized"] == 0
 
 
 def test_anonymize_table_column_idempotent_already_anonymized_cpf():
-    conn = _make_conn("""
+    conn = _make_conn(
+        """
         CREATE TABLE persons (id INTEGER PRIMARY KEY, identification_id TEXT);
         INSERT INTO persons VALUES (1, 'LGPD-abc1234567890123');
-    """)
+    """
+    )
     stats = _anonymize_table_column(conn, "persons", "identification_id", "cpf")
     assert stats["already_anonymized"] == 1
     assert stats["anonymized"] == 0
 
 
 def test_anonymize_table_column_idempotent_already_anonymized_email():
-    conn = _make_conn("""
+    conn = _make_conn(
+        """
         CREATE TABLE person_emails (id INTEGER PRIMARY KEY, email TEXT);
         INSERT INTO person_emails VALUES (1, 'abc123456789@anon.lgpd');
-    """)
+    """
+    )
     stats = _anonymize_table_column(conn, "person_emails", "email", "email")
     assert stats["already_anonymized"] == 1
     assert stats["anonymized"] == 0
 
 
 def test_anonymize_table_column_second_run_is_noop():
-    conn = _make_conn("""
+    conn = _make_conn(
+        """
         CREATE TABLE persons (id INTEGER PRIMARY KEY, identification_id TEXT);
         INSERT INTO persons VALUES (1, '12345678901');
         INSERT INTO persons VALUES (2, '98765432100');
-    """)
+    """
+    )
     _anonymize_table_column(conn, "persons", "identification_id", "cpf")
     stats2 = _anonymize_table_column(conn, "persons", "identification_id", "cpf")
     assert stats2["anonymized"] == 0
@@ -122,12 +140,14 @@ def test_anonymize_table_column_second_run_is_noop():
 
 
 def test_anonymize_table_column_stats_correct():
-    conn = _make_conn("""
+    conn = _make_conn(
+        """
         CREATE TABLE persons (id INTEGER PRIMARY KEY, identification_id TEXT);
         INSERT INTO persons VALUES (1, '12345678901');
         INSERT INTO persons VALUES (2, NULL);
         INSERT INTO persons VALUES (3, 'LGPD-existinghash12345');
-    """)
+    """
+    )
     stats = _anonymize_table_column(conn, "persons", "identification_id", "cpf")
     assert stats["total_rows"] == 3
     assert stats["anonymized"] == 1
@@ -138,10 +158,13 @@ def test_anonymize_table_column_stats_correct():
 
 # --- audit_pii ---
 
+
 def test_audit_pii_runs_without_error(tmp_path):
     db_path = str(tmp_path / "test.db")
     conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE persons (id INTEGER PRIMARY KEY, identification_id TEXT, name TEXT)")
+    conn.execute(
+        "CREATE TABLE persons (id INTEGER PRIMARY KEY, identification_id TEXT, name TEXT)"
+    )
     conn.execute("INSERT INTO persons VALUES (1, 'LGPD-abc1234567890123', 'Alice')")
     conn.commit()
     conn.close()

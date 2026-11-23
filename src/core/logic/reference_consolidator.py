@@ -399,7 +399,9 @@ class ReferenceConsolidator:
         )
         conn.execute("DELETE FROM knowledge_areas WHERE id = ?", (loser_id,))
 
-    def _merge_team(self, conn: sqlite3.Connection, winner_id: int, loser_id: int) -> None:
+    def _merge_team(
+        self, conn: sqlite3.Connection, winner_id: int, loser_id: int
+    ) -> None:
         logger.info("Consolidating team {} into {}.", loser_id, winner_id)
         self._record_merge(conn, "team", "teams", winner_id, loser_id)
         conn.execute(

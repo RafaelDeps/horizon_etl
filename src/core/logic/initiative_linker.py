@@ -1,11 +1,9 @@
 import unicodedata
 from typing import Any, Dict, List, Optional
-from loguru import logger
-from sqlalchemy import text
 
-from research_domain import (
-    ResearchGroupController,
-)
+from loguru import logger
+from research_domain import ResearchGroupController
+from sqlalchemy import text
 
 
 class InitiativeLinker:
@@ -30,7 +28,9 @@ class InitiativeLinker:
         self.team_synchronizer = team_synchronizer
         self.entity_manager = entity_manager
 
-    def create_initiative_team(self, initiative: Any, project_data: Dict[str, Any]) -> None:
+    def create_initiative_team(
+        self, initiative: Any, project_data: Dict[str, Any]
+    ) -> None:
         """Creates a team for the given initiative and synchronizes its members."""
         team_name = initiative.name[:200]
         team = self.team_synchronizer.ensure_team(
@@ -49,7 +49,9 @@ class InitiativeLinker:
         coord_name = project_data.get("coordinator_name")
         coord_email = project_data.get("coordinator_email")
         if coord_name or coord_email:
-            p = self.person_matcher.match_or_create(coord_name, email=coord_email, strict_match=strict)
+            p = self.person_matcher.match_or_create(
+                coord_name, email=coord_email, strict_match=strict
+            )
             if p:
                 members_to_sync.append((p, "Coordinator", start_date))
 
@@ -57,7 +59,9 @@ class InitiativeLinker:
         res_names = project_data.get("researcher_names", [])
         res_emails = project_data.get("researcher_emails", [None] * len(res_names))
         for name, email in zip(res_names, res_emails):
-            p = self.person_matcher.match_or_create(name, email=email, strict_match=strict)
+            p = self.person_matcher.match_or_create(
+                name, email=email, strict_match=strict
+            )
             if p:
                 members_to_sync.append((p, "Researcher", start_date))
 
@@ -65,7 +69,9 @@ class InitiativeLinker:
         stu_names = project_data.get("student_names", [])
         stu_emails = project_data.get("student_emails", [None] * len(stu_names))
         for name, email in zip(stu_names, stu_emails):
-            p = self.person_matcher.match_or_create(name, email=email, strict_match=strict)
+            p = self.person_matcher.match_or_create(
+                name, email=email, strict_match=strict
+            )
             if p:
                 members_to_sync.append((p, "Student", start_date))
 
@@ -82,7 +88,9 @@ class InitiativeLinker:
         except Exception as e:
             logger.warning(f"Failed to assign team to initiative: {e}")
 
-    def add_members_to_initiative_team(self, initiative: Any, project_data: Dict[str, Any]) -> None:
+    def add_members_to_initiative_team(
+        self, initiative: Any, project_data: Dict[str, Any]
+    ) -> None:
         """Adds members (Supervisor/Student) to the initiative's team without removing existing ones."""
         team_name = initiative.name[:200]
         team = self.team_synchronizer.ensure_team(
@@ -102,7 +110,9 @@ class InitiativeLinker:
         coord_name = project_data.get("coordinator_name")
         coord_email = project_data.get("coordinator_email")
         if coord_name or coord_email:
-            p = self.person_matcher.match_or_create(coord_name, email=coord_email, strict_match=strict)
+            p = self.person_matcher.match_or_create(
+                coord_name, email=coord_email, strict_match=strict
+            )
             if p:
                 members_to_add.append((p, "Researcher", start_date))
 
@@ -110,7 +120,9 @@ class InitiativeLinker:
         stu_names = project_data.get("student_names", [])
         stu_emails = project_data.get("student_emails", [None] * len(stu_names))
         for name, email in zip(stu_names, stu_emails):
-            p = self.person_matcher.match_or_create(name, email=email, strict_match=strict)
+            p = self.person_matcher.match_or_create(
+                name, email=email, strict_match=strict
+            )
             if p:
                 members_to_add.append((p, "Student", start_date))
 
@@ -156,11 +168,15 @@ class InitiativeLinker:
                     break
 
             if not target_group:
-                logger.info(f"Research Group '{rg_name}' not found. Creating new group...")
+                logger.info(
+                    f"Research Group '{rg_name}' not found. Creating new group..."
+                )
                 campus_id = self.entity_manager.resolve_campus(campus_name, org_id)
 
                 if not campus_id:
-                    logger.warning(f"Could not resolve campus for RG '{rg_name}'. Cannot create.")
+                    logger.warning(
+                        f"Could not resolve campus for RG '{rg_name}'. Cannot create."
+                    )
                     return
 
                 try:
@@ -170,8 +186,10 @@ class InitiativeLinker:
                         organization_id=org_id,
                         campus_id=campus_id,
                     )
-                    logger.info(f"Created new Research Group: {rg_name} (Campus ID: {campus_id})")
-                    
+                    logger.info(
+                        f"Created new Research Group: {rg_name} (Campus ID: {campus_id})"
+                    )
+
                     # RF-15: Auto-populate members for newly created groups
                     self._populate_group_members(target_group, initiative, project_data)
                 except Exception as e:
@@ -184,12 +202,18 @@ class InitiativeLinker:
         except Exception as e:
             logger.warning(f"Failed to link Research Group '{rg_name}': {e}")
 
-    def _link_initiative_to_group_team(self, initiative: Any, target_group: Any, rg_name: str) -> None:
+    def _link_initiative_to_group_team(
+        self, initiative: Any, target_group: Any, rg_name: str
+    ) -> None:
         """Helper to link initiative to the underlying Team of a Research Group."""
         try:
-            tg_id = target_group.id if hasattr(target_group, "id") else target_group.get("id")
+            tg_id = (
+                target_group.id
+                if hasattr(target_group, "id")
+                else target_group.get("id")
+            )
             team_proxy = self.team_controller.get_by_id(tg_id)
-            
+
             if not team_proxy:
                 logger.warning(f"Could not find base Team for Research Group {tg_id}")
                 return
@@ -205,16 +229,22 @@ class InitiativeLinker:
                 if hasattr(team_proxy, "initiatives"):
                     team_proxy.initiatives.append(initiative)
                     self.team_controller.update(team_proxy)
-                    logger.info(f"Linked Initiative to Research Group '{rg_name}' (via Team)")
+                    logger.info(
+                        f"Linked Initiative to Research Group '{rg_name}' (via Team)"
+                    )
                 else:
                     initiative.teams.append(team_proxy)
                     # Note: Need access to initiative controller or session to update
                     # For now we assume the session will be committed by the caller
-                    logger.info(f"Linked Initiative to Research Group '{rg_name}' (via Initiative.teams)")
+                    logger.info(
+                        f"Linked Initiative to Research Group '{rg_name}' (via Initiative.teams)"
+                    )
         except Exception as e:
             logger.warning(f"Failed to link Team proxy for RG: {e}")
 
-    def _populate_group_members(self, group: Any, initiative: Any, project_data: Dict[str, Any]) -> None:
+    def _populate_group_members(
+        self, group: Any, initiative: Any, project_data: Dict[str, Any]
+    ) -> None:
         """Populates a newly created Research Group with members from the project."""
         try:
             gid = group.id if hasattr(group, "id") else group.get("id")
@@ -228,12 +258,19 @@ class InitiativeLinker:
             if project_data.get("coordinator_name"):
                 res_names.append(project_data.get("coordinator_name"))
                 res_emails.append(project_data.get("coordinator_email"))
-            
+
             res_names.extend(project_data.get("researcher_names", []))
-            res_emails.extend(project_data.get("researcher_emails", [None] * len(project_data.get("researcher_names", []))))
+            res_emails.extend(
+                project_data.get(
+                    "researcher_emails",
+                    [None] * len(project_data.get("researcher_names", [])),
+                )
+            )
 
             for name, email in zip(res_names, res_emails):
-                p = self.person_matcher.match_or_create(name, email=email, strict_match=strict)
+                p = self.person_matcher.match_or_create(
+                    name, email=email, strict_match=strict
+                )
                 if p:
                     members_to_sync.append((p, "Researcher", start_date))
 
@@ -241,7 +278,9 @@ class InitiativeLinker:
             stu_names = project_data.get("student_names", [])
             stu_emails = project_data.get("student_emails", [None] * len(stu_names))
             for name, email in zip(stu_names, stu_emails):
-                p = self.person_matcher.match_or_create(name, email=email, strict_match=strict)
+                p = self.person_matcher.match_or_create(
+                    name, email=email, strict_match=strict
+                )
                 if p:
                     members_to_sync.append((p, "Student", start_date))
 
@@ -250,7 +289,9 @@ class InitiativeLinker:
         except Exception as e:
             logger.warning(f"Failed to populate members for Group: {e}")
 
-    def associate_keyword_knowledge_areas(self, initiative: Any, project_data: Dict[str, Any], rg_name: str) -> None:
+    def associate_keyword_knowledge_areas(
+        self, initiative: Any, project_data: Dict[str, Any], rg_name: str
+    ) -> None:
         """Parses keywords and links them as Knowledge Areas to initiative, group, and researchers."""
         metadata = project_data.get("metadata", {})
         keywords_str = metadata.get("keywords")
@@ -290,13 +331,21 @@ class InitiativeLinker:
         session = self.rg_controller._service._repository._session
         for aid in ka_ids:
             try:
-                check = text("SELECT 1 FROM initiative_knowledge_areas WHERE initiative_id = :iid AND area_id = :aid")
-                exists = session.execute(check, {"iid": initiative_id, "aid": aid}).scalar()
+                check = text(
+                    "SELECT 1 FROM initiative_knowledge_areas WHERE initiative_id = :iid AND area_id = :aid"
+                )
+                exists = session.execute(
+                    check, {"iid": initiative_id, "aid": aid}
+                ).scalar()
                 if not exists:
-                    ins = text("INSERT INTO initiative_knowledge_areas (initiative_id, area_id) VALUES (:iid, :aid)")
+                    ins = text(
+                        "INSERT INTO initiative_knowledge_areas (initiative_id, area_id) VALUES (:iid, :aid)"
+                    )
                     session.execute(ins, {"iid": initiative_id, "aid": aid})
             except Exception as e:
-                logger.warning(f"Failed handling KA {aid} for Initiative {initiative_id}: {e}")
+                logger.warning(
+                    f"Failed handling KA {aid} for Initiative {initiative_id}: {e}"
+                )
         try:
             session.commit()
         except Exception:
@@ -306,8 +355,16 @@ class InitiativeLinker:
         try:
             all_groups = self.rg_controller.get_all()
             target_group = None
+
             def normalize(s):
-                return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("utf-8").upper().strip()
+                return (
+                    unicodedata.normalize("NFD", s)
+                    .encode("ascii", "ignore")
+                    .decode("utf-8")
+                    .upper()
+                    .strip()
+                )
+
             target_norm = normalize(rg_name)
             for group in all_groups:
                 g_name = group.name if hasattr(group, "name") else group.get("name")
@@ -316,14 +373,22 @@ class InitiativeLinker:
                     break
             if not target_group:
                 return
-            gid = target_group.id if hasattr(target_group, "id") else target_group.get("id")
+            gid = (
+                target_group.id
+                if hasattr(target_group, "id")
+                else target_group.get("id")
+            )
             session = self.rg_controller._service._repository._session
             for aid in ka_ids:
                 try:
-                    check = text("SELECT 1 FROM group_knowledge_areas WHERE group_id = :gid AND area_id = :aid")
+                    check = text(
+                        "SELECT 1 FROM group_knowledge_areas WHERE group_id = :gid AND area_id = :aid"
+                    )
                     exists = session.execute(check, {"gid": gid, "aid": aid}).scalar()
                     if not exists:
-                        ins = text("INSERT INTO group_knowledge_areas (group_id, area_id) VALUES (:gid, :aid)")
+                        ins = text(
+                            "INSERT INTO group_knowledge_areas (group_id, area_id) VALUES (:gid, :aid)"
+                        )
                         session.execute(ins, {"gid": gid, "aid": aid})
                 except Exception as e:
                     logger.warning(f"Failed handling KA {aid} for Group {gid}: {e}")
@@ -348,13 +413,21 @@ class InitiativeLinker:
                     session.rollback()
             for aid in ka_ids:
                 try:
-                    check = text("SELECT 1 FROM researcher_knowledge_areas WHERE researcher_id = :rid AND area_id = :aid")
-                    exists = session.execute(check, {"rid": person_id, "aid": aid}).scalar()
+                    check = text(
+                        "SELECT 1 FROM researcher_knowledge_areas WHERE researcher_id = :rid AND area_id = :aid"
+                    )
+                    exists = session.execute(
+                        check, {"rid": person_id, "aid": aid}
+                    ).scalar()
                     if not exists:
-                        ins = text("INSERT INTO researcher_knowledge_areas (researcher_id, area_id) VALUES (:rid, :aid)")
+                        ins = text(
+                            "INSERT INTO researcher_knowledge_areas (researcher_id, area_id) VALUES (:rid, :aid)"
+                        )
                         session.execute(ins, {"rid": person_id, "aid": aid})
                 except Exception as e:
-                    logger.warning(f"Failed handling KA {aid} for Researcher {person_id}: {e}")
+                    logger.warning(
+                        f"Failed handling KA {aid} for Researcher {person_id}: {e}"
+                    )
             try:
                 session.commit()
             except Exception:
